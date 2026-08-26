@@ -10,9 +10,16 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[4]))
 
 from research.swing.stock_rs.build_stock_rs import (  # noqa: E402
     assign_rs_status,
+    build_stock_summary,
     calculate_returns,
     calculate_daily_stock_rs,
-    build_stock_summary,
+    EXPECTED_TICKERS,
+    LATEST_INCLUDED_DATE,
+    PRIMARY_COLUMNS,
+    SUMMARY_COLUMNS,
+    START_DATE,
+    VALIDATION_COLUMNS,
+    load_stock_config,
     normalize_yahoo_frame,
     validate_primary_output,
 )
@@ -31,6 +38,11 @@ def test_stock_config_is_exact_fixed_twenty_stock_universe():
     assert mapping["M&M"] == "M&M.NS"
     assert mapping["HDFCBANK"] == "HDFCBANK.NS"
     assert mapping["ULTRACEMCO"] == "ULTRACEMCO.NS"
+
+
+def test_load_stock_config_enforces_the_complete_locked_mapping():
+    config = load_stock_config()
+    assert dict(zip(config["Symbol"], config["Yahoo_Ticker"])) == EXPECTED_TICKERS
 
 
 def test_calculate_returns_uses_exact_adjusted_close_session_shifts():
@@ -175,6 +187,19 @@ def test_normalize_yahoo_frame_rejects_missing_adjusted_close():
         normalize_yahoo_frame(downloaded, "SBIN", "SBIN.NS")
 
 
+@pytest.mark.parametrize("date", ["2021-12-31", "2026-08-26"])
+def test_normalize_yahoo_frame_rejects_dates_outside_locked_window(date):
+    downloaded = pd.DataFrame(
+        {
+            "Close": [100.0],
+            "Adj Close": [99.5],
+        },
+        index=pd.to_datetime([date]),
+    )
+    with pytest.raises(ValueError, match="date outside locked range"):
+        normalize_yahoo_frame(downloaded, "SBIN", "SBIN.NS")
+
+
 def test_validate_primary_output_accepts_a_valid_full_universe_frame():
     result = calculate_daily_stock_rs(
         pd.DataFrame(_synthetic_stock_rs_rows("2026-01-02"))
@@ -248,3 +273,63 @@ def test_validate_primary_output_rejects_invalid_status():
     result.loc[0, "RS_Status"] = "STRONG"
     with pytest.raises(ValueError, match="RS_Status"):
         validate_primary_output(result)
+
+
+@pytest.mark.parametrize("date", ["2021-12-31", "2026-08-26"])
+def test_validate_primary_output_rejects_dates_outside_locked_window(date):
+    result = calculate_daily_stock_rs(
+        pd.DataFrame(_synthetic_stock_rs_rows("2026-01-02"))
+    )
+    result.loc[:, "Date"] = pd.Timestamp(date)
+    with pytest.raises(ValueError, match="date outside locked range"):
+        validate_primary_output(result)
+
+
+def test_validate_primary_output_rejects_status_threshold_mismatch():
+    result = calculate_daily_stock_rs(
+        pd.DataFrame(_synthetic_stock_rs_rows("2026-01-02"))
+    )
+    result.loc[result["Symbol"].eq("S19"), "RS_Status"] = "BELOW_VALID"
+    with pytest.raises(ValueError, match="RS_Status does not match"):
+        validate_primary_output(result)
+
+
+def test_daily_rs_ties_rank_by_symbol_ascending_after_composite_sort():
+    rows = _synthetic_stock_rs_rows("2026-01-02")
+    for row in rows:
+        row["Ret21"] = 1.0
+        row["Ret63"] = 1.0
+        row["Ret126"] = 1.0
+    result = calculate_daily_stock_rs(pd.DataFrame(rows))
+    assert result["Symbol"].tolist() == [f"S{i:02d}" for i in range(20)]
+    assert result["Composite_Rank"].tolist() == list(range(1, 21))
+
+
+def test_committed_artifacts_match_stock_rs_contracts():
+    output_dir = BASE_DIR / "output"
+    daily = pd.read_csv(output_dir / "stock_rs_daily.csv", parse_dates=["Date"])
+    summary = pd.read_csv(output_dir / "stock_rs_summary.csv")
+    validation = pd.read_csv(output_dir / "stock_rs_validation.csv")
+    start = pd.Timestamp(START_DATE)
+
+    assert daily.columns.tolist() == PRIMARY_COLUMNS
+    assert summary.columns.tolist() == SUMMARY_COLUMNS
+    assert validation.columns.tolist() == VALIDATION_COLUMNS
+    assert not daily.empty
+    assert daily["Date"].between(start, LATEST_INCLUDED_DATE).all()
+    assert daily["Symbol"].nunique() == 20
+    assert daily[["Date", "Symbol"]].duplicated().sum() == 0
+    assert daily["Stock_Count"].eq(20).all()
+    assert daily["Is_Full_Universe"].eq(True).all()
+    assert daily.groupby("Date")["Symbol"].nunique().eq(20).all()
+    assert daily.groupby("Date")["Composite_Rank"].apply(
+        lambda values: set(values) == set(range(1, 21))
+    ).all()
+    assert validation["Download_Status"].eq("OK").all()
+    assert len(validation) == 20
+    assert len(summary) == 20
+    assert (
+        summary["Preferred_Days"]
+        + summary["Valid_Days"]
+        + summary["Below_Valid_Days"]
+    ).eq(summary["Valid_Ranked_Days"]).all()

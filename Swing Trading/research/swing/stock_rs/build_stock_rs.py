@@ -2,16 +2,21 @@
 
 from __future__ import annotations
 
+import os
 from pathlib import Path
+import shutil
+import tempfile
 
-import pandas as pd
 import numpy as np
+import pandas as pd
 import yfinance as yf
 
 
 START_DATE = "2022-01-01"
 END_DATE_EXCLUSIVE = "2026-08-26"
 INTERVAL = "1d"
+LATEST_INCLUDED_DATE = pd.Timestamp("2026-08-25")
+START_DATE_TIMESTAMP = pd.Timestamp(START_DATE)
 
 BASE_DIR = Path(__file__).resolve().parent
 CONFIG_PATH = BASE_DIR / "stock_ticker_config.csv"
@@ -208,6 +213,8 @@ def normalize_yahoo_frame(
         raise ValueError("Yahoo response contains invalid dates")
     if dates.duplicated().any():
         raise ValueError("Yahoo response contains duplicate dates")
+    if dates.min() < START_DATE_TIMESTAMP or dates.max() > LATEST_INCLUDED_DATE:
+        raise ValueError("Yahoo response contains a date outside locked range")
 
     normalized = pd.DataFrame(
         {
@@ -311,6 +318,11 @@ def validate_primary_output(frame: pd.DataFrame, expected_count: int = 20) -> No
         raise ValueError("primary output contains duplicate (Date, Symbol) rows")
     if frame[PRIMARY_COLUMNS].isna().any().any():
         raise ValueError("primary output contains missing required values")
+    dates = pd.to_datetime(frame["Date"], errors="coerce")
+    if dates.isna().any():
+        raise ValueError("primary output contains invalid dates")
+    if not dates.between(START_DATE_TIMESTAMP, LATEST_INCLUDED_DATE).all():
+        raise ValueError("primary output contains date outside locked range")
     if not frame["Stock_Count"].eq(expected_count).all():
         raise ValueError("primary output contains an invalid Stock_Count")
     if not frame["Is_Full_Universe"].eq(True).all():
@@ -319,6 +331,9 @@ def validate_primary_output(frame: pd.DataFrame, expected_count: int = 20) -> No
     valid_statuses = {"PREFERRED", "VALID", "BELOW_VALID"}
     if not frame["RS_Status"].isin(valid_statuses).all():
         raise ValueError("primary output contains an invalid RS_Status")
+    expected_statuses = frame["Composite_RS"].map(assign_rs_status)
+    if not frame["RS_Status"].eq(expected_statuses).all():
+        raise ValueError("primary output RS_Status does not match Composite_RS")
 
     for date, group in frame.groupby("Date", sort=False):
         if len(group) != expected_count or group["Symbol"].nunique() != expected_count:
@@ -399,6 +414,49 @@ def _write_csv(frame: pd.DataFrame, path: Path) -> None:
     output.to_csv(path, index=False, lineterminator="\n")
 
 
+def _publish_outputs(
+    daily: pd.DataFrame, summary: pd.DataFrame, validation: pd.DataFrame
+) -> None:
+    """Stage all canonical CSVs and publish them with rollback on failure."""
+
+    OUTPUT_DIR.parent.mkdir(parents=True, exist_ok=True)
+    staging_dir = Path(
+        tempfile.mkdtemp(prefix=".stock_rs_publish_", dir=OUTPUT_DIR.parent)
+    )
+    staged = {
+        "stock_rs_daily.csv": daily[PRIMARY_COLUMNS],
+        "stock_rs_summary.csv": summary[SUMMARY_COLUMNS],
+        "stock_rs_validation.csv": validation[VALIDATION_COLUMNS],
+    }
+    backups: list[tuple[Path, Path]] = []
+    installed: list[Path] = []
+    try:
+        for filename, frame in staged.items():
+            _write_csv(frame, staging_dir / filename)
+
+        OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
+        for filename in staged:
+            target = OUTPUT_DIR / filename
+            backup = staging_dir / f"{filename}.backup"
+            if target.exists():
+                os.replace(target, backup)
+                backups.append((target, backup))
+            os.replace(staging_dir / filename, target)
+            installed.append(target)
+    except Exception:
+        for target in installed:
+            target.unlink(missing_ok=True)
+        for target, backup in reversed(backups):
+            if backup.exists():
+                os.replace(backup, target)
+        raise
+    else:
+        for _, backup in backups:
+            backup.unlink(missing_ok=True)
+    finally:
+        shutil.rmtree(staging_dir, ignore_errors=True)
+
+
 def build_stock_rs_dataset() -> tuple[pd.DataFrame, pd.DataFrame]:
     """Download all configured stocks and build the validated daily dataset."""
 
@@ -434,8 +492,6 @@ def build_stock_rs_dataset() -> tuple[pd.DataFrame, pd.DataFrame]:
 
     validation = pd.DataFrame(validation_rows, columns=VALIDATION_COLUMNS)
     if failures:
-        OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
-        _write_csv(validation, OUTPUT_DIR / "stock_rs_validation.csv")
         details = "; ".join(failures)
         raise RuntimeError(f"stock RS raw-data validation failed: {details}")
     if len(calculated_frames) != len(EXPECTED_TICKERS):
@@ -454,10 +510,7 @@ def run_build() -> tuple[pd.DataFrame, pd.DataFrame, pd.DataFrame]:
 
     daily, validation = build_stock_rs_dataset()
     summary = build_stock_summary(daily)
-    OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
-    _write_csv(daily[PRIMARY_COLUMNS], OUTPUT_DIR / "stock_rs_daily.csv")
-    _write_csv(summary[SUMMARY_COLUMNS], OUTPUT_DIR / "stock_rs_summary.csv")
-    _write_csv(validation[VALIDATION_COLUMNS], OUTPUT_DIR / "stock_rs_validation.csv")
+    _publish_outputs(daily, summary, validation)
 
     print(f"Downloads: {len(validation)}/{len(EXPECTED_TICKERS)} OK")
     for row in validation.to_dict(orient="records"):

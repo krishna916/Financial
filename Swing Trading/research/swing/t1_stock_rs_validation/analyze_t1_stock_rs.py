@@ -504,6 +504,95 @@ def summarize_composite_ranks(joined: pd.DataFrame) -> pd.DataFrame:
     )
 
 
+def summarize_by_entry_year(joined: pd.DataFrame) -> pd.DataFrame:
+    """Recompute both locked binary tests independently for entry years 2023-2026."""
+
+    _require_columns(joined, ["Entry_Date"], "joined stock RS data")
+    frame = _parse_dates(joined, ("Entry_Date",), "joined stock RS data")
+    parts = []
+    for year in (2023, 2024, 2025, 2026):
+        year_frame = frame.loc[frame["Entry_Date"].dt.year.eq(year)]
+        binary = summarize_primary_binary_tests(year_frame)
+        binary.insert(0, "Entry_Year", year)
+        parts.append(binary)
+    return pd.concat(parts, ignore_index=True)
+
+
+def summarize_outlier_robustness(joined: pd.DataFrame) -> pd.DataFrame:
+    """Recompute primary tests after removing only globally largest positive PnLs."""
+
+    _require_columns(
+        joined,
+        ["PnL", "Entry_Date", "Symbol", "Exit_Date"],
+        "joined stock RS data",
+    )
+    positive = joined.loc[joined["PnL"] > 0].sort_values(
+        ["PnL", "Entry_Date", "Symbol", "Exit_Date"],
+        ascending=[False, True, True, True],
+    )
+    parts = []
+    for scenario, count in (
+        ("ALL_TRADES", 0),
+        ("EXCLUDE_TOP_1_POSITIVE_PNL", 1),
+        ("EXCLUDE_TOP_3_POSITIVE_PNL", 3),
+        ("EXCLUDE_TOP_5_POSITIVE_PNL", 5),
+    ):
+        excluded = positive.head(count)
+        excluded_indices = set(excluded.index)
+        retained = joined.loc[~joined.index.isin(excluded_indices)]
+        excluded_text = ";".join(
+            f"{row.Symbol}|{pd.Timestamp(row.Entry_Date):%Y-%m-%d}|{float(row.PnL):.2f}"
+            for row in excluded.itertuples()
+        )
+        binary = summarize_primary_binary_tests(retained)
+        binary.insert(0, "Scenario", scenario)
+        binary.insert(1, "Excluded_Trades", excluded_text)
+        parts.append(binary)
+    return pd.concat(parts, ignore_index=True)
+
+
+def summarize_symbol_status(joined: pd.DataFrame) -> pd.DataFrame:
+    """Summarize every observed Symbol x RS_Status cell, including small cells."""
+
+    _require_columns(joined, ["Symbol", "RS_Status"], "joined stock RS data")
+    if not joined["RS_Status"].isin(ALLOWED_RS_STATUSES).all():
+        raise ValueError("joined stock RS data contains an invalid RS_Status")
+    rows = []
+    for symbol in sorted(joined["Symbol"].unique()):
+        symbol_frame = joined.loc[joined["Symbol"].eq(symbol)]
+        for status in STATUS_ORDER:
+            group = symbol_frame.loc[symbol_frame["RS_Status"].eq(status)]
+            if group.empty:
+                continue
+            rows.append(
+                {
+                    "Symbol": symbol,
+                    "RS_Status": status,
+                    **calculate_trade_metrics(group),
+                    "Small_Sample": len(group) < 5,
+                }
+            )
+    return pd.DataFrame(
+        rows,
+        columns=["Symbol", "RS_Status", *METRIC_COLUMNS, "Small_Sample"],
+    )
+
+
+def summarize_leave_one_symbol_out(joined: pd.DataFrame) -> pd.DataFrame:
+    """Recompute both primary tests after excluding each symbol in turn."""
+
+    _require_columns(joined, ["Symbol"], "joined stock RS data")
+    parts = []
+    for symbol in sorted(joined["Symbol"].unique()):
+        retained = joined.loc[~joined["Symbol"].eq(symbol)]
+        binary = summarize_primary_binary_tests(retained)
+        binary.insert(0, "Excluded_Symbol", symbol)
+        parts.append(binary)
+    if not parts:
+        raise ValueError("joined stock RS data contains no symbols")
+    return pd.concat(parts, ignore_index=True)
+
+
 def prepare_joined_trade_export(joined: pd.DataFrame) -> pd.DataFrame:
     """Select and deterministically sort the auditable trade-level export."""
 
@@ -534,12 +623,29 @@ def run_analysis() -> dict[str, pd.DataFrame]:
     status = summarize_status_groups(joined)
     binary = summarize_primary_binary_tests(joined)
     rank = summarize_composite_ranks(joined)
+    years = summarize_by_entry_year(joined)
+    outliers = summarize_outlier_robustness(joined)
+    symbols = summarize_symbol_status(joined)
+    leave_one = summarize_leave_one_symbol_out(joined)
     OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
     _write_csv(joined_export, OUTPUT_DIR / "t1_stock_rs_joined_trades.csv")
     _write_csv(status, OUTPUT_DIR / "t1_stock_rs_status_summary.csv")
     _write_csv(binary, OUTPUT_DIR / "t1_stock_rs_binary_tests.csv")
     _write_csv(rank, OUTPUT_DIR / "t1_stock_rs_rank_summary.csv")
-    return {"joined": joined, "status": status, "binary": binary, "rank": rank}
+    _write_csv(years, OUTPUT_DIR / "t1_stock_rs_year_summary.csv")
+    _write_csv(outliers, OUTPUT_DIR / "t1_stock_rs_outlier_robustness.csv")
+    _write_csv(symbols, OUTPUT_DIR / "t1_stock_rs_symbol_summary.csv")
+    _write_csv(leave_one, OUTPUT_DIR / "t1_stock_rs_leave_one_symbol_out.csv")
+    return {
+        "joined": joined,
+        "status": status,
+        "binary": binary,
+        "rank": rank,
+        "years": years,
+        "outliers": outliers,
+        "symbols": symbols,
+        "leave_one": leave_one,
+    }
 
 
 if __name__ == "__main__":

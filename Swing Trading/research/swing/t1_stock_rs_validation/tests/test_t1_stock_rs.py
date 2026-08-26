@@ -21,8 +21,12 @@ from research.swing.t1_stock_rs_validation.analyze_t1_stock_rs import (  # noqa:
     load_and_validate_trades,
     prepare_joined_trade_export,
     summarize_composite_ranks,
+    summarize_by_entry_year,
+    summarize_leave_one_symbol_out,
+    summarize_outlier_robustness,
     summarize_primary_binary_tests,
     summarize_status_groups,
+    summarize_symbol_status,
     validate_stock_rs_join,
 )
 
@@ -334,3 +338,90 @@ def test_rank_summary_canonical_output_has_all_diagnostic_ranks():
 
     assert result["Composite_Rank"].tolist() == list(range(1, 21))
     assert result["Trades"].sum() == 218
+
+
+def _synthetic_robustness_frame():
+    return pd.DataFrame(
+        {
+            "Symbol": ["A", "A", "B", "B", "C"],
+            "Entry_Date": pd.to_datetime(
+                ["2023-01-03", "2024-01-03", "2025-01-03", "2026-01-03", "2026-02-03"]
+            ),
+            "Exit_Date": pd.to_datetime(
+                ["2023-01-04", "2024-01-04", "2025-01-04", "2026-01-04", "2026-02-04"]
+            ),
+            "RS_Status": ["PREFERRED", "VALID", "BELOW_VALID", "PREFERRED", "VALID"],
+            "Composite_Rank": [1, 2, 20, 1, 2],
+            "Composite_RS": [90.0, 75.0, 20.0, 95.0, 72.0],
+            "Return_Pct": [1.0, -1.0, 2.0, 3.0, -2.0],
+            "PnL": [100.0, -20.0, 50.0, 200.0, 10.0],
+            "Holding_Days": [1, 2, 3, 4, 5],
+        }
+    )
+
+
+def test_year_summary_uses_only_the_four_locked_entry_years():
+    result = summarize_by_entry_year(_synthetic_robustness_frame())
+
+    assert set(result["Entry_Year"]) <= {2023, 2024, 2025, 2026}
+    assert set(result["Entry_Year"]) == {2023, 2024, 2025, 2026}
+    assert set(result["Comparison"]) == {"PREFERRED_TEST", "VALID_OR_BETTER_TEST"}
+
+
+def test_outlier_robustness_excludes_only_global_positive_pnl_trades():
+    result = summarize_outlier_robustness(_synthetic_robustness_frame())
+
+    assert result["Scenario"].drop_duplicates().tolist() == [
+        "ALL_TRADES",
+        "EXCLUDE_TOP_1_POSITIVE_PNL",
+        "EXCLUDE_TOP_3_POSITIVE_PNL",
+        "EXCLUDE_TOP_5_POSITIVE_PNL",
+    ]
+    top_three = result.loc[
+        result["Scenario"].eq("EXCLUDE_TOP_3_POSITIVE_PNL"), "Excluded_Trades"
+    ].iloc[0]
+    assert "B|2026-01-03|200.00" in top_three
+    assert "A|2023-01-03|100.00" in top_three
+    assert "B|2025-01-03|50.00" in top_three
+    assert "-20.00" not in top_three
+
+
+def test_symbol_status_summary_retains_observed_cells_and_flags_small_samples():
+    result = summarize_symbol_status(_synthetic_robustness_frame())
+
+    assert result[["Symbol", "RS_Status"]].to_records(index=False).tolist() == [
+        ("A", "PREFERRED"),
+        ("A", "VALID"),
+        ("B", "PREFERRED"),
+        ("B", "BELOW_VALID"),
+        ("C", "VALID"),
+    ]
+    assert result["Small_Sample"].all()
+
+
+def test_leave_one_symbol_out_excludes_exactly_the_requested_symbol():
+    result = summarize_leave_one_symbol_out(_synthetic_robustness_frame())
+
+    assert result["Excluded_Symbol"].unique().tolist() == ["A", "B", "C"]
+    assert len(result) == 3 * 2 * 2
+    for excluded in result["Excluded_Symbol"].unique():
+        remaining = _synthetic_robustness_frame().loc[
+            ~_synthetic_robustness_frame()["Symbol"].eq(excluded)
+        ]
+        assert remaining["Symbol"].nunique() == 2
+
+
+def test_robustness_summaries_reconcile_canonical_join():
+    trades = load_and_validate_trades(T1_TRADES_PATH)
+    rs = load_and_validate_stock_rs(STOCK_RS_PATH)
+    joined = join_stock_rs_at_decision_time(trades, rs)
+
+    years = summarize_by_entry_year(joined)
+    outliers = summarize_outlier_robustness(joined)
+    symbols = summarize_symbol_status(joined)
+    leave_one = summarize_leave_one_symbol_out(joined)
+
+    assert set(years["Entry_Year"]) == {2023, 2024, 2025, 2026}
+    assert outliers["Scenario"].nunique() == 4
+    assert len(symbols) >= 20
+    assert leave_one["Excluded_Symbol"].nunique() == 20

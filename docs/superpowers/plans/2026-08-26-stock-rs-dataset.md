@@ -55,8 +55,6 @@ Swing Trading/research/swing/stock_rs/
     └── stock_rs_validation.csv
 ```
 
----
-
 ### Task 1: Lock universe and dependencies
 
 Create `requirements.txt`:
@@ -251,14 +249,7 @@ Require 20/20 `Download_Status == OK`.
 
 ### Task 6: Deterministic invariant tests
 
-Add tests for:
-
-- duplicate Date/Symbol rejection;
-- invalid rank set rejection;
-- Stock_Count != 20 rejection;
-- Is_Full_Universe false rejection;
-- invalid RS_Status rejection;
-- summary status-count reconciliation.
+Add tests for duplicate Date/Symbol rejection, invalid rank set, invalid universe count/flag, invalid status, and summary status-count reconciliation.
 
 Run:
 
@@ -298,15 +289,7 @@ Commit.
 
 Use `superpowers:verification-before-completion`.
 
-Freshly run full tests and production build. Independently verify:
-
-- outputs non-empty;
-- no duplicate Date/Symbol;
-- only full-20 dates;
-- exact ranks 1..20;
-- 20 validation rows and all downloads OK;
-- 20 summary rows;
-- status counts reconcile.
+Freshly run full tests and production build. Independently verify outputs non-empty, no duplicates, full-20 dates only, exact ranks 1..20, 20 validation rows/all downloads OK, 20 summary rows, and status-count reconciliation.
 
 Print raw row counts/date ranges for all stocks and flag vendor/calendar anomalies. Spot-check at least three symbol/dates by independently recomputing Ret21/63/126, same-day percentile ranks, and Composite_RS.
 

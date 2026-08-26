@@ -20,6 +20,7 @@ from research.swing.t1_stock_rs_validation.analyze_t1_stock_rs import (  # noqa:
     load_and_validate_stock_rs,
     load_and_validate_trades,
     prepare_joined_trade_export,
+    summarize_primary_binary_tests,
     summarize_status_groups,
     validate_stock_rs_join,
 )
@@ -263,3 +264,37 @@ def test_joined_trade_export_uses_locked_columns_and_sort_order():
         "Stock_Count", "Is_Full_Universe", "RS_Status",
     ]
     assert result["Symbol"].tolist() == ["ADANIENT", "SBIN"]
+
+
+def test_primary_binary_tests_use_only_the_two_locked_partitions():
+    joined = pd.DataFrame(
+        {
+            "RS_Status": ["PREFERRED", "VALID", "BELOW_VALID"],
+            "Return_Pct": [1.0, 2.0, -1.0],
+            "PnL": [10.0, 20.0, -5.0],
+            "Holding_Days": [3, 4, 5],
+        }
+    )
+
+    result = summarize_primary_binary_tests(joined)
+
+    assert result[["Comparison", "Group"]].to_records(index=False).tolist() == [
+        ("PREFERRED_TEST", "PREFERRED"),
+        ("PREFERRED_TEST", "NON_PREFERRED"),
+        ("VALID_OR_BETTER_TEST", "VALID_OR_BETTER"),
+        ("VALID_OR_BETTER_TEST", "BELOW_VALID"),
+    ]
+    assert result["Trades"].tolist() == [1, 2, 2, 1]
+
+
+def test_primary_binary_tests_reconcile_canonical_join():
+    trades = load_and_validate_trades(T1_TRADES_PATH)
+    rs = load_and_validate_stock_rs(STOCK_RS_PATH)
+    joined = join_stock_rs_at_decision_time(trades, rs)
+
+    result = summarize_primary_binary_tests(joined)
+
+    for comparison in ["PREFERRED_TEST", "VALID_OR_BETTER_TEST"]:
+        part = result.loc[result["Comparison"].eq(comparison)]
+        assert part["Trades"].sum() == 218
+        assert math.isclose(float(part["Total_PnL"].sum()), -4631.32, abs_tol=0.01)

@@ -86,6 +86,16 @@ STOCK_RS_FEATURE_COLUMNS = [
     "RS_Status",
 ]
 STATUS_ORDER = ["PREFERRED", "VALID", "BELOW_VALID"]
+PRIMARY_BINARY_SPECS = [
+    (
+        "PREFERRED_TEST",
+        [("PREFERRED", {"PREFERRED"}), ("NON_PREFERRED", {"VALID", "BELOW_VALID"})],
+    ),
+    (
+        "VALID_OR_BETTER_TEST",
+        [("VALID_OR_BETTER", {"PREFERRED", "VALID"}), ("BELOW_VALID", {"BELOW_VALID"})],
+    ),
+]
 JOINED_TRADE_COLUMNS = [
     "Symbol",
     "Entry_Date",
@@ -441,6 +451,22 @@ def summarize_status_groups(joined: pd.DataFrame) -> pd.DataFrame:
     return pd.DataFrame(rows, columns=["RS_Status", *METRIC_COLUMNS])
 
 
+def summarize_primary_binary_tests(joined: pd.DataFrame) -> pd.DataFrame:
+    """Summarize only the two predeclared binary stock-RS comparisons."""
+
+    _require_columns(joined, ["RS_Status", "Return_Pct", "PnL", "Holding_Days"], "joined stock RS data")
+    if not joined["RS_Status"].isin(ALLOWED_RS_STATUSES).all():
+        raise ValueError("joined stock RS data contains an invalid RS_Status")
+    rows = []
+    for comparison, groups in PRIMARY_BINARY_SPECS:
+        for group_name, statuses in groups:
+            group = joined.loc[joined["RS_Status"].isin(statuses)]
+            rows.append(
+                {"Comparison": comparison, "Group": group_name, **calculate_trade_metrics(group)}
+            )
+    return pd.DataFrame(rows, columns=["Comparison", "Group", *METRIC_COLUMNS])
+
+
 def prepare_joined_trade_export(joined: pd.DataFrame) -> pd.DataFrame:
     """Select and deterministically sort the auditable trade-level export."""
 
@@ -469,10 +495,12 @@ def run_analysis() -> dict[str, pd.DataFrame]:
     validate_stock_rs_join(joined)
     joined_export = prepare_joined_trade_export(joined)
     status = summarize_status_groups(joined)
+    binary = summarize_primary_binary_tests(joined)
     OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
     _write_csv(joined_export, OUTPUT_DIR / "t1_stock_rs_joined_trades.csv")
     _write_csv(status, OUTPUT_DIR / "t1_stock_rs_status_summary.csv")
-    return {"joined": joined, "status": status}
+    _write_csv(binary, OUTPUT_DIR / "t1_stock_rs_binary_tests.csv")
+    return {"joined": joined, "status": status, "binary": binary}
 
 
 if __name__ == "__main__":

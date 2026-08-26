@@ -1,0 +1,10 @@
+Check,Expected,Observed,Pass
+t1_trade_count,218,218,True
+t1_unique_symbols,20,20,True
+t1_winner_count,76,76,True
+t1_total_pnl,-4631.32,-4631.32,True
+breadth_universe_method_point_in_time,POINT_IN_TIME,POINT_IN_TIME,True
+all_breadth_matches_research_safe,218,218,True
+strict_before_entry,True,True,True
+binary_group_reconciliation,218,218,True
+breadth_pct_range,"[0,100]","[0,100]",True

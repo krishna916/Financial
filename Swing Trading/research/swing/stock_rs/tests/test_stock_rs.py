@@ -12,7 +12,9 @@ from research.swing.stock_rs.build_stock_rs import (  # noqa: E402
     assign_rs_status,
     calculate_returns,
     calculate_daily_stock_rs,
+    build_stock_summary,
     normalize_yahoo_frame,
+    validate_primary_output,
 )
 
 
@@ -156,3 +158,78 @@ def test_normalize_yahoo_frame_rejects_missing_adjusted_close():
     )
     with pytest.raises(ValueError, match="Adj Close"):
         normalize_yahoo_frame(downloaded, "SBIN", "SBIN.NS")
+
+
+def test_validate_primary_output_accepts_a_valid_full_universe_frame():
+    result = calculate_daily_stock_rs(
+        pd.DataFrame(_synthetic_stock_rs_rows("2026-01-02"))
+    )
+    validate_primary_output(result)
+
+
+def test_build_stock_summary_reconciles_locked_status_counts():
+    result = calculate_daily_stock_rs(
+        pd.DataFrame(_synthetic_stock_rs_rows("2026-01-02"))
+    )
+    summary = build_stock_summary(result)
+    assert summary.columns.tolist() == [
+        "Symbol",
+        "Yahoo_Ticker",
+        "Valid_Ranked_Days",
+        "Preferred_Days",
+        "Valid_Days",
+        "Below_Valid_Days",
+        "Earliest_Ranked_Date",
+        "Latest_Ranked_Date",
+        "Mean_Composite_RS",
+        "Median_Composite_RS",
+    ]
+    assert len(summary) == 20
+    assert (
+        summary["Preferred_Days"]
+        + summary["Valid_Days"]
+        + summary["Below_Valid_Days"]
+    ).eq(summary["Valid_Ranked_Days"]).all()
+
+
+def test_daily_rs_rejects_duplicate_date_symbol_rows():
+    rows = _synthetic_stock_rs_rows("2026-01-02")
+    rows.append(rows[0].copy())
+    with pytest.raises(ValueError, match="duplicate"):
+        calculate_daily_stock_rs(pd.DataFrame(rows))
+
+
+def test_validate_primary_output_rejects_invalid_rank_set():
+    result = calculate_daily_stock_rs(
+        pd.DataFrame(_synthetic_stock_rs_rows("2026-01-02"))
+    )
+    result.loc[result["Symbol"].eq("S19"), "Composite_Rank"] = 21
+    with pytest.raises(ValueError, match="ranks 1..20"):
+        validate_primary_output(result)
+
+
+def test_validate_primary_output_rejects_invalid_universe_count():
+    result = calculate_daily_stock_rs(
+        pd.DataFrame(_synthetic_stock_rs_rows("2026-01-02"))
+    )
+    result.loc[0, "Stock_Count"] = 19
+    with pytest.raises(ValueError, match="Stock_Count"):
+        validate_primary_output(result)
+
+
+def test_validate_primary_output_rejects_invalid_universe_flag():
+    result = calculate_daily_stock_rs(
+        pd.DataFrame(_synthetic_stock_rs_rows("2026-01-02"))
+    )
+    result.loc[0, "Is_Full_Universe"] = False
+    with pytest.raises(ValueError, match="full-universe"):
+        validate_primary_output(result)
+
+
+def test_validate_primary_output_rejects_invalid_status():
+    result = calculate_daily_stock_rs(
+        pd.DataFrame(_synthetic_stock_rs_rows("2026-01-02"))
+    )
+    result.loc[0, "RS_Status"] = "STRONG"
+    with pytest.raises(ValueError, match="RS_Status"):
+        validate_primary_output(result)

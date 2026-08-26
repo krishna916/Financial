@@ -5,6 +5,7 @@ from __future__ import annotations
 from pathlib import Path
 
 import pandas as pd
+import numpy as np
 import yfinance as yf
 
 
@@ -15,6 +16,71 @@ INTERVAL = "1d"
 BASE_DIR = Path(__file__).resolve().parent
 CONFIG_PATH = BASE_DIR / "stock_ticker_config.csv"
 OUTPUT_DIR = BASE_DIR / "output"
+
+EXPECTED_TICKERS = {
+    "HDFCBANK": "HDFCBANK.NS",
+    "ICICIBANK": "ICICIBANK.NS",
+    "SBIN": "SBIN.NS",
+    "BAJFINANCE": "BAJFINANCE.NS",
+    "TCS": "TCS.NS",
+    "INFY": "INFY.NS",
+    "M&M": "M&M.NS",
+    "MARUTI": "MARUTI.NS",
+    "LT": "LT.NS",
+    "RELIANCE": "RELIANCE.NS",
+    "ONGC": "ONGC.NS",
+    "ITC": "ITC.NS",
+    "HINDUNILVR": "HINDUNILVR.NS",
+    "SUNPHARMA": "SUNPHARMA.NS",
+    "APOLLOHOSP": "APOLLOHOSP.NS",
+    "BHARTIARTL": "BHARTIARTL.NS",
+    "TATASTEEL": "TATASTEEL.NS",
+    "POWERGRID": "POWERGRID.NS",
+    "ADANIENT": "ADANIENT.NS",
+    "ULTRACEMCO": "ULTRACEMCO.NS",
+}
+
+PRIMARY_COLUMNS = [
+    "Date",
+    "Symbol",
+    "Yahoo_Ticker",
+    "Close",
+    "Adj_Close",
+    "Ret21",
+    "Ret63",
+    "Ret126",
+    "RS21_Percentile",
+    "RS63_Percentile",
+    "RS126_Percentile",
+    "Composite_RS",
+    "Composite_Rank",
+    "Stock_Count",
+    "Is_Full_Universe",
+    "RS_Status",
+]
+SUMMARY_COLUMNS = [
+    "Symbol",
+    "Yahoo_Ticker",
+    "Valid_Ranked_Days",
+    "Preferred_Days",
+    "Valid_Days",
+    "Below_Valid_Days",
+    "Earliest_Ranked_Date",
+    "Latest_Ranked_Date",
+    "Mean_Composite_RS",
+    "Median_Composite_RS",
+]
+VALIDATION_COLUMNS = [
+    "Symbol",
+    "Yahoo_Ticker",
+    "Download_Status",
+    "Raw_Rows",
+    "Earliest_Raw_Date",
+    "Latest_Raw_Date",
+    "Duplicate_Date_Count",
+    "Missing_Close_Count",
+    "Missing_Adj_Close_Count",
+]
 
 
 def calculate_returns(frame: pd.DataFrame) -> pd.DataFrame:
@@ -210,3 +276,206 @@ def build_raw_validation_row(
         "Missing_Close_Count": int(frame["Close"].isna().sum()),
         "Missing_Adj_Close_Count": int(frame["Adj_Close"].isna().sum()),
     }
+
+
+def load_stock_config() -> pd.DataFrame:
+    """Load and enforce the exact Issue #5 stock-to-Yahoo mapping."""
+
+    config = pd.read_csv(CONFIG_PATH, dtype=str)
+    if config.columns.tolist() != ["Symbol", "Yahoo_Ticker"]:
+        raise ValueError("stock config must contain exactly Symbol,Yahoo_Ticker")
+    if len(config) != len(EXPECTED_TICKERS):
+        raise ValueError("stock config must contain exactly 20 stocks")
+    if not config["Symbol"].is_unique or not config["Yahoo_Ticker"].is_unique:
+        raise ValueError("stock config symbols and tickers must be unique")
+    observed = dict(zip(config["Symbol"], config["Yahoo_Ticker"]))
+    if observed != EXPECTED_TICKERS:
+        raise ValueError("stock config does not match the locked Issue #5 mapping")
+    return config
+
+
+def validate_primary_output(frame: pd.DataFrame, expected_count: int = 20) -> None:
+    """Fail loudly when the primary output violates a research invariant."""
+
+    missing_columns = set(PRIMARY_COLUMNS).difference(frame.columns)
+    if missing_columns:
+        raise ValueError(
+            "primary output is missing required columns: "
+            + ", ".join(sorted(missing_columns))
+        )
+    if frame.empty:
+        raise ValueError("primary output is empty")
+    if frame.duplicated(["Date", "Symbol"]).any():
+        raise ValueError("primary output contains duplicate (Date, Symbol) rows")
+    if frame[PRIMARY_COLUMNS].isna().any().any():
+        raise ValueError("primary output contains missing required values")
+    if not frame["Stock_Count"].eq(expected_count).all():
+        raise ValueError("primary output contains an invalid Stock_Count")
+    if not frame["Is_Full_Universe"].eq(True).all():
+        raise ValueError("primary output contains a non-full-universe row")
+
+    valid_statuses = {"PREFERRED", "VALID", "BELOW_VALID"}
+    if not frame["RS_Status"].isin(valid_statuses).all():
+        raise ValueError("primary output contains an invalid RS_Status")
+
+    for date, group in frame.groupby("Date", sort=False):
+        if len(group) != expected_count or group["Symbol"].nunique() != expected_count:
+            raise ValueError(f"date {date!r} does not contain the full stock universe")
+        if set(group["Composite_Rank"]) != set(range(1, expected_count + 1)):
+            raise ValueError(f"date {date!r} does not contain ranks 1..{expected_count}")
+
+    for column in [
+        "RS21_Percentile",
+        "RS63_Percentile",
+        "RS126_Percentile",
+        "Composite_RS",
+    ]:
+        values = frame[column].to_numpy(dtype=float)
+        if not ((values > 0.0) & (values <= 100.0)).all():
+            raise ValueError(f"primary output contains an invalid {column}")
+
+    recomputed = (
+        0.30 * frame["RS21_Percentile"]
+        + 0.40 * frame["RS63_Percentile"]
+        + 0.30 * frame["RS126_Percentile"]
+    )
+    if not np.allclose(frame["Composite_RS"], recomputed, rtol=0.0, atol=1e-9):
+        raise ValueError("primary output Composite_RS does not match 30/40/30")
+
+    top_scores = (
+        frame.loc[frame["Composite_Rank"].eq(1)]
+        .set_index("Date")["Composite_RS"]
+        .sort_index()
+    )
+    bottom_scores = (
+        frame.loc[frame["Composite_Rank"].eq(expected_count)]
+        .set_index("Date")["Composite_RS"]
+        .sort_index()
+    )
+    if not (top_scores >= bottom_scores).all():
+        raise ValueError("primary output rank 1 is weaker than rank 20")
+
+
+def build_stock_summary(frame: pd.DataFrame) -> pd.DataFrame:
+    """Build per-symbol ranked-day and status-count summaries."""
+
+    validate_primary_output(frame)
+    rows: list[dict[str, object]] = []
+    for symbol in sorted(frame["Symbol"].unique()):
+        stock = frame.loc[frame["Symbol"].eq(symbol)].copy()
+        tickers = stock["Yahoo_Ticker"].unique()
+        if len(tickers) != 1:
+            raise ValueError(f"symbol {symbol!r} maps to multiple Yahoo tickers")
+        status_counts = stock["RS_Status"].value_counts()
+        row = {
+            "Symbol": symbol,
+            "Yahoo_Ticker": tickers[0],
+            "Valid_Ranked_Days": int(len(stock)),
+            "Preferred_Days": int(status_counts.get("PREFERRED", 0)),
+            "Valid_Days": int(status_counts.get("VALID", 0)),
+            "Below_Valid_Days": int(status_counts.get("BELOW_VALID", 0)),
+            "Earliest_Ranked_Date": _format_date(stock["Date"].min()),
+            "Latest_Ranked_Date": _format_date(stock["Date"].max()),
+            "Mean_Composite_RS": float(stock["Composite_RS"].mean()),
+            "Median_Composite_RS": float(stock["Composite_RS"].median()),
+        }
+        if (
+            row["Preferred_Days"]
+            + row["Valid_Days"]
+            + row["Below_Valid_Days"]
+            != row["Valid_Ranked_Days"]
+        ):
+            raise ValueError(f"summary status counts do not reconcile for {symbol}")
+        rows.append(row)
+    return pd.DataFrame(rows, columns=SUMMARY_COLUMNS)
+
+
+def _write_csv(frame: pd.DataFrame, path: Path) -> None:
+    output = frame.copy()
+    if "Date" in output.columns:
+        output["Date"] = pd.to_datetime(output["Date"]).dt.strftime("%Y-%m-%d")
+    output.to_csv(path, index=False, lineterminator="\n")
+
+
+def build_stock_rs_dataset() -> tuple[pd.DataFrame, pd.DataFrame]:
+    """Download all configured stocks and build the validated daily dataset."""
+
+    config = load_stock_config()
+    calculated_frames: list[pd.DataFrame] = []
+    validation_rows: list[dict[str, object]] = []
+    failures: list[str] = []
+
+    for row in config.to_dict(orient="records"):
+        symbol = row["Symbol"]
+        ticker = row["Yahoo_Ticker"]
+        try:
+            history = download_stock_history(symbol, ticker)
+            validation = build_raw_validation_row(symbol, ticker, history)
+            missing_prices = history[["Close", "Adj_Close"]].isna().any().any()
+            if history.empty or validation["Duplicate_Date_Count"] != 0 or missing_prices:
+                validation["Download_Status"] = "INVALID"
+                failures.append(
+                    f"{symbol}: invalid raw history "
+                    f"(rows={validation['Raw_Rows']}, "
+                    f"missing_close={validation['Missing_Close_Count']}, "
+                    f"missing_adj_close={validation['Missing_Adj_Close_Count']}, "
+                    f"duplicate_dates={validation['Duplicate_Date_Count']})"
+                )
+            else:
+                calculated_frames.append(calculate_returns(history))
+        except Exception as exc:
+            validation = build_raw_validation_row(
+                symbol, ticker, None, download_status="FAILED"
+            )
+            failures.append(f"{symbol}: {type(exc).__name__}: {exc}")
+        validation_rows.append(validation)
+
+    validation = pd.DataFrame(validation_rows, columns=VALIDATION_COLUMNS)
+    if failures:
+        OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
+        _write_csv(validation, OUTPUT_DIR / "stock_rs_validation.csv")
+        details = "; ".join(failures)
+        raise RuntimeError(f"stock RS raw-data validation failed: {details}")
+    if len(calculated_frames) != len(EXPECTED_TICKERS):
+        raise RuntimeError("stock RS build did not produce all 20 stock histories")
+    if not validation["Download_Status"].eq("OK").all():
+        raise RuntimeError("stock RS build requires 20/20 Download_Status == OK")
+
+    combined = pd.concat(calculated_frames, ignore_index=True)
+    daily = calculate_daily_stock_rs(combined, expected_count=len(EXPECTED_TICKERS))
+    validate_primary_output(daily, expected_count=len(EXPECTED_TICKERS))
+    return daily, validation
+
+
+def run_build() -> tuple[pd.DataFrame, pd.DataFrame, pd.DataFrame]:
+    """Build and export all verified stock RS artifacts."""
+
+    daily, validation = build_stock_rs_dataset()
+    summary = build_stock_summary(daily)
+    OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
+    _write_csv(daily[PRIMARY_COLUMNS], OUTPUT_DIR / "stock_rs_daily.csv")
+    _write_csv(summary[SUMMARY_COLUMNS], OUTPUT_DIR / "stock_rs_summary.csv")
+    _write_csv(validation[VALIDATION_COLUMNS], OUTPUT_DIR / "stock_rs_validation.csv")
+
+    print(f"Downloads: {len(validation)}/{len(EXPECTED_TICKERS)} OK")
+    for row in validation.to_dict(orient="records"):
+        print(
+            f"{row['Symbol']}: raw_rows={row['Raw_Rows']} "
+            f"dates={row['Earliest_Raw_Date']}..{row['Latest_Raw_Date']}"
+        )
+    print(
+        f"Ranked dates: {daily['Date'].nunique()}; "
+        f"primary rows: {len(daily)}; "
+        f"ranked range: {_format_date(daily['Date'].min())}.."
+        f"{_format_date(daily['Date'].max())}"
+    )
+    print(f"Generated outputs under {OUTPUT_DIR}")
+    return daily, summary, validation
+
+
+if __name__ == "__main__":
+    try:
+        run_build()
+    except Exception as exc:
+        print(f"ERROR: {type(exc).__name__}: {exc}")
+        raise SystemExit(1) from exc

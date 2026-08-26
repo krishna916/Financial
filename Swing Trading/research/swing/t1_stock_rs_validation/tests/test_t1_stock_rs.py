@@ -17,17 +17,25 @@ from research.swing.t1_stock_rs_validation.analyze_t1_stock_rs import (  # noqa:
     calculate_profit_factor,
     calculate_trade_metrics,
     join_stock_rs_at_decision_time,
+    join_market_regime_strictly_before_entry,
+    join_sector_leadership_strictly_before_entry,
+    load_and_validate_market_regime,
+    load_and_validate_mapping,
+    load_and_validate_sector_data,
     load_and_validate_stock_rs,
     load_and_validate_trades,
     prepare_joined_trade_export,
     summarize_composite_ranks,
     summarize_by_entry_year,
     summarize_leave_one_symbol_out,
+    summarize_market_interactions,
     summarize_outlier_robustness,
     summarize_primary_binary_tests,
     summarize_status_groups,
     summarize_symbol_status,
+    summarize_sector_interactions,
     validate_stock_rs_join,
+    validate_context_joins,
 )
 
 
@@ -425,3 +433,93 @@ def test_robustness_summaries_reconcile_canonical_join():
     assert outliers["Scenario"].nunique() == 4
     assert len(symbols) >= 20
     assert leave_one["Excluded_Symbol"].nunique() == 20
+
+
+def test_market_join_forbids_same_entry_day_context():
+    trades = pd.DataFrame(
+        {"Symbol": ["SBIN"], "Entry_Date": [pd.Timestamp("2026-01-05")]}
+    )
+    market = pd.DataFrame(
+        {
+            "Date": pd.to_datetime(["2026-01-02", "2026-01-05"]),
+            "Regime": ["RISK_ON", "RISK_OFF"],
+        }
+    )
+
+    result = join_market_regime_strictly_before_entry(trades, market)
+
+    assert result.loc[0, "Market_Matched_Date"] == pd.Timestamp("2026-01-02")
+    assert result.loc[0, "Market_Regime"] == "RISK_ON"
+    assert result.loc[0, "Market_Date_Lag_Days"] == 3
+
+
+def test_sector_join_uses_only_prior_full_universe_context():
+    trades = pd.DataFrame(
+        {
+            "Symbol": ["SBIN"],
+            "Entry_Date": [pd.Timestamp("2026-01-05")],
+            "Sector_Key": ["BANK"],
+        }
+    )
+    sector = pd.DataFrame(
+        {
+            "Date": pd.to_datetime(["2026-01-02", "2026-01-05"]),
+            "Sector_Key": ["BANK", "BANK"],
+            "Composite_RS": [70.0, 95.0],
+            "Composite_Rank": [4, 1],
+            "Sector_Count": [11, 10],
+            "Is_Full_Universe": [True, False],
+            "Leadership_Bucket": ["LEADING", "LAGGING"],
+        }
+    )
+
+    result = join_sector_leadership_strictly_before_entry(trades, sector)
+
+    assert result.loc[0, "Sector_Matched_Date"] == pd.Timestamp("2026-01-02")
+    assert result.loc[0, "Leadership_Bucket"] == "LEADING"
+    assert result.loc[0, "Sector_Date_Lag_Days"] == 3
+    assert result.loc[0, "Sector_Count"] == 11
+
+
+def test_context_joins_reconcile_canonical_inputs_with_strict_timing():
+    trades = load_and_validate_trades(T1_TRADES_PATH)
+    rs = load_and_validate_stock_rs(STOCK_RS_PATH)
+    mapping = load_and_validate_mapping()
+    market = load_and_validate_market_regime()
+    sector = load_and_validate_sector_data()
+    joined = join_stock_rs_at_decision_time(trades, rs).merge(
+        mapping.rename(columns={"Stock": "Symbol"}), on="Symbol", how="left", validate="many_to_one"
+    )
+    joined = join_market_regime_strictly_before_entry(joined, market)
+    joined = join_sector_leadership_strictly_before_entry(joined, sector)
+    validate_context_joins(joined)
+
+    assert len(joined) == 218
+    assert (joined["Market_Matched_Date"] < joined["Entry_Date"]).all()
+    assert (joined["Market_Date_Lag_Days"] > 0).all()
+    assert (joined["Sector_Matched_Date"] < joined["Entry_Date"]).all()
+    assert (joined["Sector_Date_Lag_Days"] > 0).all()
+    assert joined["Sector_Count"].eq(11).all()
+    assert set(joined["Market_Regime"]) <= {"RISK_ON", "MIXED", "RISK_OFF"}
+    assert set(joined["Leadership_Bucket"]) <= {
+        "LEADING", "ACCEPTABLE", "WEAK", "LAGGING"
+    }
+
+
+def test_interaction_outputs_have_locked_sections_and_small_sample_flags():
+    frame = _synthetic_robustness_frame().assign(
+        Market_Regime=["RISK_ON", "RISK_ON", "MIXED", "RISK_OFF", "RISK_OFF"],
+        Leadership_Bucket=["LEADING", "ACCEPTABLE", "WEAK", "LAGGING", "LEADING"],
+    )
+
+    market = summarize_market_interactions(frame)
+    sector = summarize_sector_interactions(frame)
+
+    assert set(market["Analysis_Type"]) == {
+        "STATUS_MATRIX", "BINARY_WITHIN_REGIME"
+    }
+    assert set(sector["Analysis_Type"]) == {
+        "STATUS_MATRIX", "BINARY_WITHIN_SECTOR_BUCKET"
+    }
+    assert market["Small_Sample"].all()
+    assert sector["Small_Sample"].all()

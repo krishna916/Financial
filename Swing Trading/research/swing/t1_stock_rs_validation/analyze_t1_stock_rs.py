@@ -26,6 +26,30 @@ EXPECTED_T1_SHA256 = "6b4c2931f23f0e043816d973eba16b5bf3ca57411642d4528de060ea2f
 ALLOWED_RS_STATUSES = {"PREFERRED", "VALID", "BELOW_VALID"}
 ALLOWED_MARKET_REGIMES = {"RISK_ON", "MIXED", "RISK_OFF"}
 ALLOWED_SECTOR_BUCKETS = {"LEADING", "ACCEPTABLE", "WEAK", "LAGGING"}
+MARKET_REGIME_ORDER = ["RISK_ON", "MIXED", "RISK_OFF"]
+SECTOR_BUCKET_ORDER = ["LEADING", "ACCEPTABLE", "WEAK", "LAGGING"]
+LOCKED_STOCK_SECTOR_MAP = {
+    "HDFCBANK": "BANK",
+    "ICICIBANK": "BANK",
+    "SBIN": "BANK",
+    "BAJFINANCE": "FINANCIAL_SERVICES",
+    "TCS": "IT",
+    "INFY": "IT",
+    "M&M": "AUTO",
+    "MARUTI": "AUTO",
+    "LT": "INFRASTRUCTURE",
+    "RELIANCE": "ENERGY",
+    "ONGC": "ENERGY",
+    "ITC": "FMCG",
+    "HINDUNILVR": "FMCG",
+    "SUNPHARMA": "PHARMA",
+    "APOLLOHOSP": "PHARMA",
+    "BHARTIARTL": "INFRASTRUCTURE",
+    "TATASTEEL": "METAL",
+    "POWERGRID": "ENERGY",
+    "ADANIENT": "INFRASTRUCTURE",
+    "ULTRACEMCO": "INFRASTRUCTURE",
+}
 
 EXPECTED_TRADE_COLUMNS = [
     "Symbol",
@@ -110,6 +134,18 @@ JOINED_TRADE_COLUMNS = [
     "RS_Matched_Date",
     "RS_Date_Lag_Days",
     *STOCK_RS_FEATURE_COLUMNS,
+]
+CONTEXT_EXPORT_COLUMNS = [
+    "Market_Matched_Date",
+    "Market_Date_Lag_Days",
+    "Market_Regime",
+    "Sector_Key",
+    "Sector_Matched_Date",
+    "Sector_Date_Lag_Days",
+    "Leadership_Bucket",
+    "Sector_Composite_RS",
+    "Sector_Composite_Rank",
+    "Sector_Count",
 ]
 EXPECTED_T1_SYMBOLS = {
     "HDFCBANK",
@@ -593,12 +629,337 @@ def summarize_leave_one_symbol_out(joined: pd.DataFrame) -> pd.DataFrame:
     return pd.concat(parts, ignore_index=True)
 
 
+def load_and_validate_mapping(
+    path: Path = STOCK_SECTOR_MAP_PATH,
+) -> pd.DataFrame:
+    """Load and enforce the fixed stock-to-sector mapping."""
+
+    path = Path(path)
+    if not path.is_file():
+        raise FileNotFoundError(f"stock-sector mapping is missing: {path}")
+    mapping = pd.read_csv(path, dtype=str).fillna("")
+    if mapping.columns.tolist() != ["Stock", "Sector_Key"]:
+        raise ValueError("stock-sector mapping must contain Stock,Sector_Key")
+    if len(mapping) != 20 or mapping["Stock"].duplicated().any():
+        raise ValueError("stock-sector mapping must contain exactly 20 unique stocks")
+    if dict(zip(mapping["Stock"], mapping["Sector_Key"])) != LOCKED_STOCK_SECTOR_MAP:
+        raise ValueError("stock-sector mapping differs from the locked 20-stock mapping")
+    return mapping
+
+
+def load_and_validate_market_regime(
+    path: Path = MARKET_REGIME_PATH,
+) -> pd.DataFrame:
+    """Load the existing market-regime output without recalculating it."""
+
+    path = Path(path)
+    if not path.is_file():
+        raise FileNotFoundError(f"market regime input is missing: {path}")
+    market = pd.read_csv(path)
+    _require_columns(market, ["Date", "Regime"], "market regime input")
+    market = _parse_dates(market, ("Date",), "market regime input")
+    if market["Regime"].isna().any() or not market["Regime"].isin(ALLOWED_MARKET_REGIMES).all():
+        raise ValueError("market regime input contains an invalid Regime")
+    if market["Date"].duplicated().any():
+        raise ValueError("market regime input contains duplicate dates")
+    return market.sort_values("Date").reset_index(drop=True)
+
+
+def load_and_validate_sector_data(
+    path: Path = SECTOR_RS_PATH,
+) -> pd.DataFrame:
+    """Load existing sector leadership rows for strict, full-universe matching."""
+
+    path = Path(path)
+    if not path.is_file():
+        raise FileNotFoundError(f"sector leadership input is missing: {path}")
+    sector = pd.read_csv(path)
+    required = [
+        "Date",
+        "Sector_Key",
+        "Composite_RS",
+        "Composite_Rank",
+        "Sector_Count",
+        "Leadership_Bucket",
+    ]
+    _require_columns(sector, required, "sector leadership input")
+    sector = _parse_dates(sector, ("Date",), "sector leadership input")
+    for column in ("Composite_RS", "Composite_Rank", "Sector_Count"):
+        sector[column] = pd.to_numeric(sector[column], errors="coerce")
+    if "Is_Full_Universe" in sector.columns:
+        sector["Is_Full_Universe"] = _parse_full_universe_flag(
+            sector["Is_Full_Universe"], "sector leadership input"
+        )
+    else:
+        sector["Is_Full_Universe"] = sector["Sector_Count"].eq(11)
+    if sector[required].isna().any().any() or sector["Is_Full_Universe"].isna().any():
+        raise ValueError("sector leadership input contains null required values")
+    _validate_finite_numeric(
+        sector, ["Composite_RS", "Composite_Rank", "Sector_Count"], "sector leadership input"
+    )
+    if not sector["Leadership_Bucket"].isin(ALLOWED_SECTOR_BUCKETS).all():
+        raise ValueError("sector leadership input contains an invalid Leadership_Bucket")
+    if sector.duplicated(["Date", "Sector_Key"]).any():
+        raise ValueError("sector leadership input contains duplicate (Date, Sector_Key) rows")
+    if not sector["Is_Full_Universe"].eq(sector["Sector_Count"].eq(11)).all():
+        raise ValueError("sector leadership input has an inconsistent full-universe flag")
+    return sector.sort_values(["Date", "Sector_Key"]).reset_index(drop=True)
+
+
+def join_market_regime_strictly_before_entry(
+    trades: pd.DataFrame, market: pd.DataFrame
+) -> pd.DataFrame:
+    """Backward/as-of join market regime observations strictly before entry."""
+
+    _require_columns(trades, ["Entry_Date"], "T1 trade data")
+    _require_columns(market, ["Date", "Regime"], "market regime data")
+    left = _parse_dates(trades, ("Entry_Date",), "T1 trade data").reset_index(drop=True)
+    right = _parse_dates(market, ("Date",), "market regime data")
+    if right["Date"].duplicated().any():
+        raise ValueError("market regime data contains duplicate dates")
+    left["_trade_order"] = np.arange(len(left))
+    matched = pd.merge_asof(
+        left.sort_values("Entry_Date"),
+        right[["Date", "Regime"]].sort_values("Date"),
+        left_on="Entry_Date",
+        right_on="Date",
+        direction="backward",
+        allow_exact_matches=False,
+    )
+    matched = matched.rename(
+        columns={"Date": "Market_Matched_Date", "Regime": "Market_Regime"}
+    )
+    matched["Market_Date_Lag_Days"] = (
+        matched["Entry_Date"] - matched["Market_Matched_Date"]
+    ).dt.days
+    return (
+        matched.sort_values("_trade_order")
+        .drop(columns="_trade_order")
+        .reset_index(drop=True)
+    )
+
+
+def join_sector_leadership_strictly_before_entry(
+    trades: pd.DataFrame, sector: pd.DataFrame
+) -> pd.DataFrame:
+    """Backward/as-of join full-universe sector rows strictly before entry."""
+
+    _require_columns(trades, ["Entry_Date", "Sector_Key"], "T1 trade data")
+    _require_columns(
+        sector,
+        [
+            "Date",
+            "Sector_Key",
+            "Composite_RS",
+            "Composite_Rank",
+            "Sector_Count",
+            "Leadership_Bucket",
+        ],
+        "sector leadership data",
+    )
+    left = _parse_dates(trades, ("Entry_Date",), "T1 trade data").reset_index(drop=True)
+    right = _parse_dates(sector, ("Date",), "sector leadership data")
+    right = right.loc[
+        right["Sector_Count"].eq(11) & right["Is_Full_Universe"].eq(True)
+    ].copy()
+    if right.empty:
+        raise ValueError("sector leadership data has no full-universe rows")
+    if right.duplicated(["Date", "Sector_Key"]).any():
+        raise ValueError("sector leadership data contains duplicate (Date, Sector_Key) rows")
+    left["_trade_order"] = np.arange(len(left))
+    right_columns = {
+        "Composite_RS": "Sector_Composite_RS",
+        "Composite_Rank": "Sector_Composite_Rank",
+        "Sector_Count": "Sector_Count",
+        "Leadership_Bucket": "Leadership_Bucket",
+    }
+    pieces = []
+    for sector_key, trade_group in left.groupby("Sector_Key", sort=False):
+        ordered_trades = trade_group.sort_values("Entry_Date")
+        feature_group = right.loc[
+            right["Sector_Key"].eq(sector_key),
+            ["Date", *right_columns.keys()],
+        ].rename(columns=right_columns)
+        feature_group = feature_group.sort_values("Date")
+        if feature_group.empty:
+            matched = ordered_trades.copy()
+            matched["Sector_Matched_Date"] = pd.NaT
+            for column in right_columns.values():
+                matched[column] = np.nan
+        else:
+            matched = pd.merge_asof(
+                ordered_trades,
+                feature_group,
+                left_on="Entry_Date",
+                right_on="Date",
+                direction="backward",
+                allow_exact_matches=False,
+            ).rename(columns={"Date": "Sector_Matched_Date"})
+        pieces.append(matched)
+    if not pieces:
+        raise ValueError("no trade rows available for sector join")
+    joined = (
+        pd.concat(pieces, ignore_index=True)
+        .sort_values("_trade_order")
+        .reset_index(drop=True)
+    )
+    joined["Sector_Date_Lag_Days"] = (
+        joined["Entry_Date"] - joined["Sector_Matched_Date"]
+    ).dt.days
+    return joined.drop(columns="_trade_order")
+
+
+def validate_context_joins(
+    joined: pd.DataFrame,
+    expected_trade_count: int = 218,
+) -> None:
+    """Fail loudly when market and sector context violate strict timing invariants."""
+
+    required = [
+        "Entry_Date",
+        "Market_Matched_Date",
+        "Market_Date_Lag_Days",
+        "Market_Regime",
+        "Sector_Matched_Date",
+        "Sector_Date_Lag_Days",
+        "Sector_Count",
+        "Leadership_Bucket",
+    ]
+    _require_columns(joined, required, "joined context data")
+    if len(joined) != expected_trade_count:
+        raise ValueError(
+            f"joined context rows must equal {expected_trade_count}, found {len(joined)}"
+        )
+    if joined["Market_Matched_Date"].isna().any() or joined["Sector_Matched_Date"].isna().any():
+        raise ValueError("joined context data contains unmatched trades")
+    if (joined["Market_Matched_Date"] >= joined["Entry_Date"]).any():
+        raise ValueError("market context includes a same-entry-day or future observation")
+    if (joined["Sector_Matched_Date"] >= joined["Entry_Date"]).any():
+        raise ValueError("sector context includes a same-entry-day or future observation")
+    if (joined["Market_Date_Lag_Days"] <= 0).any() or (joined["Sector_Date_Lag_Days"] <= 0).any():
+        raise ValueError("market and sector context lags must be strictly positive")
+    if not joined["Market_Regime"].isin(ALLOWED_MARKET_REGIMES).all():
+        raise ValueError("joined context data contains an invalid market regime")
+    if not joined["Leadership_Bucket"].isin(ALLOWED_SECTOR_BUCKETS).all():
+        raise ValueError("joined context data contains an invalid leadership bucket")
+    if not joined["Sector_Count"].eq(11).all():
+        raise ValueError("joined context data contains a non-full-universe sector match")
+
+
+INTERACTION_COLUMNS = [
+    "Analysis_Type",
+    "Market_Regime",
+    "Leadership_Bucket",
+    "RS_Status",
+    "Comparison",
+    "Group",
+    *METRIC_COLUMNS,
+    "Small_Sample",
+]
+
+
+def summarize_market_interactions(joined: pd.DataFrame) -> pd.DataFrame:
+    """Summarize stock-RS status and locked binary tests within each regime."""
+
+    _require_columns(
+        joined,
+        ["Market_Regime", "RS_Status", "Return_Pct", "PnL", "Holding_Days"],
+        "joined market interaction data",
+    )
+    if not joined["Market_Regime"].isin(ALLOWED_MARKET_REGIMES).all():
+        raise ValueError("joined market interaction data contains an invalid regime")
+    if not joined["RS_Status"].isin(ALLOWED_RS_STATUSES).all():
+        raise ValueError("joined market interaction data contains an invalid RS_Status")
+    rows = []
+    for regime in MARKET_REGIME_ORDER:
+        regime_frame = joined.loc[joined["Market_Regime"].eq(regime)]
+        for status in STATUS_ORDER:
+            group = regime_frame.loc[regime_frame["RS_Status"].eq(status)]
+            rows.append(
+                {
+                    "Analysis_Type": "STATUS_MATRIX",
+                    "Market_Regime": regime,
+                    "Leadership_Bucket": "",
+                    "RS_Status": status,
+                    "Comparison": "",
+                    "Group": status,
+                    **calculate_trade_metrics(group),
+                    "Small_Sample": len(group) < 5,
+                }
+            )
+        binary = summarize_primary_binary_tests(regime_frame)
+        for row in binary.to_dict(orient="records"):
+            rows.append(
+                {
+                    "Analysis_Type": "BINARY_WITHIN_REGIME",
+                    "Market_Regime": regime,
+                    "Leadership_Bucket": "",
+                    "RS_Status": "",
+                    "Comparison": row["Comparison"],
+                    "Group": row["Group"],
+                    **{column: row[column] for column in METRIC_COLUMNS},
+                    "Small_Sample": row["Trades"] < 5,
+                }
+            )
+    return pd.DataFrame(rows, columns=INTERACTION_COLUMNS)
+
+
+def summarize_sector_interactions(joined: pd.DataFrame) -> pd.DataFrame:
+    """Summarize stock-RS status and locked binary tests within each sector bucket."""
+
+    _require_columns(
+        joined,
+        ["Leadership_Bucket", "RS_Status", "Return_Pct", "PnL", "Holding_Days"],
+        "joined sector interaction data",
+    )
+    if not joined["Leadership_Bucket"].isin(ALLOWED_SECTOR_BUCKETS).all():
+        raise ValueError("joined sector interaction data contains an invalid bucket")
+    if not joined["RS_Status"].isin(ALLOWED_RS_STATUSES).all():
+        raise ValueError("joined sector interaction data contains an invalid RS_Status")
+    rows = []
+    for bucket in SECTOR_BUCKET_ORDER:
+        bucket_frame = joined.loc[joined["Leadership_Bucket"].eq(bucket)]
+        for status in STATUS_ORDER:
+            group = bucket_frame.loc[bucket_frame["RS_Status"].eq(status)]
+            rows.append(
+                {
+                    "Analysis_Type": "STATUS_MATRIX",
+                    "Market_Regime": "",
+                    "Leadership_Bucket": bucket,
+                    "RS_Status": status,
+                    "Comparison": "",
+                    "Group": status,
+                    **calculate_trade_metrics(group),
+                    "Small_Sample": len(group) < 5,
+                }
+            )
+        binary = summarize_primary_binary_tests(bucket_frame)
+        for row in binary.to_dict(orient="records"):
+            rows.append(
+                {
+                    "Analysis_Type": "BINARY_WITHIN_SECTOR_BUCKET",
+                    "Market_Regime": "",
+                    "Leadership_Bucket": bucket,
+                    "RS_Status": "",
+                    "Comparison": row["Comparison"],
+                    "Group": row["Group"],
+                    **{column: row[column] for column in METRIC_COLUMNS},
+                    "Small_Sample": row["Trades"] < 5,
+                }
+            )
+    return pd.DataFrame(rows, columns=INTERACTION_COLUMNS)
+
+
 def prepare_joined_trade_export(joined: pd.DataFrame) -> pd.DataFrame:
     """Select and deterministically sort the auditable trade-level export."""
 
     _require_columns(joined, JOINED_TRADE_COLUMNS, "joined stock RS data")
+    export_columns = [
+        *JOINED_TRADE_COLUMNS,
+        *[column for column in CONTEXT_EXPORT_COLUMNS if column in joined.columns],
+    ]
     return (
-        joined[JOINED_TRADE_COLUMNS]
+        joined[export_columns]
         .sort_values(["Entry_Date", "Symbol", "Exit_Date"])
         .reset_index(drop=True)
     )
@@ -627,8 +988,24 @@ def run_analysis() -> dict[str, pd.DataFrame]:
     outliers = summarize_outlier_robustness(joined)
     symbols = summarize_symbol_status(joined)
     leave_one = summarize_leave_one_symbol_out(joined)
+    mapping = load_and_validate_mapping()
+    mapped = joined.merge(
+        mapping.rename(columns={"Stock": "Symbol"}),
+        on="Symbol",
+        how="left",
+        validate="many_to_one",
+    )
+    if mapped["Sector_Key"].isna().any():
+        raise ValueError("some T1 trades have no stock-sector mapping")
+    market = load_and_validate_market_regime()
+    sector = load_and_validate_sector_data()
+    contextual = join_market_regime_strictly_before_entry(mapped, market)
+    contextual = join_sector_leadership_strictly_before_entry(contextual, sector)
+    validate_context_joins(contextual)
+    market_matrix = summarize_market_interactions(contextual)
+    sector_matrix = summarize_sector_interactions(contextual)
     OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
-    _write_csv(joined_export, OUTPUT_DIR / "t1_stock_rs_joined_trades.csv")
+    _write_csv(prepare_joined_trade_export(contextual), OUTPUT_DIR / "t1_stock_rs_joined_trades.csv")
     _write_csv(status, OUTPUT_DIR / "t1_stock_rs_status_summary.csv")
     _write_csv(binary, OUTPUT_DIR / "t1_stock_rs_binary_tests.csv")
     _write_csv(rank, OUTPUT_DIR / "t1_stock_rs_rank_summary.csv")
@@ -636,6 +1013,8 @@ def run_analysis() -> dict[str, pd.DataFrame]:
     _write_csv(outliers, OUTPUT_DIR / "t1_stock_rs_outlier_robustness.csv")
     _write_csv(symbols, OUTPUT_DIR / "t1_stock_rs_symbol_summary.csv")
     _write_csv(leave_one, OUTPUT_DIR / "t1_stock_rs_leave_one_symbol_out.csv")
+    _write_csv(market_matrix, OUTPUT_DIR / "t1_stock_rs_market_matrix.csv")
+    _write_csv(sector_matrix, OUTPUT_DIR / "t1_stock_rs_sector_matrix.csv")
     return {
         "joined": joined,
         "status": status,
@@ -645,6 +1024,9 @@ def run_analysis() -> dict[str, pd.DataFrame]:
         "outliers": outliers,
         "symbols": symbols,
         "leave_one": leave_one,
+        "contextual": contextual,
+        "market_matrix": market_matrix,
+        "sector_matrix": sector_matrix,
     }
 
 

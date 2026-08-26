@@ -152,6 +152,21 @@ def test_normalize_yahoo_frame_handles_one_ticker_multiindex_columns():
     }
 
 
+def test_normalize_yahoo_frame_handles_yahoo_named_date_index():
+    downloaded = pd.DataFrame(
+        {
+            "Close": [100.0, 101.0],
+            "Adj Close": [99.5, 100.5],
+        },
+        index=pd.DatetimeIndex(["2026-01-02", "2026-01-03"], name="Date"),
+    )
+    result = normalize_yahoo_frame(downloaded, "SBIN", "SBIN.NS")
+    assert result.index.name is None
+    assert result["Date"].tolist() == list(
+        pd.to_datetime(["2026-01-02", "2026-01-03"])
+    )
+
+
 def test_normalize_yahoo_frame_rejects_missing_adjusted_close():
     downloaded = pd.DataFrame(
         {"Close": [100.0]}, index=pd.to_datetime(["2026-01-02"])

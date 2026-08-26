@@ -211,13 +211,15 @@ def normalize_yahoo_frame(
 
     normalized = pd.DataFrame(
         {
-            "Date": dates,
+            "Date": dates.to_numpy(),
             "Symbol": symbol,
             "Yahoo_Ticker": ticker,
-            "Close": pd.to_numeric(downloaded[close_column], errors="coerce"),
+            "Close": pd.to_numeric(
+                downloaded[close_column], errors="coerce"
+            ).to_numpy(),
             "Adj_Close": pd.to_numeric(
                 downloaded[adjusted_close_column], errors="coerce"
-            ),
+            ).to_numpy(),
         }
     )
     return normalized.sort_values("Date").reset_index(drop=True)

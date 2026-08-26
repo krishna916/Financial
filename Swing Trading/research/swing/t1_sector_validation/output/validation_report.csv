@@ -1,0 +1,13 @@
+Check,Value
+Input_Trade_Count,218
+Unique_Symbols,20
+Winners,76
+Input_Total_PnL,-4631.32
+Unmatched_Sector_Trades,0
+Future_Sector_Matches,0
+NonFullUniverse_Sector_Matches,0
+Median_Sector_Lag_Days,0.0
+Max_Sector_Lag_Days,18
+Bucket_Count_Reconciles,True
+PnL_Reconciles,True
+Market_Regime_Interaction,COMPLETED

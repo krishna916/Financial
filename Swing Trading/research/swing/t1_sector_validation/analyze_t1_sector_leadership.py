@@ -539,6 +539,14 @@ def _build_market_sector_matrix(joined: pd.DataFrame) -> pd.DataFrame:
 def _validate_joined_input(trades: pd.DataFrame, joined: pd.DataFrame) -> dict[str, object]:
     bucket_counts = joined["Leadership_Bucket"].value_counts().sum() == len(trades)
     pnl_reconciles = math.isclose(float(joined["PnL"].sum()), float(trades["PnL"].sum()), abs_tol=0.01)
+    return_reconciles = math.isclose(
+        float(joined["Return_Pct"].sum()), float(trades["Return_Pct"].sum()), abs_tol=1e-8
+    )
+    long_lag = joined.loc[joined["Sector_Date_Lag_Days"] > 7]
+    long_lag_audit = ";".join(
+        f"{row.Symbol}/{row.Entry_Date:%Y-%m-%d}/{row.Sector_Matched_Date:%Y-%m-%d}/{int(row.Sector_Date_Lag_Days)}d"
+        for row in long_lag.itertuples()
+    )
     return {
         "Input_Trade_Count": len(trades),
         "Unique_Symbols": trades["Symbol"].nunique(),
@@ -549,8 +557,11 @@ def _validate_joined_input(trades: pd.DataFrame, joined: pd.DataFrame) -> dict[s
         "NonFullUniverse_Sector_Matches": int((~joined["Sector_Count"].eq(11)).sum()),
         "Median_Sector_Lag_Days": float(joined["Sector_Date_Lag_Days"].median()),
         "Max_Sector_Lag_Days": int(joined["Sector_Date_Lag_Days"].max()),
+        "Sector_Lag_Over_7_Days_Trade_Count": len(long_lag),
+        "Sector_Lag_Over_7_Days_Trades": long_lag_audit,
         "Bucket_Count_Reconciles": bool(bucket_counts),
         "PnL_Reconciles": bool(pnl_reconciles),
+        "Return_Reconciles": bool(return_reconciles),
         "Market_Regime_Interaction": "COMPLETED",
     }
 
@@ -672,8 +683,12 @@ def run_analysis() -> dict[str, object]:
     validation = _validate_joined_input(trades, joined)
     if validation["Input_Trade_Count"] != 218 or validation["Unmatched_Sector_Trades"] != 0:
         raise ValueError("joined validation failed locked count or unmatched-trade check")
-    if not validation["Bucket_Count_Reconciles"] or not validation["PnL_Reconciles"]:
-        raise ValueError("joined validation failed bucket/PnL reconciliation")
+    if (
+        not validation["Bucket_Count_Reconciles"]
+        or not validation["PnL_Reconciles"]
+        or not validation["Return_Reconciles"]
+    ):
+        raise ValueError("joined validation failed count/PnL/return reconciliation")
 
     OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
     joined_columns = [

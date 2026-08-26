@@ -10,6 +10,7 @@ import pytest
 sys.path.insert(0, str(Path(__file__).resolve().parents[4]))
 
 from research.swing.t1_sector_validation.analyze_t1_sector_leadership import (
+    _validate_joined_input,
     asof_join_sector_leadership,
     calculate_profit_factor,
     calculate_trade_metrics,
@@ -163,3 +164,31 @@ def test_classify_binary_groups_uses_only_the_three_locked_partitions():
         "NON_LAGGING",
         "LAGGING",
     ]
+
+
+def test_validate_joined_input_reports_return_reconciliation_and_long_lags():
+    trades = pd.DataFrame(
+        {
+            "Symbol": ["HDFCBANK", "SBIN"],
+            "Return_Pct": [10.0, -2.0],
+            "PnL": [5.0, -1.0],
+        }
+    )
+    joined = pd.DataFrame(
+        {
+            "Symbol": ["HDFCBANK", "SBIN"],
+            "Entry_Date": pd.to_datetime(["2026-01-09", "2026-01-09"]),
+            "Sector_Matched_Date": pd.to_datetime(["2026-01-01", "2026-01-09"]),
+            "Sector_Date_Lag_Days": [8, 0],
+            "Sector_Count": [11, 11],
+            "Leadership_Bucket": ["LEADING", "LAGGING"],
+            "Return_Pct": [10.0, -2.0],
+            "PnL": [5.0, -1.0],
+        }
+    )
+
+    result = _validate_joined_input(trades, joined)
+
+    assert result["Return_Reconciles"] is True
+    assert result["Sector_Lag_Over_7_Days_Trade_Count"] == 1
+    assert result["Sector_Lag_Over_7_Days_Trades"] == "HDFCBANK/2026-01-09/2026-01-01/8d"

@@ -4,7 +4,9 @@ import numpy as np
 import pandas as pd
 import pytest
 
+import research.swing.sector_leadership.build_sector_leadership as pipeline
 from research.swing.sector_leadership.build_sector_leadership import (
+    add_full_universe_flag,
     assign_leadership_bucket,
     calculate_returns,
     calculate_daily_rs,
@@ -135,12 +137,15 @@ def _valid_primary_output():
             "Composite_RS": [100.0, 75.0, 50.0, 25.0],
             "Composite_Rank": [1, 2, 3, 4],
             "Sector_Count": [4] * 4,
+            "Is_Full_Universe": [False] * 4,
             "Leadership_Bucket": ["LEADING", "LEADING", "LAGGING", "LAGGING"],
         }
     )
 
 
-@pytest.mark.parametrize("mutation", ["duplicate", "bucket", "rank", "missing_return"])
+@pytest.mark.parametrize(
+    "mutation", ["duplicate", "bucket", "rank", "missing_return", "full_flag"]
+)
 def test_validate_primary_output_rejects_broken_invariants(mutation):
     bad = _valid_primary_output()
     if mutation == "duplicate":
@@ -151,6 +156,62 @@ def test_validate_primary_output_rejects_broken_invariants(mutation):
         bad.loc[0, "Composite_Rank"] = 5
     elif mutation == "missing_return":
         bad.loc[0, "Ret21"] = np.nan
+    elif mutation == "full_flag":
+        bad.loc[0, "Is_Full_Universe"] = True
 
     with pytest.raises(ValueError):
         validate_primary_output(bad)
+
+
+def test_partial_universe_date_is_explicitly_identifiable():
+    ranked = rank_and_bucket(
+        pd.DataFrame(
+            {
+                "Date": ["2026-01-01", "2026-01-01"],
+                "Sector_Key": ["BANK", "IT"],
+                "Composite_RS": [100.0, 90.0],
+            }
+        )
+    )
+
+    flagged = add_full_universe_flag(ranked, universe_size=11)
+
+    assert flagged["Sector_Count"].eq(2).all()
+    assert flagged["Is_Full_Universe"].eq(False).all()
+
+    full = add_full_universe_flag(
+        pd.DataFrame({"Sector_Count": [11]}), universe_size=11
+    )
+    assert full["Is_Full_Universe"].eq(True).all()
+
+
+def test_trailing_incomplete_provider_row_is_excluded_without_filling(monkeypatch):
+    dates = pd.bdate_range("2022-01-03", periods=130)
+    downloaded = pd.DataFrame(
+        {
+            "Open": np.arange(130, dtype=float),
+            "High": np.arange(130, dtype=float) + 2.0,
+            "Low": np.arange(130, dtype=float) - 1.0,
+            "Close": np.arange(130, dtype=float) + 100.0,
+            "Adj Close": np.arange(130, dtype=float) + 100.0,
+        },
+        index=dates,
+    )
+    downloaded.loc[dates[-1], "Close"] = np.nan
+
+    monkeypatch.setattr(pipeline.yf, "download", lambda *args, **kwargs: downloaded)
+    monkeypatch.setattr(
+        pipeline,
+        "_check_metadata_identity",
+        lambda index_name, ticker: (True, "metadata test stub"),
+    )
+
+    result, validation = pipeline.download_sector_history(
+        "AUTO", "NIFTY AUTO", "^CNXAUTO"
+    )
+
+    assert validation["Download_Status"] == "OK"
+    assert validation["Raw_Row_Count"] == 130
+    assert validation["Missing_Close_Count"] == 1
+    assert len(result) == 129
+    assert result["Close"].notna().all()

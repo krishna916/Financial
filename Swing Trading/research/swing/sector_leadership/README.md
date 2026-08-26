@@ -60,7 +60,7 @@ Composite_RS = 0.30 * RS21_Percentile
              + 0.30 * RS126_Percentile
 ```
 
-Composite rank is descending, with strongest sector rank `1`. Exact score ties use deterministic `rank(method="first", ascending=False)`, so exported ranks are unique and reproducible. `Sector_Count` is the number of complete valid sectors on that date.
+Composite rank is descending, with strongest sector rank `1`. Exact score ties use deterministic `rank(method="first", ascending=False)`, so exported ranks are unique and reproducible. `Sector_Count` is the number of complete valid sectors on that date. The primary output also includes `Is_Full_Universe`, which is exactly `Sector_Count == 11` for the fixed configured universe.
 
 For `N = Sector_Count`, buckets are applied in this priority order:
 
@@ -73,11 +73,14 @@ WEAK:       all remaining valid ranks
 
 All returns, percentiles, composite scores, ranks, and buckets use only the current date and earlier observations. No future dates, interpolation, synthetic trading sessions, alternate indicators, or tuned thresholds are used.
 
+Sector-index calendars are not identical, so the primary output preserves partial-universe dates rather than silently treating them as full 11-sector observations. Downstream research must use only rows with `Sector_Count == 11` (equivalently, `Is_Full_Universe == True`) for full-universe comparisons. When joining a trade entry date to this feature dataset, use the latest full-universe observation on or before the entry date using strict backward/as-of matching; never use a future observation.
+
 ## Run
 
-From the repository root:
+The repository contains the nested `Swing Trading/` project directory. From the repository root (`Financial/`), enter that directory first:
 
 ```powershell
+Set-Location "Swing Trading"
 python -m pip install -r research/swing/sector_leadership/requirements.txt
 python -m pytest research/swing/sector_leadership/tests/test_sector_leadership.py -v
 python research/swing/sector_leadership/build_sector_leadership.py

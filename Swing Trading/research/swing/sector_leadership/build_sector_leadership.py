@@ -36,6 +36,7 @@ PRIMARY_COLUMNS = [
     "Composite_RS",
     "Composite_Rank",
     "Sector_Count",
+    "Is_Full_Universe",
     "Leadership_Bucket",
 ]
 SUMMARY_COLUMNS = [
@@ -135,6 +136,16 @@ def rank_and_bucket(df: pd.DataFrame) -> pd.DataFrame:
             result["Composite_Rank"], result["Sector_Count"]
         )
     ]
+    return result
+
+
+def add_full_universe_flag(df: pd.DataFrame, universe_size: int) -> pd.DataFrame:
+    """Mark rows whose date contains every configured sector."""
+
+    if universe_size <= 0:
+        raise ValueError("universe_size must be positive")
+    result = df.copy()
+    result["Is_Full_Universe"] = result["Sector_Count"].eq(universe_size)
     return result
 
 
@@ -307,8 +318,19 @@ def download_sector_history(
     validation["Duplicate_Date_Count"] = int(normalized["Date"].duplicated().sum())
 
     invalid_reasons: list[str] = []
+    provider_notes: list[str] = []
     if validation["Missing_Close_Count"]:
-        invalid_reasons.append("missing Close values")
+        missing_positions = normalized.index[normalized["Close"].isna()].tolist()
+        trailing_positions = list(range(missing_positions[0], len(normalized)))
+        if missing_positions == trailing_positions:
+            normalized = normalized.loc[normalized["Close"].notna()].reset_index(drop=True)
+            provider_notes.append(
+                "excluded "
+                f"{validation['Missing_Close_Count']} trailing incomplete row(s) "
+                "with no Close; no value was filled"
+            )
+        else:
+            invalid_reasons.append("missing Close values inside the history")
     if validation["Duplicate_Date_Count"]:
         invalid_reasons.append("duplicate dates")
     if normalized["Date"].min() < pd.Timestamp(START_DATE):
@@ -329,11 +351,11 @@ def download_sector_history(
 
     if invalid_reasons:
         validation["Download_Status"] = "INVALID"
-        validation["Notes"] = "; ".join(invalid_reasons)
+        validation["Notes"] = "; ".join(provider_notes + invalid_reasons)
         return None, validation
 
     validation["Download_Status"] = "OK"
-    validation["Notes"] = identity_note
+    validation["Notes"] = "; ".join(provider_notes + [identity_note])
     return normalized, validation
 
 
@@ -350,9 +372,11 @@ def _load_sector_config(path: Path = CONFIG_PATH) -> pd.DataFrame:
     return config
 
 
-def validate_primary_output(df: pd.DataFrame) -> None:
+def validate_primary_output(df: pd.DataFrame, expected_universe_size: int = 11) -> None:
     """Raise a precise error if any primary-output invariant is violated."""
 
+    if expected_universe_size <= 0:
+        raise ValueError("expected_universe_size must be positive")
     if df.columns.tolist() != PRIMARY_COLUMNS:
         raise ValueError(
             f"primary columns must be {PRIMARY_COLUMNS}, received {df.columns.tolist()}"
@@ -372,6 +396,7 @@ def validate_primary_output(df: pd.DataFrame) -> None:
         "Composite_RS",
         "Composite_Rank",
         "Sector_Count",
+        "Is_Full_Universe",
         "Leadership_Bucket",
     ]
     if df[required_non_null].isna().any().any():
@@ -383,6 +408,12 @@ def validate_primary_output(df: pd.DataFrame) -> None:
         raise ValueError("primary rows are not sorted by Date and Composite_Rank")
     if not set(df["Leadership_Bucket"]).issubset(ALLOWED_BUCKETS):
         raise ValueError("primary output contains an invalid Leadership_Bucket")
+    expected_full_universe = df["Sector_Count"].eq(expected_universe_size)
+    if not df["Is_Full_Universe"].eq(expected_full_universe).all():
+        raise ValueError(
+            "Is_Full_Universe must equal Sector_Count == "
+            f"{expected_universe_size}"
+        )
 
     for date, group in df.groupby("Date", sort=False):
         sector_count = len(group)
@@ -526,12 +557,13 @@ def run_pipeline(base_dir: Path = BASE_DIR) -> tuple[pd.DataFrame, pd.DataFrame,
     combined = pd.concat(scored_parts, ignore_index=True)
     scored = calculate_daily_rs(combined)
     ranked = rank_and_bucket(scored.dropna(subset=["Composite_RS"]).copy())
+    ranked = add_full_universe_flag(ranked, universe_size=len(config))
     ranked["Date"] = pd.to_datetime(ranked["Date"]).dt.strftime("%Y-%m-%d")
     primary = ranked[PRIMARY_COLUMNS].sort_values(
         ["Date", "Composite_Rank"], ascending=[True, True]
     ).reset_index(drop=True)
 
-    validate_primary_output(primary)
+    validate_primary_output(primary, expected_universe_size=len(config))
     validate_sampled_returns(raw_histories, primary)
 
     summary = build_summary(primary)

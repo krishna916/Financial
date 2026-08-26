@@ -467,6 +467,43 @@ def summarize_primary_binary_tests(joined: pd.DataFrame) -> pd.DataFrame:
     return pd.DataFrame(rows, columns=["Comparison", "Group", *METRIC_COLUMNS])
 
 
+def summarize_composite_ranks(joined: pd.DataFrame) -> pd.DataFrame:
+    """Export diagnostic metrics for each exact Composite_Rank from 1 through 20."""
+
+    _require_columns(
+        joined,
+        ["Composite_Rank", "Composite_RS", "Return_Pct", "PnL", "Holding_Days"],
+        "joined stock RS data",
+    )
+    ranks = pd.to_numeric(joined["Composite_Rank"], errors="coerce")
+    if ranks.isna().any() or not ranks.eq(ranks.round()).all() or not ranks.between(1, 20).all():
+        raise ValueError("joined stock RS data contains a Composite_Rank outside 1..20")
+    rows = []
+    for rank in range(1, 21):
+        group = joined.loc[ranks.eq(rank)]
+        rows.append(
+            {
+                "Composite_Rank": rank,
+                **calculate_trade_metrics(group),
+                "Mean_Composite_RS": float(group["Composite_RS"].mean())
+                if not group.empty
+                else math.nan,
+                "Median_Composite_RS": float(group["Composite_RS"].median())
+                if not group.empty
+                else math.nan,
+            }
+        )
+    return pd.DataFrame(
+        rows,
+        columns=[
+            "Composite_Rank",
+            *METRIC_COLUMNS,
+            "Mean_Composite_RS",
+            "Median_Composite_RS",
+        ],
+    )
+
+
 def prepare_joined_trade_export(joined: pd.DataFrame) -> pd.DataFrame:
     """Select and deterministically sort the auditable trade-level export."""
 
@@ -496,11 +533,13 @@ def run_analysis() -> dict[str, pd.DataFrame]:
     joined_export = prepare_joined_trade_export(joined)
     status = summarize_status_groups(joined)
     binary = summarize_primary_binary_tests(joined)
+    rank = summarize_composite_ranks(joined)
     OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
     _write_csv(joined_export, OUTPUT_DIR / "t1_stock_rs_joined_trades.csv")
     _write_csv(status, OUTPUT_DIR / "t1_stock_rs_status_summary.csv")
     _write_csv(binary, OUTPUT_DIR / "t1_stock_rs_binary_tests.csv")
-    return {"joined": joined, "status": status, "binary": binary}
+    _write_csv(rank, OUTPUT_DIR / "t1_stock_rs_rank_summary.csv")
+    return {"joined": joined, "status": status, "binary": binary, "rank": rank}
 
 
 if __name__ == "__main__":

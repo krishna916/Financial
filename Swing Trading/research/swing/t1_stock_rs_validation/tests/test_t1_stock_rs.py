@@ -20,6 +20,7 @@ from research.swing.t1_stock_rs_validation.analyze_t1_stock_rs import (  # noqa:
     load_and_validate_stock_rs,
     load_and_validate_trades,
     prepare_joined_trade_export,
+    summarize_composite_ranks,
     summarize_primary_binary_tests,
     summarize_status_groups,
     validate_stock_rs_join,
@@ -298,3 +299,38 @@ def test_primary_binary_tests_reconcile_canonical_join():
         part = result.loc[result["Comparison"].eq(comparison)]
         assert part["Trades"].sum() == 218
         assert math.isclose(float(part["Total_PnL"].sum()), -4631.32, abs_tol=0.01)
+
+
+def test_rank_summary_preserves_exact_rank_identity_without_bucketing():
+    joined = pd.DataFrame(
+        {
+            "Composite_Rank": [1, 2, 20],
+            "Composite_RS": [99.0, 85.0, 20.0],
+            "Return_Pct": [1.0, 2.0, -1.0],
+            "PnL": [10.0, 20.0, -5.0],
+            "Holding_Days": [3, 4, 5],
+        }
+    )
+
+    result = summarize_composite_ranks(joined)
+
+    assert result["Composite_Rank"].tolist() == list(range(1, 21))
+    assert result.loc[result["Composite_Rank"].eq(1), "Trades"].item() == 1
+    assert result.loc[result["Composite_Rank"].eq(2), "Trades"].item() == 1
+    assert result.loc[result["Composite_Rank"].eq(20), "Trades"].item() == 1
+    assert not result.astype(str).apply(
+        lambda column: column.str.contains(
+            "TOP_5|TOP_8|TOP_10|TOP_HALF|OPTIMAL_CUTOFF", regex=True
+        ).any()
+    ).any()
+
+
+def test_rank_summary_canonical_output_has_all_diagnostic_ranks():
+    trades = load_and_validate_trades(T1_TRADES_PATH)
+    rs = load_and_validate_stock_rs(STOCK_RS_PATH)
+    joined = join_stock_rs_at_decision_time(trades, rs)
+
+    result = summarize_composite_ranks(joined)
+
+    assert result["Composite_Rank"].tolist() == list(range(1, 21))
+    assert result["Trades"].sum() == 218

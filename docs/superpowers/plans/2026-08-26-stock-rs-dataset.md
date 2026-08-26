@@ -4,43 +4,43 @@
 
 **Goal:** Build a reproducible, point-in-time stock relative-strength dataset for the fixed 20-stock T1 basket for later independent validation against the locked 218 T1 trades.
 
-**Architecture:** The Portfolio Advisor has already made the methodology decision that Streak cannot faithfully test this exact feature because Streak can backtest conditions across a basket but does not historically calculate same-date cross-sectional percentile/rank of each stock against the basket. Therefore this plan has no Streak-capability decision step. Luna only implements the approved custom-data path: download the fixed 20 stocks, calculate 21/63/126-session returns, rank all 20 stocks cross-sectionally on complete dates, compute the locked 30/40/30 composite, validate every invariant, and export auditable artifacts. Trade P&L is intentionally absent from this phase.
+**Architecture:** The Portfolio Advisor has already decided that Streak cannot faithfully test this exact feature because the feature requires historical same-date cross-sectional percentile/rank of each stock against the comparison basket. Luna does not decide Streak capability. Luna only implements the approved custom-data path: download the fixed 20 stocks, calculate 21/63/126-session returns, rank all 20 stocks cross-sectionally on complete dates, compute the locked 30/40/30 composite, validate invariants, and export auditable artifacts. T1 outcome data is excluded from this phase.
 
 **Tech Stack:** Python 3.11+, pandas, numpy, yfinance, pytest.
 
 **Spec:** GitHub Issue #5 — `https://github.com/krishna916/Financial/issues/5`
 
-## Portfolio-Advisor Methodology Decision — DO NOT RE-EVALUATE
+## Methodology Decision — LOCKED BY PORTFOLIO ADVISOR
 
 ```text
 Validation source: CUSTOM_REQUIRED
-Reason: the feature is historical same-day cross-sectional RS percentile/rank
-        across a multi-stock comparison universe. Streak does not faithfully
-        expose that feature as a historical strategy condition.
+Why: Streak supports applying/backtesting stock-specific conditions across a basket,
+     but does not provide the historical same-date cross-sectional universe ranking
+     required by this RS hypothesis.
 ```
 
-Luna must **not** research whether Streak can do it, substitute a superficially similar Streak indicator, or make a new methodology choice. The general project rule remains: the Portfolio Advisor prefers Streak whenever Streak can faithfully test the exact hypothesis, and makes that choice before delegating implementation.
+Luna must not research or revisit this decision, substitute RSI/ROC/Momentum/SMA, or make any new methodology choice.
+
+General project rule: **Portfolio Advisor chooses Streak whenever Streak can faithfully represent the exact hypothesis; custom code is used only when it cannot.**
 
 ## Global Constraints
 
-- Data preparation only; do not inspect or join T1 trade returns/P&L.
+- Data preparation only; never inspect/join T1 trade returns or P&L.
 - Fixed universe: exactly the 20 stocks in Issue #5.
-- Historical window: `2022-01-01` through `2026-08-25` inclusive.
+- Historical period: `2022-01-01` through `2026-08-25` inclusive.
 - Daily data; `auto_adjust=False`.
-- Preserve `Close` and `Adj Close`; use `Adj Close` consistently for this proxy RS calculation and document that vendor/corporate-action adjustment is a limitation to be spot-checked before live use.
-- Fixed session lookbacks: 21, 63, 126.
-- Percentiles: `rank(method="average", pct=True, ascending=True) * 100`.
+- Keep `Close` and `Adj Close`; use `Adj Close` consistently for this proxy RS calculation. Document vendor/corporate-action adjustment as a limitation to spot-check before live use.
+- Session lookbacks: 21, 63, 126.
+- Percentile: `rank(method="average", pct=True, ascending=True) * 100`.
 - Composite: `0.30 * RS21 + 0.40 * RS63 + 0.30 * RS126`.
-- Research-safe dates require all 20 stocks.
+- Only dates with all 20 valid stocks are research-safe.
 - Composite rank 1 = strongest.
-- Deterministic exact-score ties: sort `Symbol` ascending, then descending rank with `method="first"`.
+- Exact-score tie handling: sort Symbol ascending, then rank descending with `method="first"`.
 - Statuses: `PREFERRED >= 80`, `VALID >= 70 and < 80`, `BELOW_VALID < 70`.
-- No interpolation, synthetic dates, future rows, alternate securities/indicators, tuning, or result-driven exceptions.
-- Do not modify existing sector-leadership or T1-validation methodology.
+- No interpolation, synthetic trading dates, future rows, alternate securities, extra indicators, tuning, or result-driven exceptions.
+- Do not modify existing sector-leadership/T1 methodology.
 
----
-
-## Target File Map
+## Files
 
 ```text
 Swing Trading/research/swing/stock_rs/
@@ -48,17 +48,18 @@ Swing Trading/research/swing/stock_rs/
 ├── stock_ticker_config.csv
 ├── requirements.txt
 ├── README.md
-├── tests/
-│   └── test_stock_rs.py
+├── tests/test_stock_rs.py
 └── output/
     ├── stock_rs_daily.csv
     ├── stock_rs_summary.csv
     └── stock_rs_validation.csv
 ```
 
+---
+
 ### Task 1: Lock universe and dependencies
 
-Create `requirements.txt` containing only:
+Create `requirements.txt`:
 
 ```text
 yfinance
@@ -93,13 +94,13 @@ ADANIENT,ADANIENT.NS
 ULTRACEMCO,ULTRACEMCO.NS
 ```
 
-Add a pytest asserting exact mapping equality, 20 unique symbols, and 20 unique tickers. Run it, require PASS, commit.
+Write pytest asserting exact mapping equality, exactly 20 unique symbols and tickers. Run, require PASS, commit.
 
 ---
 
-### Task 2: Implement exact session-return and status logic with TDD
+### Task 2: Implement session returns and status rules with TDD
 
-Create `build_stock_rs.py` and tests for:
+Create `build_stock_rs.py` functions:
 
 ```python
 def calculate_returns(frame):
@@ -116,45 +117,43 @@ def assign_rs_status(score):
     return "BELOW_VALID"
 ```
 
-Test exact shift behavior at rows 21/63/126 and boundaries 80/70. Run RED before implementation and GREEN afterward. Commit.
+Before implementation, tests must cover exact session shifts at 21/63/126 and status boundaries 80/70. Verify RED, implement, verify GREEN, commit.
 
 ---
 
-### Task 3: Implement full-20 cross-sectional ranking
+### Task 3: Implement full-20 cross-sectional RS
 
-Implement `calculate_daily_stock_rs(frame, expected_count=20)`.
-
-Required input:
+Implement `calculate_daily_stock_rs(frame, expected_count=20)` over columns:
 
 ```text
 Date,Symbol,Yahoo_Ticker,Close,Adj_Close,Ret21,Ret63,Ret126
 ```
 
-TDD requirements:
+Tests before implementation:
 
-- synthetic 20-stock date with strictly increasing returns: strongest percentile/composite = 100, rank = 1; weakest percentile = 5, rank = 20;
-- 19-stock date is excluded;
-- composite exactly equals 30/40/30 recomputation.
+1. one synthetic 20-stock date with increasing returns → strongest horizon percentile/composite 100 and rank 1; weakest percentile 5 and rank 20;
+2. 19-stock date excluded;
+3. composite exactly equals 30/40/30 calculation.
 
-Implementation order:
+Implementation sequence:
 
-1. drop rows missing any horizon return;
-2. reject duplicate `(Date,Symbol)`;
-3. retain only dates with exactly 20 distinct symbols;
-4. rank each horizon cross-sectionally using `rank(method="average", pct=True, ascending=True)*100`;
-5. compute 30/40/30 Composite_RS;
+1. reject duplicate `(Date,Symbol)`;
+2. drop rows missing any horizon return;
+3. retain dates with exactly 20 distinct symbols;
+4. calculate 21/63/126 percentiles cross-sectionally with the locked percentile rule;
+5. calculate Composite_RS 30/40/30;
 6. deterministic descending Composite_Rank;
 7. set `Stock_Count=20`, `Is_Full_Universe=True`;
 8. assign RS_Status;
 9. sort `Date,Composite_Rank`.
 
-Run tests and commit.
+Run tests, require GREEN, commit.
 
 ---
 
-### Task 4: Implement Yahoo download/normalization
+### Task 4: Yahoo download and normalization
 
-Implement one-ticker-at-a-time download:
+Download each ticker separately:
 
 ```python
 yf.download(
@@ -174,26 +173,26 @@ Normalize to:
 Date,Symbol,Yahoo_Ticker,Close,Adj_Close
 ```
 
-TDD must cover single-level columns, one-ticker MultiIndex columns, and missing `Adj Close` rejection.
+Tests must cover single-level columns, one-ticker MultiIndex, and rejection when `Adj Close` is missing.
 
 Rules:
 
-- require both `Close` and `Adj Close`;
+- require Close and Adj Close;
 - timezone-naive dates;
-- ascending sort;
+- sort ascending;
 - reject duplicate dates;
 - do not forward-fill prices;
-- record missing values; production build fails if usable required prices are missing.
+- record missing values and fail the research-safe build if required prices are missing.
 
-Run tests and commit.
+Run tests, commit.
 
 ---
 
-### Task 5: Build end-to-end outputs
+### Task 5: Build and validate final artifacts
 
-For each configured stock: download → normalize → raw validation → calculate returns → append. If any required stock fails, stop before producing a research-safe primary output.
+For every configured stock: download → normalize → raw validation → calculate returns → append. If any required stock fails, stop before producing research-safe primary output.
 
-After all 20 histories exist, concatenate and run cross-sectional ranking.
+After all 20 histories exist, concatenate and calculate cross-sectional RS.
 
 Validate:
 
@@ -202,15 +201,15 @@ no duplicate (Date,Symbol)
 no missing required values
 all Stock_Count == 20
 all Is_Full_Universe == true
-each date exactly 20 symbols
-ranks exactly 1..20
-all horizon percentiles and Composite_RS in (0,100]
-statuses only PREFERRED/VALID/BELOW_VALID
+each ranked date exactly 20 symbols
+Composite_Rank set exactly 1..20 each date
+percentiles and Composite_RS in (0,100]
+RS_Status only PREFERRED/VALID/BELOW_VALID
 Composite_RS equals 30/40/30 recomputation
-rank 1 score >= rank 20 score on every date
+rank 1 score >= rank 20 score
 ```
 
-Export `stock_rs_daily.csv` columns exactly:
+Export `stock_rs_daily.csv`:
 
 ```text
 Date
@@ -231,15 +230,35 @@ Is_Full_Universe
 RS_Status
 ```
 
-Build `stock_rs_summary.csv` per symbol with valid ranked days, status counts, earliest/latest ranked date, mean/median Composite_RS.
+Export `stock_rs_summary.csv` per symbol:
 
-Build `stock_rs_validation.csv` per symbol with download status, raw rows, earliest/latest raw date, duplicate-date count, missing Close count, missing Adj_Close count.
+```text
+Symbol,Yahoo_Ticker,Valid_Ranked_Days,Preferred_Days,Valid_Days,
+Below_Valid_Days,Earliest_Ranked_Date,Latest_Ranked_Date,
+Mean_Composite_RS,Median_Composite_RS
+```
+
+Export `stock_rs_validation.csv` per symbol:
+
+```text
+Symbol,Yahoo_Ticker,Download_Status,Raw_Rows,Earliest_Raw_Date,
+Latest_Raw_Date,Duplicate_Date_Count,Missing_Close_Count,Missing_Adj_Close_Count
+```
+
+Require 20/20 `Download_Status == OK`.
 
 ---
 
-### Task 6: Add end-to-end invariant tests
+### Task 6: Deterministic invariant tests
 
-Add deterministic tests for duplicate-row rejection, invalid rank set, invalid universe count/flag, invalid status, and summary count reconciliation.
+Add tests for:
+
+- duplicate Date/Symbol rejection;
+- invalid rank set rejection;
+- Stock_Count != 20 rejection;
+- Is_Full_Universe false rejection;
+- invalid RS_Status rejection;
+- summary status-count reconciliation.
 
 Run:
 
@@ -247,30 +266,24 @@ Run:
 python -m pytest "Swing Trading/research/swing/stock_rs/tests/test_stock_rs.py" -v
 ```
 
-Require zero failures and commit.
+Require zero failures, commit.
 
 ---
 
-### Task 7: README and reliability caveats
+### Task 7: README
 
-README must explicitly state:
+README must say explicitly:
 
 ```text
-Streak is preferred whenever it can faithfully express the exact hypothesis.
-For this experiment the Portfolio Advisor already determined Streak cannot
-perform the required historical same-day cross-sectional universe ranking,
-so the custom dataset path was selected before implementation.
+Streak is preferred when it can faithfully express the exact hypothesis.
+For this experiment, the Portfolio Advisor already determined Streak cannot
+perform historical same-day cross-sectional universe ranking, so custom data
+was selected before Luna execution.
 ```
 
-Document methodology and limitations:
+Also document methodology, fixed-20 proxy limitation, Yahoo/vendor/corporate-action differences from Streak/exchange data, requirement to spot-check promising results against trusted data before live deployment, and that no T1 outcome data was used.
 
-- fixed 20-stock universe is a proxy, not final Nifty 500 implementation;
-- Yahoo/yfinance may differ from exchange/broker/Streak histories, including corporate-action adjustments;
-- any promising result should be spot-checked against trusted market/broker data before live use;
-- no T1 outcome data was used;
-- future hypotheses should use Streak when exactly representable.
-
-Document commands:
+Document run commands:
 
 ```bash
 python -m pytest "Swing Trading/research/swing/stock_rs/tests/test_stock_rs.py" -v
@@ -281,33 +294,24 @@ Commit.
 
 ---
 
-### Task 8: Final verification
+### Task 8: Verification and PR
 
 Use `superpowers:verification-before-completion`.
 
-- Run all stock-RS tests fresh; require zero failures.
-- Run production build fresh; require exit 0.
-- Independently assert non-empty outputs, no duplicates, full-20 dates only, ranks 1..20, 20 summary rows, 20 validation rows, all downloads OK, and status-count reconciliation.
-- Print per-stock raw row counts/date ranges and flag anomalies.
-- Spot-check at least three date/symbol combinations by recomputing the horizon returns, same-day percentiles and Composite_RS.
-- Commit outputs only after checks pass.
-- Open PR referencing Issue #5.
+Freshly run full tests and production build. Independently verify:
 
-PR body must include:
+- outputs non-empty;
+- no duplicate Date/Symbol;
+- only full-20 dates;
+- exact ranks 1..20;
+- 20 validation rows and all downloads OK;
+- 20 summary rows;
+- status counts reconcile.
 
-```text
-Portfolio Advisor methodology decision: CUSTOM_REQUIRED
-Test command and exact pass count
-Build command and exit result
-Python/yfinance/pandas versions
-20/20 download success status
-Raw and ranked date ranges
-Primary output row count/ranked-date count
-Any vendor/calendar/corporate-action anomalies
-Generated artifact paths
-Explicit statement: no T1 trade P&L was inspected
-```
+Print raw row counts/date ranges for all stocks and flag vendor/calendar anomalies. Spot-check at least three symbol/dates by independently recomputing Ret21/63/126, same-day percentile ranks, and Composite_RS.
+
+Commit generated outputs only after verification. Open a PR referencing Issue #5 with exact test pass count, build result, Python/yfinance/pandas versions, 20/20 download status, raw/ranked date ranges, output counts, anomalies, artifacts, and explicit statement that no T1 trade P&L was inspected.
 
 ## Completion Rule
 
-Luna's responsibility is implementation and verification only. The Portfolio Advisor retains methodology responsibility, including Streak-vs-custom selection and whether the resulting signal has enough evidence to affect Swing Strategy V1.
+Luna implements and verifies only. The Portfolio Advisor owns methodology decisions, including Streak-vs-custom selection and later interpretation of whether stock RS improves Swing Strategy V1.

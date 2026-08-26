@@ -2,7 +2,7 @@
 
 ## Input Integrity
 
-The fixed normalized input contains **218 trades**, **20 symbols**, and **76 winners**. Total P&L is `-4631.32`. The committed payload is decoded deterministically before analysis and validated against its locked SHA-256 in the repository workflow.
+The fixed normalized input contains **218 trades**, **20 symbols**, and **76 winners**. Total P&L is `-4631.32`. The committed payload is decoded deterministically during loading and validated against its locked SHA-256 and byte-for-byte CSV content.
 
 The sector join matched every trade to the latest full-universe (`Sector_Count == 11`) observation on or before entry. Median sector-date lag was **0.0 calendar days** and maximum lag was **18 days**.
 

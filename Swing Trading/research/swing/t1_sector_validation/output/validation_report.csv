@@ -1,4 +1,5 @@
 Check,Value
+Joined_Trade_Count,218
 Input_Trade_Count,218
 Unique_Symbols,20
 Winners,76
@@ -13,4 +14,16 @@ Sector_Lag_Over_7_Days_Trades,BAJFINANCE/2026-07-31/2026-07-17/14d;APOLLOHOSP/20
 Bucket_Count_Reconciles,True
 PnL_Reconciles,True
 Return_Reconciles,True
+Binary_Count_Reconciles,True
+Binary_PnL_Reconciles,True
+Binary_Return_Reconciles,True
+Binary_LEADING_vs_NON_LEADING_Count_Reconciles,True
+Binary_LEADING_vs_NON_LEADING_PnL_Reconciles,True
+Binary_LEADING_vs_NON_LEADING_Return_Reconciles,True
+Binary_TOP_HALF_vs_LOWER_HALF_Count_Reconciles,True
+Binary_TOP_HALF_vs_LOWER_HALF_PnL_Reconciles,True
+Binary_TOP_HALF_vs_LOWER_HALF_Return_Reconciles,True
+Binary_LAGGING_vs_NON_LAGGING_Count_Reconciles,True
+Binary_LAGGING_vs_NON_LAGGING_PnL_Reconciles,True
+Binary_LAGGING_vs_NON_LAGGING_Return_Reconciles,True
 Market_Regime_Interaction,COMPLETED

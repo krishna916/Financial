@@ -2,6 +2,9 @@
 
 from __future__ import annotations
 
+import base64
+import gzip
+import hashlib
 import math
 from pathlib import Path
 from typing import Iterable
@@ -17,6 +20,7 @@ SECTOR_PATH = BASE_DIR.parent / "sector_leadership" / "output" / "sector_leaders
 MAPPING_PATH = BASE_DIR.parent / "sector_leadership" / "stock_sector_map.csv"
 REGIME_PATH = BASE_DIR.parents[2] / "nifty500_regime_daily.csv"
 OUTPUT_DIR = BASE_DIR / "output"
+EXPECTED_INPUT_SHA256 = "6b4c2931f23f0e043816d973eba16b5bf3ca57411642d4528de060ea2febb1e4"
 
 EXPECTED_TRADE_COLUMNS = [
     "Symbol",
@@ -86,11 +90,32 @@ def _parse_dates(df: pd.DataFrame, columns: Iterable[str], label: str) -> pd.Dat
     return result
 
 
-def load_and_validate_trades(path: Path = INPUT_PATH) -> pd.DataFrame:
+def _decode_fixed_payload(path: Path = PAYLOAD_PATH) -> bytes:
+    if not path.exists():
+        raise FileNotFoundError(f"fixed T1 payload is missing: {path}")
+    try:
+        raw = gzip.decompress(base64.b64decode(path.read_text(encoding="utf-8").strip()))
+    except (ValueError, OSError) as exc:
+        raise ValueError(f"could not decode fixed T1 payload: {path}") from exc
+    digest = hashlib.sha256(raw).hexdigest()
+    if digest != EXPECTED_INPUT_SHA256:
+        raise ValueError(
+            f"fixed T1 payload SHA-256 {digest} does not match expected {EXPECTED_INPUT_SHA256}"
+        )
+    return raw
+
+
+def load_and_validate_trades(
+    path: Path = INPUT_PATH, payload_path: Path | None = PAYLOAD_PATH
+) -> pd.DataFrame:
     """Load the immutable normalized T1 input and enforce its locked invariants."""
 
     if not path.exists():
         raise FileNotFoundError(f"fixed T1 input is missing: {path}")
+    if payload_path is not None:
+        payload = _decode_fixed_payload(payload_path)
+        if path.read_bytes() != payload:
+            raise ValueError(f"T1 input {path} does not match the fixed payload")
     trades = pd.read_csv(path)
     if trades.columns.tolist() != EXPECTED_TRADE_COLUMNS:
         raise ValueError(
@@ -370,6 +395,12 @@ def load_and_validate_regime_data(path: Path = REGIME_PATH) -> pd.DataFrame:
     return regime.sort_values("Date").reset_index(drop=True)
 
 
+def resolve_regime_dependency(path: Path = REGIME_PATH) -> str:
+    """Return the plan's explicit status for the optional regime input."""
+
+    return "COMPLETED" if path.is_file() else "SKIPPED_MISSING_DEPENDENCY"
+
+
 def asof_join_market_regime(trades: pd.DataFrame, regime: pd.DataFrame) -> pd.DataFrame:
     left = trades.copy().reset_index(drop=True)
     left["_trade_order"] = np.arange(len(left))
@@ -536,7 +567,12 @@ def _build_market_sector_matrix(joined: pd.DataFrame) -> pd.DataFrame:
     return pd.DataFrame(rows)
 
 
-def _validate_joined_input(trades: pd.DataFrame, joined: pd.DataFrame) -> dict[str, object]:
+def _validate_joined_input(
+    trades: pd.DataFrame,
+    joined: pd.DataFrame,
+    market_regime_status: str = "COMPLETED",
+) -> dict[str, object]:
+    joined_trade_count = len(joined)
     bucket_counts = joined["Leadership_Bucket"].value_counts().sum() == len(trades)
     pnl_reconciles = math.isclose(float(joined["PnL"].sum()), float(trades["PnL"].sum()), abs_tol=0.01)
     return_reconciles = math.isclose(
@@ -547,7 +583,38 @@ def _validate_joined_input(trades: pd.DataFrame, joined: pd.DataFrame) -> dict[s
         f"{row.Symbol}/{row.Entry_Date:%Y-%m-%d}/{row.Sector_Matched_Date:%Y-%m-%d}/{int(row.Sector_Date_Lag_Days)}d"
         for row in long_lag.itertuples()
     )
+    binary_specs = [
+        ("LEADING_vs_NON_LEADING", "Leading_Group", ("LEADING", "NON_LEADING")),
+        ("TOP_HALF_vs_LOWER_HALF", "Top_Half_Group", ("TOP_HALF", "LOWER_HALF")),
+        ("LAGGING_vs_NON_LAGGING", "Lagging_Group", ("LAGGING", "NON_LAGGING")),
+    ]
+    binary_count_checks = []
+    binary_pnl_checks = []
+    binary_return_checks = []
+    binary_results: dict[str, object] = {}
+    for comparison, column, expected_groups in binary_specs:
+        if column not in joined:
+            raise ValueError(f"joined trades are missing binary group column {column}")
+        groups = set(joined[column])
+        counts_ok = groups == set(expected_groups) and int(joined[column].notna().sum()) == len(trades)
+        pnl_ok = math.isclose(
+            float(joined.groupby(column, dropna=False)["PnL"].sum().sum()),
+            float(trades["PnL"].sum()),
+            abs_tol=0.01,
+        )
+        return_ok = math.isclose(
+            float(joined.groupby(column, dropna=False)["Return_Pct"].sum().sum()),
+            float(trades["Return_Pct"].sum()),
+            abs_tol=1e-8,
+        )
+        binary_count_checks.append(counts_ok)
+        binary_pnl_checks.append(pnl_ok)
+        binary_return_checks.append(return_ok)
+        binary_results[f"Binary_{comparison}_Count_Reconciles"] = bool(counts_ok)
+        binary_results[f"Binary_{comparison}_PnL_Reconciles"] = bool(pnl_ok)
+        binary_results[f"Binary_{comparison}_Return_Reconciles"] = bool(return_ok)
     return {
+        "Joined_Trade_Count": joined_trade_count,
         "Input_Trade_Count": len(trades),
         "Unique_Symbols": trades["Symbol"].nunique(),
         "Winners": int((trades["Return_Pct"] > 0).sum()),
@@ -562,7 +629,11 @@ def _validate_joined_input(trades: pd.DataFrame, joined: pd.DataFrame) -> dict[s
         "Bucket_Count_Reconciles": bool(bucket_counts),
         "PnL_Reconciles": bool(pnl_reconciles),
         "Return_Reconciles": bool(return_reconciles),
-        "Market_Regime_Interaction": "COMPLETED",
+        "Binary_Count_Reconciles": all(binary_count_checks),
+        "Binary_PnL_Reconciles": all(binary_pnl_checks),
+        "Binary_Return_Reconciles": all(binary_return_checks),
+        **binary_results,
+        "Market_Regime_Interaction": market_regime_status,
     }
 
 
@@ -589,6 +660,19 @@ def _write_research_report(
         f"| {row.Comparison_Type} | {row.Market_Regime} | {row.Leadership_Bucket} | {row.Group} | {row.Trades} | {_fmt(row.Win_Rate)} | {_fmt(row.Mean_Return)} |"
         for row in matrix.itertuples()
     ]
+    if validation["Market_Regime_Interaction"] == "COMPLETED":
+        market_text = (
+            "The existing NIFTY 500 daily regime dataset was available, so the "
+            "backward/as-of market-regime join was completed. The complete regime "
+            "× leadership matrix and the predeclared RISK_ON/MIXED + sector TOP_HALF "
+            "comparison are in `output/t1_market_sector_matrix.csv`."
+        )
+    else:
+        market_text = (
+            "The NIFTY 500 daily regime dataset was not present. Market-sector "
+            "interaction was `SKIPPED_MISSING_DEPENDENCY`; no matrix was created."
+        )
+    matrix_text = "\n".join(matrix_lines) if matrix_lines else "(matrix not generated)"
     years_text = "Entry-year output is available in `output/t1_sector_year_summary.csv` for 2023-2026."
     if years.empty:
         years_text = "No requested entry years had matched trades."
@@ -596,7 +680,7 @@ def _write_research_report(
 
 ## Input Integrity
 
-The fixed normalized input contains **{validation['Input_Trade_Count']} trades**, **{validation['Unique_Symbols']} symbols**, and **{validation['Winners']} winners**. Total P&L is `{validation['Input_Total_PnL']:.2f}`. The committed payload is decoded deterministically before analysis and validated against its locked SHA-256 in the repository workflow.
+The fixed normalized input contains **{validation['Input_Trade_Count']} trades**, **{validation['Unique_Symbols']} symbols**, and **{validation['Winners']} winners**. Total P&L is `{validation['Input_Total_PnL']:.2f}`. The committed payload is decoded deterministically during loading and validated against its locked SHA-256 and byte-for-byte CSV content.
 
 The sector join matched every trade to the latest full-universe (`Sector_Count == 11`) observation on or before entry. Median sector-date lag was **{validation['Median_Sector_Lag_Days']:.1f} calendar days** and maximum lag was **{validation['Max_Sector_Lag_Days']} days**.
 
@@ -630,11 +714,11 @@ Outlier variants excluding the largest one, three, and five positive-P&L trades 
 
 ## Market-Regime Interaction
 
-The existing NIFTY 500 daily regime dataset was available, so the backward/as-of market-regime join was completed. The complete regime × leadership matrix and the predeclared RISK_ON/MIXED + sector TOP_HALF comparison are in `output/t1_market_sector_matrix.csv`.
+{market_text}
 
 | Type | Market regime | Sector bucket | Group | Trades | Win rate | Mean return |
 | --- | --- | --- | --- | ---: | ---: | ---: |
-{chr(10).join(matrix_lines)}
+{matrix_text}
 
 ## Limitations
 
@@ -659,11 +743,11 @@ python -m pytest "Swing Trading/research/swing/t1_sector_validation/tests/test_t
 python "Swing Trading/research/swing/t1_sector_validation/analyze_t1_sector_leadership.py"
 ```
 
-The fixed input source is `input/t1_trades.csv.gz.b64`. The analysis requires the deterministic decoded `input/t1_trades.csv`; the payload is decoded from base64/gzip and checked against SHA-256 `6b4c2931f23f0e043816d973eba16b5bf3ca57411642d4528de060ea2febb1e4` before analysis. The normalized input is locked at 218 completed trades across the 20-stock basket.
+The fixed input source is `input/t1_trades.csv.gz.b64`. Loading decodes the payload from base64/gzip, checks SHA-256 `6b4c2931f23f0e043816d973eba16b5bf3ca57411642d4528de060ea2febb1e4`, and requires the decoded bytes to match `input/t1_trades.csv`. The normalized input is locked at 218 completed trades across the 20-stock basket.
 
 Only sector rows with `Sector_Count == 11` (and a consistent `Is_Full_Universe` flag when present) are eligible. Each trade is matched backward/as-of to the latest eligible row satisfying `Sector_Date <= Entry_Date`; the matched date and calendar lag are exported for audit. The stock-to-sector mapping is the precommitted Issue #1 mapping and is checked exactly.
 
-The existing NIFTY 500 regime dataset is also joined backward/as-of when present. No future data, regenerated trade set, additional indicators, or result-driven filters are introduced.
+The existing NIFTY 500 regime dataset is joined backward/as-of when present. If it is absent, the analysis completes with `SKIPPED_MISSING_DEPENDENCY` and does not create a matrix. No future data, regenerated trade set, additional indicators, or result-driven filters are introduced.
 """
     (BASE_DIR / "README.md").write_text(text, encoding="utf-8")
 
@@ -676,19 +760,28 @@ def run_analysis() -> dict[str, object]:
         raise ValueError("some T1 trades have no stock-sector mapping")
     sector = prepare_full_universe_sector_data(load_and_validate_sector_data())
     joined = asof_join_sector_leadership(trades, sector)
-    regime = load_and_validate_regime_data()
-    joined = asof_join_market_regime(joined, regime)
+    market_regime_status = resolve_regime_dependency()
+    if market_regime_status == "COMPLETED":
+        regime = load_and_validate_regime_data()
+        joined = asof_join_market_regime(joined, regime)
     joined = classify_binary_groups(joined)
     joined = joined.sort_values(["Entry_Date", "Symbol", "Exit_Date"]).reset_index(drop=True)
-    validation = _validate_joined_input(trades, joined)
-    if validation["Input_Trade_Count"] != 218 or validation["Unmatched_Sector_Trades"] != 0:
+    validation = _validate_joined_input(trades, joined, market_regime_status)
+    if (
+        validation["Input_Trade_Count"] != 218
+        or validation["Joined_Trade_Count"] != 218
+        or validation["Unmatched_Sector_Trades"] != 0
+    ):
         raise ValueError("joined validation failed locked count or unmatched-trade check")
     if (
         not validation["Bucket_Count_Reconciles"]
         or not validation["PnL_Reconciles"]
         or not validation["Return_Reconciles"]
+        or not validation["Binary_Count_Reconciles"]
+        or not validation["Binary_PnL_Reconciles"]
+        or not validation["Binary_Return_Reconciles"]
     ):
-        raise ValueError("joined validation failed count/PnL/return reconciliation")
+        raise ValueError("joined validation failed count/PnL/return/binary reconciliation")
 
     OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
     joined_columns = [
@@ -705,10 +798,9 @@ def run_analysis() -> dict[str, object]:
         "Composite_Rank",
         "Sector_Count",
         "Leadership_Bucket",
-        "Market_Matched_Date",
-        "Market_Date_Lag_Days",
-        "Market_Regime",
     ]
+    if market_regime_status == "COMPLETED":
+        joined_columns.extend(["Market_Matched_Date", "Market_Date_Lag_Days", "Market_Regime"])
     _write_csv(joined[joined_columns], OUTPUT_DIR / "t1_sector_joined_trades.csv")
     bucket = _build_bucket_summary(joined)
     binary = _build_binary_summary(joined)
@@ -716,14 +808,18 @@ def run_analysis() -> dict[str, object]:
     within = _build_within_sector_summary(joined)
     years = _build_year_summary(joined)
     outliers = _build_outlier_summary(joined)
-    matrix = _build_market_sector_matrix(joined)
+    matrix = _build_market_sector_matrix(joined) if market_regime_status == "COMPLETED" else pd.DataFrame()
     _write_csv(bucket, OUTPUT_DIR / "t1_sector_bucket_summary.csv")
     _write_csv(binary, OUTPUT_DIR / "t1_sector_binary_tests.csv")
     _write_csv(rank, OUTPUT_DIR / "t1_sector_rank_summary.csv")
     _write_csv(within, OUTPUT_DIR / "t1_sector_within_sector_summary.csv")
     _write_csv(years, OUTPUT_DIR / "t1_sector_year_summary.csv")
     _write_csv(outliers, OUTPUT_DIR / "t1_sector_outlier_robustness.csv")
-    _write_csv(matrix, OUTPUT_DIR / "t1_market_sector_matrix.csv")
+    matrix_path = OUTPUT_DIR / "t1_market_sector_matrix.csv"
+    if market_regime_status == "COMPLETED":
+        _write_csv(matrix, matrix_path)
+    elif matrix_path.exists():
+        matrix_path.unlink()
     validation_frame = pd.DataFrame(
         [{"Check": key, "Value": value} for key, value in validation.items()]
     )

@@ -10,12 +10,15 @@ import pytest
 sys.path.insert(0, str(Path(__file__).resolve().parents[4]))
 
 from research.swing.t1_sector_validation.analyze_t1_sector_leadership import (
+    INPUT_PATH,
+    PAYLOAD_PATH,
     _validate_joined_input,
     asof_join_sector_leadership,
     calculate_profit_factor,
     calculate_trade_metrics,
     classify_binary_groups,
     load_and_validate_mapping,
+    resolve_regime_dependency,
     load_and_validate_sector_data,
     load_and_validate_trades,
     prepare_full_universe_sector_data,
@@ -184,6 +187,9 @@ def test_validate_joined_input_reports_return_reconciliation_and_long_lags():
             "Leadership_Bucket": ["LEADING", "LAGGING"],
             "Return_Pct": [10.0, -2.0],
             "PnL": [5.0, -1.0],
+            "Leading_Group": ["LEADING", "NON_LEADING"],
+            "Top_Half_Group": ["TOP_HALF", "LOWER_HALF"],
+            "Lagging_Group": ["NON_LAGGING", "LAGGING"],
         }
     )
 
@@ -192,3 +198,56 @@ def test_validate_joined_input_reports_return_reconciliation_and_long_lags():
     assert result["Return_Reconciles"] is True
     assert result["Sector_Lag_Over_7_Days_Trade_Count"] == 1
     assert result["Sector_Lag_Over_7_Days_Trades"] == "HDFCBANK/2026-01-09/2026-01-01/8d"
+
+
+def test_load_and_validate_trades_rejects_csv_that_differs_from_fixed_payload():
+    tampered = INPUT_PATH.parent / ".t1_trades_tampered_test.csv"
+    raw = INPUT_PATH.read_bytes()
+    original = b"trade_log_2026-08-25_21-37-28.csv"
+    replacement = b"trade_log_2026-08-25_21-37-29.csv"
+    assert original in raw
+    try:
+        tampered.write_bytes(raw.replace(original, replacement, 1))
+        with pytest.raises(ValueError, match="does not match the fixed payload"):
+            load_and_validate_trades(tampered, PAYLOAD_PATH)
+    finally:
+        tampered.unlink(missing_ok=True)
+
+
+def test_resolve_regime_dependency_allows_the_declared_missing_dependency_status():
+    missing = INPUT_PATH.parent / ".missing_regime_test.csv"
+    assert resolve_regime_dependency(missing) == (
+        "SKIPPED_MISSING_DEPENDENCY"
+    )
+
+
+def test_validate_joined_input_reconciles_each_locked_binary_partition():
+    trades = pd.DataFrame(
+        {
+            "Symbol": ["HDFCBANK", "SBIN"],
+            "Return_Pct": [10.0, -2.0],
+            "PnL": [5.0, -1.0],
+        }
+    )
+    joined = pd.DataFrame(
+        {
+            "Symbol": ["HDFCBANK", "SBIN"],
+            "Entry_Date": pd.to_datetime(["2026-01-09", "2026-01-09"]),
+            "Sector_Matched_Date": pd.to_datetime(["2026-01-01", "2026-01-09"]),
+            "Sector_Date_Lag_Days": [8, 0],
+            "Sector_Count": [11, 11],
+            "Leadership_Bucket": ["LEADING", "LAGGING"],
+            "Return_Pct": [10.0, -2.0],
+            "PnL": [5.0, -1.0],
+            "Leading_Group": ["LEADING", "NON_LEADING"],
+            "Top_Half_Group": ["TOP_HALF", "LOWER_HALF"],
+            "Lagging_Group": ["NON_LAGGING", "LAGGING"],
+        }
+    )
+
+    result = _validate_joined_input(trades, joined)
+
+    assert result["Joined_Trade_Count"] == 2
+    assert result["Binary_Count_Reconciles"] is True
+    assert result["Binary_PnL_Reconciles"] is True
+    assert result["Binary_Return_Reconciles"] is True

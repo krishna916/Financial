@@ -1,0 +1,307 @@
+"""Validate the fixed T1 trade sample against point-in-time stock relative strength."""
+
+from __future__ import annotations
+
+import hashlib
+import math
+from pathlib import Path
+from typing import Iterable
+
+import numpy as np
+import pandas as pd
+
+
+BASE_DIR = Path(__file__).resolve().parent
+SWING_RESEARCH_DIR = BASE_DIR.parent
+SWING_TRADING_DIR = BASE_DIR.parents[2]
+
+T1_TRADES_PATH = SWING_RESEARCH_DIR / "t1_sector_validation" / "input" / "t1_trades.csv"
+STOCK_RS_PATH = SWING_RESEARCH_DIR / "stock_rs" / "output" / "stock_rs_daily.csv"
+SECTOR_RS_PATH = SWING_RESEARCH_DIR / "sector_leadership" / "output" / "sector_leadership_daily.csv"
+STOCK_SECTOR_MAP_PATH = SWING_RESEARCH_DIR / "sector_leadership" / "stock_sector_map.csv"
+MARKET_REGIME_PATH = SWING_TRADING_DIR / "nifty500_regime_daily.csv"
+OUTPUT_DIR = BASE_DIR / "output"
+
+EXPECTED_T1_SHA256 = "6b4c2931f23f0e043816d973eba16b5bf3ca57411642d4528de060ea2febb1e4"
+ALLOWED_RS_STATUSES = {"PREFERRED", "VALID", "BELOW_VALID"}
+ALLOWED_MARKET_REGIMES = {"RISK_ON", "MIXED", "RISK_OFF"}
+ALLOWED_SECTOR_BUCKETS = {"LEADING", "ACCEPTABLE", "WEAK", "LAGGING"}
+
+EXPECTED_TRADE_COLUMNS = [
+    "Symbol",
+    "Entry_Date",
+    "Exit_Date",
+    "Entry_Price",
+    "Exit_Price",
+    "Qty",
+    "Return_Pct",
+    "PnL",
+    "Holding_Days",
+    "Source_Log",
+]
+STOCK_RS_REQUIRED_COLUMNS = [
+    "Date",
+    "Symbol",
+    "Yahoo_Ticker",
+    "Close",
+    "Adj_Close",
+    "Ret21",
+    "Ret63",
+    "Ret126",
+    "RS21_Percentile",
+    "RS63_Percentile",
+    "RS126_Percentile",
+    "Composite_RS",
+    "Composite_Rank",
+    "Stock_Count",
+    "Is_Full_Universe",
+    "RS_Status",
+]
+METRIC_COLUMNS = [
+    "Trades",
+    "Winners",
+    "Losers",
+    "Win_Rate",
+    "Mean_Return",
+    "Median_Return",
+    "Average_Winner",
+    "Average_Loser",
+    "Payoff_Ratio",
+    "Return_Profit_Factor",
+    "PnL_Profit_Factor",
+    "Total_PnL",
+    "Median_Holding_Days",
+]
+EXPECTED_T1_SYMBOLS = {
+    "HDFCBANK",
+    "ICICIBANK",
+    "SBIN",
+    "BAJFINANCE",
+    "TCS",
+    "INFY",
+    "M&M",
+    "MARUTI",
+    "LT",
+    "RELIANCE",
+    "ONGC",
+    "ITC",
+    "HINDUNILVR",
+    "SUNPHARMA",
+    "APOLLOHOSP",
+    "BHARTIARTL",
+    "TATASTEEL",
+    "POWERGRID",
+    "ADANIENT",
+    "ULTRACEMCO",
+}
+
+
+def _require_columns(frame: pd.DataFrame, required: Iterable[str], label: str) -> None:
+    missing = [column for column in required if column not in frame.columns]
+    if missing:
+        raise ValueError(f"{label} is missing required columns: {missing}")
+
+
+def _parse_dates(
+    frame: pd.DataFrame, columns: Iterable[str], label: str
+) -> pd.DataFrame:
+    result = frame.copy()
+    for column in columns:
+        result[column] = pd.to_datetime(result[column], errors="coerce")
+        if result[column].isna().any():
+            raise ValueError(f"{label} has invalid or missing {column} values")
+    return result
+
+
+def _parse_full_universe_flag(series: pd.Series, label: str) -> pd.Series:
+    if pd.api.types.is_bool_dtype(series):
+        return series.astype(bool)
+    normalized = series.astype("string").str.strip().str.lower()
+    if normalized.isna().any() or not normalized.isin({"true", "false"}).all():
+        raise ValueError(f"{label} contains invalid Is_Full_Universe values")
+    return normalized.eq("true")
+
+
+def _validate_finite_numeric(
+    frame: pd.DataFrame, columns: Iterable[str], label: str
+) -> None:
+    values = frame[list(columns)].to_numpy(dtype=float)
+    if not np.isfinite(values).all():
+        raise ValueError(f"{label} contains invalid numeric required values")
+
+
+def load_and_validate_trades(path: Path = T1_TRADES_PATH) -> pd.DataFrame:
+    """Load the immutable normalized T1 input and enforce locked invariants."""
+
+    path = Path(path)
+    if not path.is_file():
+        raise FileNotFoundError(f"fixed T1 input is missing: {path}")
+    raw = path.read_bytes()
+    if path.resolve() == T1_TRADES_PATH.resolve():
+        digest = hashlib.sha256(raw).hexdigest()
+        if digest != EXPECTED_T1_SHA256:
+            raise ValueError(
+                f"T1 input SHA-256 {digest} does not match expected {EXPECTED_T1_SHA256}"
+            )
+
+    trades = pd.read_csv(path)
+    if trades.columns.tolist() != EXPECTED_TRADE_COLUMNS:
+        raise ValueError(
+            f"T1 input columns must be {EXPECTED_TRADE_COLUMNS}, "
+            f"received {trades.columns.tolist()}"
+        )
+    trades = _parse_dates(trades, ("Entry_Date", "Exit_Date"), "T1 input")
+    numeric_columns = (
+        "Entry_Price",
+        "Exit_Price",
+        "Qty",
+        "Return_Pct",
+        "PnL",
+        "Holding_Days",
+    )
+    for column in numeric_columns:
+        trades[column] = pd.to_numeric(trades[column], errors="coerce")
+    if trades[EXPECTED_TRADE_COLUMNS].isna().any().any():
+        raise ValueError("T1 input contains null required fields")
+    _validate_finite_numeric(trades, numeric_columns, "T1 input")
+    duplicate_key = [
+        "Symbol",
+        "Entry_Date",
+        "Exit_Date",
+        "Entry_Price",
+        "Exit_Price",
+        "Qty",
+    ]
+    if trades.duplicated(duplicate_key).any():
+        raise ValueError("T1 input contains duplicate normalized trade keys")
+    if len(trades) != 218:
+        raise ValueError(f"T1 input must contain 218 trades, found {len(trades)}")
+    if set(trades["Symbol"]) != EXPECTED_T1_SYMBOLS:
+        raise ValueError("T1 input symbols do not match the locked 20-stock basket")
+    if (trades["Entry_Date"] > trades["Exit_Date"]).any():
+        raise ValueError("T1 input contains Entry_Date after Exit_Date")
+    if (trades["Qty"] <= 0).any():
+        raise ValueError("T1 input contains non-positive Qty")
+    if int((trades["Return_Pct"] > 0).sum()) != 76:
+        raise ValueError("T1 input winner count is not 76")
+    if not math.isclose(float(trades["PnL"].sum()), -4631.32, abs_tol=0.01):
+        raise ValueError("T1 input total PnL does not equal -4631.32")
+    if not math.isclose(
+        float(trades["Return_Pct"].mean()), -0.0548680341, abs_tol=1e-8
+    ):
+        raise ValueError("T1 input mean Return_Pct does not match the locked aggregate")
+    return trades
+
+
+def load_and_validate_stock_rs(path: Path = STOCK_RS_PATH) -> pd.DataFrame:
+    """Load the merged stock-RS output and reject unsafe or malformed rows."""
+
+    path = Path(path)
+    if not path.is_file():
+        raise FileNotFoundError(f"stock RS input is missing: {path}")
+    stock_rs = pd.read_csv(path)
+    _require_columns(stock_rs, STOCK_RS_REQUIRED_COLUMNS, "stock RS input")
+    stock_rs = _parse_dates(stock_rs, ("Date",), "stock RS input")
+    numeric_columns = [
+        "Close",
+        "Adj_Close",
+        "Ret21",
+        "Ret63",
+        "Ret126",
+        "RS21_Percentile",
+        "RS63_Percentile",
+        "RS126_Percentile",
+        "Composite_RS",
+        "Composite_Rank",
+        "Stock_Count",
+    ]
+    for column in numeric_columns:
+        stock_rs[column] = pd.to_numeric(stock_rs[column], errors="coerce")
+    stock_rs["Is_Full_Universe"] = _parse_full_universe_flag(
+        stock_rs["Is_Full_Universe"], "stock RS input"
+    )
+    required = STOCK_RS_REQUIRED_COLUMNS
+    if stock_rs[required].isna().any().any():
+        raise ValueError("stock RS input contains null required values")
+    _validate_finite_numeric(stock_rs, numeric_columns, "stock RS input")
+    if stock_rs.duplicated(["Date", "Symbol"]).any():
+        raise ValueError("stock RS input contains duplicate (Date, Symbol) rows")
+    if set(stock_rs["Symbol"]) != EXPECTED_T1_SYMBOLS:
+        raise ValueError("stock RS input symbols do not match the locked 20-stock basket")
+    if not stock_rs["Stock_Count"].eq(20).all():
+        raise ValueError("stock RS input contains a non-20 Stock_Count row")
+    if not stock_rs["Is_Full_Universe"].eq(True).all():
+        raise ValueError("stock RS input contains a non-full-universe row")
+    if not stock_rs["Composite_Rank"].between(1, 20).all():
+        raise ValueError("stock RS input contains a Composite_Rank outside 1..20")
+    if not stock_rs["RS_Status"].isin(ALLOWED_RS_STATUSES).all():
+        raise ValueError("stock RS input contains an invalid RS_Status")
+    expected_status = stock_rs["Composite_RS"].map(
+        lambda score: "PREFERRED"
+        if score >= 80.0
+        else "VALID"
+        if score >= 70.0
+        else "BELOW_VALID"
+    )
+    if not stock_rs["RS_Status"].eq(expected_status).all():
+        raise ValueError("stock RS input RS_Status does not match Composite_RS")
+    for date, group in stock_rs.groupby("Date", sort=False):
+        if len(group) != 20 or set(group["Composite_Rank"]) != set(range(1, 21)):
+            raise ValueError(
+                f"stock RS date {date!s} does not contain the complete ranks 1..20"
+            )
+    return stock_rs.sort_values(["Date", "Composite_Rank"]).reset_index(drop=True)
+
+
+def calculate_profit_factor(values: pd.Series) -> float:
+    """Calculate positive sum divided by the absolute non-positive sum."""
+
+    numeric = pd.to_numeric(values, errors="coerce").dropna()
+    positive = float(numeric.loc[numeric > 0].sum())
+    non_positive = float(numeric.loc[numeric <= 0].sum())
+    if non_positive == 0:
+        return math.inf if positive > 0 else math.nan
+    if positive == 0:
+        return 0.0
+    return positive / abs(non_positive)
+
+
+def _payoff_ratio(average_winner: float, average_loser: float) -> float:
+    if math.isnan(average_loser):
+        return math.inf if not math.isnan(average_winner) else math.nan
+    if average_loser == 0:
+        return math.nan
+    if math.isnan(average_winner):
+        return 0.0
+    return average_winner / abs(average_loser)
+
+
+def calculate_trade_metrics(
+    frame: pd.DataFrame,
+) -> dict[str, float | int]:
+    """Return the locked return, PnL, and holding-period metrics."""
+
+    _require_columns(frame, ["Return_Pct", "PnL", "Holding_Days"], "trade data")
+    returns = pd.to_numeric(frame["Return_Pct"], errors="coerce")
+    pnl = pd.to_numeric(frame["PnL"], errors="coerce")
+    holding = pd.to_numeric(frame["Holding_Days"], errors="coerce")
+    count = len(frame)
+    winners = returns.loc[returns > 0]
+    losers = returns.loc[returns <= 0]
+    average_winner = float(winners.mean()) if not winners.empty else math.nan
+    average_loser = float(losers.mean()) if not losers.empty else math.nan
+    return {
+        "Trades": count,
+        "Winners": int(len(winners)),
+        "Losers": int(len(losers)),
+        "Win_Rate": float(len(winners) / count * 100.0) if count else math.nan,
+        "Mean_Return": float(returns.mean()) if count else math.nan,
+        "Median_Return": float(returns.median()) if count else math.nan,
+        "Average_Winner": average_winner,
+        "Average_Loser": average_loser,
+        "Payoff_Ratio": _payoff_ratio(average_winner, average_loser),
+        "Return_Profit_Factor": calculate_profit_factor(returns),
+        "PnL_Profit_Factor": calculate_profit_factor(pnl),
+        "Total_PnL": float(pnl.sum()) if count else 0.0,
+        "Median_Holding_Days": float(holding.median()) if count else math.nan,
+    }

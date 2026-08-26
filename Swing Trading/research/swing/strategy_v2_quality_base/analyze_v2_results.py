@@ -346,7 +346,7 @@ def breadth_summary(setup: pd.DataFrame, practical: pd.DataFrame) -> pd.DataFram
     if "Regime" not in setup.columns:
         return pd.DataFrame()
     rows = []
-    for regime in sorted(setup["Regime"].dropna().astype(str)):
+    for regime in sorted(set(setup["Regime"].dropna().astype(str))):
         setup_regime = setup.loc[setup["Regime"].eq(regime)]
         practical_regime = practical.loc[practical["Regime"].eq(regime)]
         rows.append(

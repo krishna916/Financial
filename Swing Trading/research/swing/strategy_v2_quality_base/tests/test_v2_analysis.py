@@ -9,6 +9,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 from analyze_v2_results import (  # noqa: E402
     attach_prior_breadth,
     evaluate_gates,
+    breadth_summary,
     safe_profit_factor,
     simulate_practical_trade,
     simulate_setup_quality_trade,
@@ -140,6 +141,22 @@ def test_breadth_join_forbids_equal_entry_date():
     assert joined.loc[0, "Breadth_Matched_Date"] == pd.Timestamp("2023-08-09")
     assert joined.loc[0, "Regime"] == "NORMAL"
     assert joined.loc[0, "Breadth_Matched_Date"] < joined.loc[0, "Entry_Date"]
+
+
+def test_breadth_summary_has_one_row_per_regime():
+    setup = pd.DataFrame(
+        {
+            "Entry_ID": ["A", "B"],
+            "Symbol": ["AAA", "AAA"],
+            "Entry_Date": pd.to_datetime(["2023-08-10", "2023-08-11"]),
+            "Regime": ["NORMAL", "NORMAL"],
+            "Return": [0.1, -0.05],
+            "Holding_Sessions": [3, 4],
+        }
+    )
+    practical = setup.assign(Initial_Risk=1.0, R_Multiple=[0.2, -0.1])
+    summary = breadth_summary(setup, practical)
+    assert summary["Regime"].tolist() == ["NORMAL"]
 
 
 def _synthetic_trades(count: int, return_value: float = 0.01) -> tuple[pd.DataFrame, pd.DataFrame]:

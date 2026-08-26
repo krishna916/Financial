@@ -17,11 +17,12 @@ For this experiment, the Portfolio Advisor already determined Streak cannot
 perform historical same-day cross-sectional universe ranking, so custom data
 was selected before Luna execution.
 
-The completed preflight in `streak_preflight.md` records `CUSTOM_REQUIRED`.
-The exact test requires historical same-date ranking of every stock against the
-comparison universe for 21-, 63-, and 126-session returns, fixed 30/40/30
-combination, and a usable historical feature. Single-stock RSI, ROC, momentum,
-moving-average, or relative-performance conditions are not equivalent.
+Before Luna execution, the Portfolio Advisor selected the pre-approved
+`CUSTOM_REQUIRED` custom path because the exact hypothesis requires historical
+same-day cross-sectional ranking of every stock against the comparison universe
+for 21-, 63-, and 126-session returns, fixed 30/40/30 combination, and a usable
+historical feature. Single-stock RSI, ROC, momentum, moving-average, or
+relative-performance conditions are not equivalent.
 
 ## Locked methodology
 

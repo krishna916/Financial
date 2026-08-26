@@ -16,8 +16,10 @@ from research.swing.t1_stock_rs_validation.analyze_t1_stock_rs import (  # noqa:
     T1_TRADES_PATH,
     calculate_profit_factor,
     calculate_trade_metrics,
+    join_stock_rs_at_decision_time,
     load_and_validate_stock_rs,
     load_and_validate_trades,
+    validate_stock_rs_join,
 )
 
 
@@ -83,3 +85,96 @@ def test_calculate_profit_factor_handles_locked_edge_behavior():
     assert math.isinf(calculate_profit_factor(pd.Series([2.0, 0.0])))
     assert calculate_profit_factor(pd.Series([-2.0, 0.0])) == 0.0
     assert math.isnan(calculate_profit_factor(pd.Series([0.0, 0.0])))
+
+
+def _synthetic_rs_row(date, symbol, composite_rs, rank):
+    return {
+        "Date": pd.Timestamp(date),
+        "Symbol": symbol,
+        "Ret21": 0.10,
+        "Ret63": 0.20,
+        "Ret126": 0.30,
+        "RS21_Percentile": 80.0,
+        "RS63_Percentile": 80.0,
+        "RS126_Percentile": 80.0,
+        "Composite_RS": composite_rs,
+        "Composite_Rank": rank,
+        "Stock_Count": 20,
+        "Is_Full_Universe": True,
+        "RS_Status": "PREFERRED" if composite_rs >= 80 else "VALID",
+    }
+
+
+def test_stock_rs_join_forbids_same_entry_day_observation():
+    trades = pd.DataFrame(
+        {"Symbol": ["SBIN"], "Entry_Date": [pd.Timestamp("2026-01-05")]}
+    )
+    rs = pd.DataFrame(
+        [
+            _synthetic_rs_row("2026-01-02", "SBIN", 70.0, 2),
+            _synthetic_rs_row("2026-01-05", "SBIN", 90.0, 1),
+        ]
+    )
+
+    result = join_stock_rs_at_decision_time(trades, rs)
+
+    assert result.loc[0, "RS_Matched_Date"] == pd.Timestamp("2026-01-02")
+    assert result.loc[0, "Composite_RS"] == 70.0
+
+
+def test_stock_rs_join_never_forward_matches_future_observation():
+    trades = pd.DataFrame(
+        {"Symbol": ["SBIN"], "Entry_Date": [pd.Timestamp("2026-01-04")]}
+    )
+    rs = pd.DataFrame([_synthetic_rs_row("2026-01-05", "SBIN", 90.0, 1)])
+
+    result = join_stock_rs_at_decision_time(trades, rs)
+
+    assert pd.isna(result.loc[0, "RS_Matched_Date"])
+    assert pd.isna(result.loc[0, "Composite_RS"])
+
+
+def test_stock_rs_join_isolated_by_symbol():
+    trades = pd.DataFrame(
+        {"Symbol": ["SBIN"], "Entry_Date": [pd.Timestamp("2026-01-05")]}
+    )
+    rs = pd.DataFrame(
+        [
+            _synthetic_rs_row("2026-01-02", "SBIN", 71.0, 2),
+            _synthetic_rs_row("2026-01-02", "INFY", 99.0, 1),
+        ]
+    )
+
+    result = join_stock_rs_at_decision_time(trades, rs)
+
+    assert result.loc[0, "Symbol"] == "SBIN"
+    assert result.loc[0, "Composite_RS"] == 71.0
+
+
+def test_stock_rs_join_exports_calendar_lag():
+    trades = pd.DataFrame(
+        {"Symbol": ["SBIN"], "Entry_Date": [pd.Timestamp("2026-01-05")]}
+    )
+    rs = pd.DataFrame([_synthetic_rs_row("2026-01-02", "SBIN", 71.0, 2)])
+
+    result = join_stock_rs_at_decision_time(trades, rs)
+
+    assert result.loc[0, "RS_Date_Lag_Days"] == 3
+    assert result.loc[0, "RS_Date_Lag_Days"] > 0
+
+
+def test_real_stock_rs_join_is_complete_and_reconciles_locked_t1_input():
+    trades = load_and_validate_trades(T1_TRADES_PATH)
+    rs = load_and_validate_stock_rs(STOCK_RS_PATH)
+
+    joined = join_stock_rs_at_decision_time(trades, rs)
+    validate_stock_rs_join(joined)
+
+    assert len(joined) == 218
+    assert joined["RS_Matched_Date"].notna().all()
+    assert (joined["RS_Matched_Date"] < joined["Entry_Date"]).all()
+    assert (joined["RS_Date_Lag_Days"] > 0).all()
+    assert joined["Stock_Count"].eq(20).all()
+    assert joined["Is_Full_Universe"].eq(True).all()
+    assert joined["Composite_Rank"].between(1, 20).all()
+    assert math.isclose(float(joined["PnL"].sum()), -4631.32, abs_tol=0.01)

@@ -72,6 +72,19 @@ METRIC_COLUMNS = [
     "Total_PnL",
     "Median_Holding_Days",
 ]
+STOCK_RS_FEATURE_COLUMNS = [
+    "Ret21",
+    "Ret63",
+    "Ret126",
+    "RS21_Percentile",
+    "RS63_Percentile",
+    "RS126_Percentile",
+    "Composite_RS",
+    "Composite_Rank",
+    "Stock_Count",
+    "Is_Full_Universe",
+    "RS_Status",
+]
 EXPECTED_T1_SYMBOLS = {
     "HDFCBANK",
     "ICICIBANK",
@@ -305,3 +318,95 @@ def calculate_trade_metrics(
         "Total_PnL": float(pnl.sum()) if count else 0.0,
         "Median_Holding_Days": float(holding.median()) if count else math.nan,
     }
+
+
+def join_stock_rs_at_decision_time(
+    trades: pd.DataFrame, rs: pd.DataFrame
+) -> pd.DataFrame:
+    """Backward/as-of join stock RS observations strictly before each entry."""
+
+    _require_columns(trades, ["Symbol", "Entry_Date"], "T1 trade data")
+    _require_columns(rs, ["Date", "Symbol", *STOCK_RS_FEATURE_COLUMNS], "stock RS data")
+    left = _parse_dates(trades, ("Entry_Date",), "T1 trade data").reset_index(drop=True)
+    right = _parse_dates(rs, ("Date",), "stock RS data")
+    if right.duplicated(["Date", "Symbol"]).any():
+        raise ValueError("stock RS data contains duplicate (Date, Symbol) rows")
+    left["_trade_order"] = np.arange(len(left))
+    pieces: list[pd.DataFrame] = []
+    for symbol, trade_group in left.groupby("Symbol", sort=False):
+        ordered_trades = trade_group.sort_values("Entry_Date")
+        feature_group = right.loc[right["Symbol"].eq(symbol), ["Date", *STOCK_RS_FEATURE_COLUMNS]]
+        feature_group = feature_group.sort_values("Date")
+        if feature_group.empty:
+            matched = ordered_trades.copy()
+            matched["RS_Matched_Date"] = pd.NaT
+            for column in STOCK_RS_FEATURE_COLUMNS:
+                matched[column] = np.nan
+        else:
+            matched = pd.merge_asof(
+                ordered_trades,
+                feature_group,
+                left_on="Entry_Date",
+                right_on="Date",
+                direction="backward",
+                allow_exact_matches=False,
+            )
+            matched = matched.rename(columns={"Date": "RS_Matched_Date"})
+        pieces.append(matched)
+    if not pieces:
+        raise ValueError("no trade rows available for stock RS join")
+    joined = (
+        pd.concat(pieces, ignore_index=True)
+        .sort_values("_trade_order")
+        .reset_index(drop=True)
+    )
+    joined["RS_Date_Lag_Days"] = (
+        joined["Entry_Date"] - joined["RS_Matched_Date"]
+    ).dt.days
+    return joined.drop(columns="_trade_order")
+
+
+def validate_stock_rs_join(
+    joined: pd.DataFrame,
+    expected_trade_count: int = 218,
+    expected_total_pnl: float = -4631.32,
+) -> None:
+    """Fail loudly when the strict stock-RS join violates locked invariants."""
+
+    _require_columns(
+        joined,
+        [
+            "Symbol",
+            "Entry_Date",
+            "RS_Matched_Date",
+            "RS_Date_Lag_Days",
+            *STOCK_RS_FEATURE_COLUMNS,
+        ],
+        "joined stock RS data",
+    )
+    if len(joined) != expected_trade_count:
+        raise ValueError(
+            f"joined stock RS rows must equal {expected_trade_count}, found {len(joined)}"
+        )
+    unmatched = int(joined["RS_Matched_Date"].isna().sum())
+    if unmatched:
+        missing = joined.loc[
+            joined["RS_Matched_Date"].isna(), ["Symbol", "Entry_Date"]
+        ]
+        raise ValueError(f"{unmatched} trades could not be matched to a prior stock RS row: {missing.to_dict('records')}")
+    if (joined["RS_Matched_Date"] >= joined["Entry_Date"]).any():
+        raise ValueError("stock RS join used a same-entry-day or future observation")
+    if (joined["RS_Date_Lag_Days"] <= 0).any():
+        raise ValueError("stock RS date lag must be strictly positive")
+    if not joined["Stock_Count"].eq(20).all():
+        raise ValueError("stock RS join contains a non-20 Stock_Count match")
+    if not joined["Is_Full_Universe"].eq(True).all():
+        raise ValueError("stock RS join contains a non-full-universe match")
+    if not joined["Composite_Rank"].between(1, 20).all():
+        raise ValueError("stock RS join contains a Composite_Rank outside 1..20")
+    if not joined["RS_Status"].isin(ALLOWED_RS_STATUSES).all():
+        raise ValueError("stock RS join contains an invalid RS_Status")
+    if "PnL" in joined.columns and not math.isclose(
+        float(joined["PnL"].sum()), expected_total_pnl, abs_tol=0.01
+    ):
+        raise ValueError("joined stock RS PnL does not reconcile to the locked T1 input")

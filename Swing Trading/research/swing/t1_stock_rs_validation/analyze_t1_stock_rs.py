@@ -973,50 +973,416 @@ def _write_csv(frame: pd.DataFrame, path: Path) -> None:
     output.to_csv(path, index=False, lineterminator="\n")
 
 
-def run_analysis() -> dict[str, pd.DataFrame]:
-    """Run the currently implemented primary validation outputs."""
+def _format_report_value(value: object, digits: int = 4) -> str:
+    if value is None or pd.isna(value):
+        return "NA"
+    if isinstance(value, (float, np.floating)) and math.isinf(float(value)):
+        return "inf"
+    if isinstance(value, (float, np.floating)):
+        return f"{float(value):.{digits}f}"
+    return str(value)
+
+
+def _format_date_value(value: object) -> str:
+    if value is None or pd.isna(value):
+        return ""
+    return pd.Timestamp(value).strftime("%Y-%m-%d")
+
+
+def _reconciles(
+    frame: pd.DataFrame,
+    count: int = 218,
+    total_pnl: float = -4631.32,
+) -> tuple[bool, bool]:
+    return (
+        int(frame["Trades"].sum()) == count,
+        math.isclose(float(frame["Total_PnL"].sum()), total_pnl, abs_tol=0.01),
+    )
+
+
+def build_validation_report(
+    trades: pd.DataFrame,
+    stock_joined: pd.DataFrame,
+    contextual: pd.DataFrame,
+    status: pd.DataFrame,
+    binary: pd.DataFrame,
+) -> pd.DataFrame:
+    """Build key/value audit rows after all strict joins and reconciliations pass."""
+
+    status_count, status_pnl = _reconciles(status)
+    preferred = binary.loc[binary["Comparison"].eq("PREFERRED_TEST")]
+    valid_or_better = binary.loc[binary["Comparison"].eq("VALID_OR_BETTER_TEST")]
+    preferred_count, preferred_pnl = _reconciles(preferred)
+    valid_count, valid_pnl = _reconciles(valid_or_better)
+    rs_matched = stock_joined["RS_Matched_Date"]
+    entry_dates = stock_joined["Entry_Date"]
+    market_matched = contextual["Market_Matched_Date"]
+    sector_matched = contextual["Sector_Matched_Date"]
+    rows = [
+        ("Input_Trade_Count", len(trades)),
+        ("Unique_Symbols", trades["Symbol"].nunique()),
+        ("Winners", int((trades["Return_Pct"] > 0).sum())),
+        ("Input_Total_PnL", round(float(trades["PnL"].sum()), 2)),
+        ("Unmatched_RS_Trades", int(rs_matched.isna().sum())),
+        ("Same_Day_RS_Matches", int((rs_matched == entry_dates).sum())),
+        ("Future_RS_Matches", int((rs_matched > entry_dates).sum())),
+        (
+            "NonFullUniverse_RS_Matches",
+            int((~stock_joined["Stock_Count"].eq(20) | ~stock_joined["Is_Full_Universe"]).sum()),
+        ),
+        ("Median_RS_Lag_Days", float(stock_joined["RS_Date_Lag_Days"].median())),
+        ("Max_RS_Lag_Days", int(stock_joined["RS_Date_Lag_Days"].max())),
+        ("RS_Lag_Over_7_Days_Count", int((stock_joined["RS_Date_Lag_Days"] > 7).sum())),
+        ("Primary_Status_Count_Reconciles", status_count),
+        ("Primary_Status_PnL_Reconciles", status_pnl),
+        ("Preferred_Test_Count_Reconciles", preferred_count),
+        ("Preferred_Test_PnL_Reconciles", preferred_pnl),
+        ("ValidOrBetter_Test_Count_Reconciles", valid_count),
+        ("ValidOrBetter_Test_PnL_Reconciles", valid_pnl),
+        ("Same_Day_Market_Matches", int((market_matched == contextual["Entry_Date"]).sum())),
+        ("Future_Market_Matches", int((market_matched > contextual["Entry_Date"]).sum())),
+        ("Same_Day_Sector_Matches", int((sector_matched == contextual["Entry_Date"]).sum())),
+        ("Future_Sector_Matches", int((sector_matched > contextual["Entry_Date"]).sum())),
+        (
+            "NonFullUniverse_Sector_Matches",
+            int((~contextual["Sector_Count"].eq(11)).sum()),
+        ),
+        ("RS_Matched_Date_Min", _format_date_value(rs_matched.min())),
+        ("RS_Matched_Date_Max", _format_date_value(rs_matched.max())),
+        ("Market_Matched_Date_Min", _format_date_value(market_matched.min())),
+        ("Market_Matched_Date_Max", _format_date_value(market_matched.max())),
+        ("Sector_Matched_Date_Min", _format_date_value(sector_matched.min())),
+        ("Sector_Matched_Date_Max", _format_date_value(sector_matched.max())),
+    ]
+    return pd.DataFrame(rows, columns=["Check", "Value"])
+
+
+def _binary_difference(binary: pd.DataFrame, comparison: str) -> float:
+    frame = binary.loc[binary["Comparison"].eq(comparison)].set_index("Group")
+    first, second = [group for name, groups in PRIMARY_BINARY_SPECS if name == comparison for group, _ in groups]
+    first_value = frame.loc[first, "Mean_Return"]
+    second_value = frame.loc[second, "Mean_Return"]
+    if pd.isna(first_value) or pd.isna(second_value):
+        return math.nan
+    return float(first_value - second_value)
+
+
+def _direction(value: float) -> str:
+    if math.isnan(value):
+        return "unavailable"
+    if value > 0:
+        return "positive"
+    if value < 0:
+        return "negative"
+    return "flat"
+
+
+def _leave_one_differences(leave_one: pd.DataFrame, comparison: str) -> pd.Series:
+    frame = leave_one.loc[leave_one["Comparison"].eq(comparison)]
+    first, second = [group for name, groups in PRIMARY_BINARY_SPECS if name == comparison for group, _ in groups]
+    pivot = frame.pivot(index="Excluded_Symbol", columns="Group", values="Mean_Return")
+    if first not in pivot or second not in pivot:
+        return pd.Series(dtype=float)
+    result = pivot[first] - pivot[second]
+    return result.dropna()
+
+
+def build_research_report(
+    joined: pd.DataFrame,
+    status: pd.DataFrame,
+    binary: pd.DataFrame,
+    rank: pd.DataFrame,
+    years: pd.DataFrame,
+    outliers: pd.DataFrame,
+    leave_one: pd.DataFrame,
+    market_matrix: pd.DataFrame,
+    sector_matrix: pd.DataFrame,
+    validation: pd.DataFrame,
+) -> str:
+    """Render an evidence-only report from the already-calculated output frames."""
+
+    baseline = calculate_trade_metrics(joined)
+    status_lines = [
+        f"- {row.RS_Status}: {int(row.Trades)} trades, mean return {_format_report_value(row.Mean_Return)}, total P&L {_format_report_value(row.Total_PnL, 2)}."
+        for row in status.itertuples()
+    ]
+    binary_lines = []
+    for comparison, groups in PRIMARY_BINARY_SPECS:
+        part = binary.loc[binary["Comparison"].eq(comparison)]
+        descriptions = []
+        for group, _ in groups:
+            row = part.loc[part["Group"].eq(group)].iloc[0]
+            descriptions.append(
+                f"{group}: {int(row.Trades)} trades, mean return {_format_report_value(row.Mean_Return)}, total P&L {_format_report_value(row.Total_PnL, 2)}"
+            )
+        binary_lines.append(f"- {comparison}: " + "; ".join(descriptions) + ".")
+    year_lines = []
+    for year in (2023, 2024, 2025, 2026):
+        year_part = years.loc[years["Entry_Year"].eq(year)]
+        year_lines.append(
+            f"- {year}: "
+            + "; ".join(
+                f"{row.Comparison} {row.Group} mean return {_format_report_value(row.Mean_Return)}"
+                for row in year_part.itertuples()
+            )
+            + "."
+        )
+    outlier_lines = []
+    all_directions = {
+        comparison: _direction(_binary_difference(binary, comparison))
+        for comparison, _ in PRIMARY_BINARY_SPECS
+    }
+    for scenario in [
+        "ALL_TRADES",
+        "EXCLUDE_TOP_1_POSITIVE_PNL",
+        "EXCLUDE_TOP_3_POSITIVE_PNL",
+        "EXCLUDE_TOP_5_POSITIVE_PNL",
+    ]:
+        part = outliers.loc[outliers["Scenario"].eq(scenario)]
+        excluded = part["Excluded_Trades"].iloc[0] or "none"
+        direction_text = "; ".join(
+            f"{comparison} direction {_direction(_binary_difference(part, comparison))} (ALL_TRADES was {all_directions[comparison]})"
+            for comparison, _ in PRIMARY_BINARY_SPECS
+        )
+        outlier_lines.append(f"- {scenario}: excluded {excluded}; {direction_text}.")
+    leave_lines = []
+    for comparison, _ in PRIMARY_BINARY_SPECS:
+        differences = _leave_one_differences(leave_one, comparison)
+        if differences.empty:
+            leave_lines.append(f"- {comparison}: no complete leave-one-symbol differences were available.")
+        else:
+            leave_lines.append(
+                f"- {comparison}: group mean-return difference range across {len(differences)} exclusions was {_format_report_value(differences.min())} to {_format_report_value(differences.max())}."
+            )
+    validation_lookup = dict(zip(validation["Check"], validation["Value"]))
+    return f"""# T1 Stock Relative-Strength Validation
+
+## Methodology
+
+This is a fixed-sample validation experiment, not optimization. It joins the immutable 218 completed T1 breakout trades to the merged Issue #5 / PR #6 stock-RS dataset. The locked feature uses 21-, 63-, and 126-session returns, 30/40/30 percentile weights, rank 1 as strongest, and the unchanged PREFERRED, VALID, and BELOW_VALID status bands.
+
+## Decision-Time Integrity
+
+T1's Streak daily entry is next-candle-open after an EOD signal, so this validation uses only feature/context observations strictly before Entry_Date. Same-entry-day daily RS/market/sector closes are not decision-time-safe for this experiment.
+
+The stock-RS join had {validation_lookup['Unmatched_RS_Trades']} unmatched trades and used backward/as-of observations with no same-day or future matches. Median RS lag was {_format_report_value(validation_lookup['Median_RS_Lag_Days'], 1)} calendar days and maximum lag was {validation_lookup['Max_RS_Lag_Days']} days. Market and sector interactions use the same strict-before-entry rule and are independent of the earlier same-day sector join.
+
+## Unfiltered T1 Baseline
+
+The unfiltered joined sample contains {int(baseline['Trades'])} trades, {int(baseline['Winners'])} winners, mean return {_format_report_value(baseline['Mean_Return'])}, median return {_format_report_value(baseline['Median_Return'])}, and total P&L {_format_report_value(baseline['Total_PnL'], 2)}. Median holding time was {_format_report_value(baseline['Median_Holding_Days'], 1)} days.
+
+## RS Status Results
+
+{chr(10).join(status_lines)}
+
+## Primary Binary Comparisons
+
+{chr(10).join(binary_lines)}
+
+These are the only two primary binary comparisons. No additional rank cutoff or combined buy rule is inferred here.
+
+## Rank Diagnostics
+
+Diagnostic metrics for every Composite_Rank from 1 through 20 are in `output/t1_stock_rs_rank_summary.csv`. Ranks are retained separately and are not converted into an optimized cutoff.
+
+## Year Stability
+
+{chr(10).join(year_lines)}
+
+## Outlier Robustness
+
+The largest positive-P&L trades were removed globally only for the declared sensitivity scenarios; losing trades were not removed.
+
+{chr(10).join(outlier_lines)}
+
+## Stock-Identity Robustness
+
+Symbol-by-status metrics are in `output/t1_stock_rs_symbol_summary.csv`; cells with fewer than five trades are flagged. Leave-one-symbol-out differences are summarized below, with all fixed-basket symbols retained:
+
+{chr(10).join(leave_lines)}
+
+## Market-Regime Interaction
+
+The secondary market-regime matrix is in `output/t1_stock_rs_market_matrix.csv`. It contains a full Market_Regime x RS_Status status matrix and both locked binary comparisons within each regime. These diagnostics do not redefine the primary stock-RS analysis.
+
+## Sector-Leadership Interaction
+
+The secondary sector matrix is in `output/t1_stock_rs_sector_matrix.csv`. It contains a full Leadership_Bucket x RS_Status status matrix and both locked binary comparisons within each sector bucket. Sector rows use the existing definitions and full-universe observations only.
+
+## Data / Method Limitations
+
+- The T1 sample is a fixed 218-trade, 20-symbol sample and is not regenerated here.
+- Stock RS is an observational feature joined as-of by calendar date; a calendar lag over seven days is reported for audit rather than silently filled.
+- Small cells and stock identity can make subgroup metrics unstable.
+- Interaction tables are secondary diagnostics and do not establish causality or authorize new filters.
+
+## Evidence Summary
+
+The generated CSVs and validation report provide the predeclared factual comparisons, timing checks, and robustness evidence for the Portfolio Advisor's separate decision gate. This report does not adopt a threshold, change T1 rules, or make the final strategy decision.
+"""
+
+
+EXPECTED_OUTPUT_FILENAMES = [
+    "t1_stock_rs_joined_trades.csv",
+    "t1_stock_rs_status_summary.csv",
+    "t1_stock_rs_binary_tests.csv",
+    "t1_stock_rs_rank_summary.csv",
+    "t1_stock_rs_year_summary.csv",
+    "t1_stock_rs_outlier_robustness.csv",
+    "t1_stock_rs_symbol_summary.csv",
+    "t1_stock_rs_leave_one_symbol_out.csv",
+    "t1_stock_rs_market_matrix.csv",
+    "t1_stock_rs_sector_matrix.csv",
+    "validation_report.csv",
+    "research_report.md",
+]
+
+
+def validate_complete_outputs(
+    trades: pd.DataFrame,
+    stock_joined: pd.DataFrame,
+    contextual: pd.DataFrame,
+    status: pd.DataFrame,
+    binary: pd.DataFrame,
+    rank: pd.DataFrame,
+    years: pd.DataFrame,
+    outliers: pd.DataFrame,
+    symbols: pd.DataFrame,
+    leave_one: pd.DataFrame,
+    market_matrix: pd.DataFrame,
+    sector_matrix: pd.DataFrame,
+) -> None:
+    """Validate every in-memory result before any final output is written."""
+
+    validate_stock_rs_join(stock_joined)
+    validate_context_joins(contextual)
+    if _reconciles(status) != (True, True):
+        raise ValueError("status summary failed locked count/PnL reconciliation")
+    for comparison in ("PREFERRED_TEST", "VALID_OR_BETTER_TEST"):
+        part = binary.loc[binary["Comparison"].eq(comparison)]
+        if len(part) != 2 or _reconciles(part) != (True, True):
+            raise ValueError(f"{comparison} failed locked count/PnL reconciliation")
+    if rank["Composite_Rank"].tolist() != list(range(1, 21)):
+        raise ValueError("rank summary does not contain exact ranks 1..20")
+    if int(rank["Trades"].sum()) != len(trades):
+        raise ValueError("rank summary trade count does not reconcile")
+    if set(years["Entry_Year"]) != {2023, 2024, 2025, 2026}:
+        raise ValueError("year summary contains an unexpected entry year")
+    for year in (2023, 2024, 2025, 2026):
+        expected = int(stock_joined["Entry_Date"].dt.year.eq(year).sum())
+        for comparison in ("PREFERRED_TEST", "VALID_OR_BETTER_TEST"):
+            part = years.loc[
+                years["Entry_Year"].eq(year) & years["Comparison"].eq(comparison)
+            ]
+            if len(part) != 2 or int(part["Trades"].sum()) != expected:
+                raise ValueError(f"year summary failed reconciliation for {year}/{comparison}")
+    if outliers["Scenario"].drop_duplicates().tolist() != [
+        "ALL_TRADES",
+        "EXCLUDE_TOP_1_POSITIVE_PNL",
+        "EXCLUDE_TOP_3_POSITIVE_PNL",
+        "EXCLUDE_TOP_5_POSITIVE_PNL",
+    ]:
+        raise ValueError("outlier summary contains an unexpected scenario")
+    if set(symbols["Symbol"]) != set(trades["Symbol"]):
+        raise ValueError("symbol summary does not cover the locked T1 symbols")
+    if set(leave_one["Excluded_Symbol"]) != set(trades["Symbol"]):
+        raise ValueError("leave-one-symbol-out summary does not cover the locked T1 symbols")
+    if set(market_matrix["Analysis_Type"]) != {
+        "STATUS_MATRIX",
+        "BINARY_WITHIN_REGIME",
+    }:
+        raise ValueError("market interaction output sections are incomplete")
+    if set(sector_matrix["Analysis_Type"]) != {
+        "STATUS_MATRIX",
+        "BINARY_WITHIN_SECTOR_BUCKET",
+    }:
+        raise ValueError("sector interaction output sections are incomplete")
+
+
+def run_analysis() -> dict[str, object]:
+    """Run the complete locked validation and publish outputs after validation."""
 
     trades = load_and_validate_trades()
     rs = load_and_validate_stock_rs()
-    joined = join_stock_rs_at_decision_time(trades, rs)
-    validate_stock_rs_join(joined)
-    joined_export = prepare_joined_trade_export(joined)
-    status = summarize_status_groups(joined)
-    binary = summarize_primary_binary_tests(joined)
-    rank = summarize_composite_ranks(joined)
-    years = summarize_by_entry_year(joined)
-    outliers = summarize_outlier_robustness(joined)
-    symbols = summarize_symbol_status(joined)
-    leave_one = summarize_leave_one_symbol_out(joined)
+    stock_joined = join_stock_rs_at_decision_time(trades, rs)
+    status = summarize_status_groups(stock_joined)
+    binary = summarize_primary_binary_tests(stock_joined)
+    rank = summarize_composite_ranks(stock_joined)
+    years = summarize_by_entry_year(stock_joined)
+    outliers = summarize_outlier_robustness(stock_joined)
+    symbols = summarize_symbol_status(stock_joined)
+    leave_one = summarize_leave_one_symbol_out(stock_joined)
+
     mapping = load_and_validate_mapping()
-    mapped = joined.merge(
+    contextual = stock_joined.merge(
         mapping.rename(columns={"Stock": "Symbol"}),
         on="Symbol",
         how="left",
         validate="many_to_one",
     )
-    if mapped["Sector_Key"].isna().any():
+    if contextual["Sector_Key"].isna().any():
         raise ValueError("some T1 trades have no stock-sector mapping")
     market = load_and_validate_market_regime()
     sector = load_and_validate_sector_data()
-    contextual = join_market_regime_strictly_before_entry(mapped, market)
+    contextual = join_market_regime_strictly_before_entry(contextual, market)
     contextual = join_sector_leadership_strictly_before_entry(contextual, sector)
-    validate_context_joins(contextual)
     market_matrix = summarize_market_interactions(contextual)
     sector_matrix = summarize_sector_interactions(contextual)
+
+    validate_complete_outputs(
+        trades,
+        stock_joined,
+        contextual,
+        status,
+        binary,
+        rank,
+        years,
+        outliers,
+        symbols,
+        leave_one,
+        market_matrix,
+        sector_matrix,
+    )
+    validation = build_validation_report(
+        trades, stock_joined, contextual, status, binary
+    )
+    report = build_research_report(
+        stock_joined,
+        status,
+        binary,
+        rank,
+        years,
+        outliers,
+        leave_one,
+        market_matrix,
+        sector_matrix,
+        validation,
+    )
+
+    output_frames = [
+        ("t1_stock_rs_joined_trades.csv", prepare_joined_trade_export(contextual)),
+        ("t1_stock_rs_status_summary.csv", status),
+        ("t1_stock_rs_binary_tests.csv", binary),
+        ("t1_stock_rs_rank_summary.csv", rank),
+        ("t1_stock_rs_year_summary.csv", years),
+        ("t1_stock_rs_outlier_robustness.csv", outliers),
+        ("t1_stock_rs_symbol_summary.csv", symbols),
+        ("t1_stock_rs_leave_one_symbol_out.csv", leave_one),
+        ("t1_stock_rs_market_matrix.csv", market_matrix),
+        ("t1_stock_rs_sector_matrix.csv", sector_matrix),
+        ("validation_report.csv", validation),
+    ]
     OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
-    _write_csv(prepare_joined_trade_export(contextual), OUTPUT_DIR / "t1_stock_rs_joined_trades.csv")
-    _write_csv(status, OUTPUT_DIR / "t1_stock_rs_status_summary.csv")
-    _write_csv(binary, OUTPUT_DIR / "t1_stock_rs_binary_tests.csv")
-    _write_csv(rank, OUTPUT_DIR / "t1_stock_rs_rank_summary.csv")
-    _write_csv(years, OUTPUT_DIR / "t1_stock_rs_year_summary.csv")
-    _write_csv(outliers, OUTPUT_DIR / "t1_stock_rs_outlier_robustness.csv")
-    _write_csv(symbols, OUTPUT_DIR / "t1_stock_rs_symbol_summary.csv")
-    _write_csv(leave_one, OUTPUT_DIR / "t1_stock_rs_leave_one_symbol_out.csv")
-    _write_csv(market_matrix, OUTPUT_DIR / "t1_stock_rs_market_matrix.csv")
-    _write_csv(sector_matrix, OUTPUT_DIR / "t1_stock_rs_sector_matrix.csv")
+    for filename, frame in output_frames:
+        _write_csv(frame, OUTPUT_DIR / filename)
+    (OUTPUT_DIR / "research_report.md").write_text(report, encoding="utf-8")
+    print(f"Validated {len(trades)} trades across {trades['Symbol'].nunique()} symbols")
+    print(f"Stock-RS lag days: median={stock_joined['RS_Date_Lag_Days'].median():.1f}, max={stock_joined['RS_Date_Lag_Days'].max():.0f}")
+    print(f"Generated {len(EXPECTED_OUTPUT_FILENAMES)} outputs under {OUTPUT_DIR}")
     return {
-        "joined": joined,
+        "trades": trades,
+        "joined": stock_joined,
+        "contextual": contextual,
         "status": status,
         "binary": binary,
         "rank": rank,
@@ -1024,9 +1390,10 @@ def run_analysis() -> dict[str, pd.DataFrame]:
         "outliers": outliers,
         "symbols": symbols,
         "leave_one": leave_one,
-        "contextual": contextual,
         "market_matrix": market_matrix,
         "sector_matrix": sector_matrix,
+        "validation": validation,
+        "report": report,
     }
 
 

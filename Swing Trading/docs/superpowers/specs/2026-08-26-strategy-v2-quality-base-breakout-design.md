@@ -1,9 +1,9 @@
 # Strategy V2 Design — RS Leader + Quality Base / Volatility-Contraction Breakout
 
-**Status:** Approved design; implementation and validation not started  
+**Status:** In-chat architecture approved; written spec pending review; implementation and validation not started  
 **Design date:** 26 August 2026  
 **Repository:** `krishna916/Financial`  
-**Research branch:** New strategy family; T1 remains retired
+**Research family:** New strategy family; T1 remains retired
 
 ## 1. Objective
 
@@ -47,9 +47,11 @@ Rules:
 
 ### Historical validation universe
 
-Use **point-in-time Nifty 500 membership**.
+Use **point-in-time Nifty 500 membership** on the breakout signal date.
 
 Do not apply today's Nifty 500 membership retrospectively.
+
+A symbol may use valid historical OHLCV from before its index-entry date to calculate indicators/base structure, but it can generate a V2 signal only while it belongs to the point-in-time Nifty 500 on the signal date.
 
 ### Future/live universe
 
@@ -60,7 +62,7 @@ Use:
 
 ### Liquidity
 
-Require:
+On the breakout signal date require:
 
 ```text
 20-session median daily traded value >= ₹10 crore
@@ -75,18 +77,36 @@ Exclude:
 - SME securities;
 - microcaps;
 - materially illiquid securities;
-- materially restricted/surveillance-affected securities where applicable;
+- materially restricted/surveillance-affected securities where reliable point-in-time data is available;
 - suspended/problematic securities.
+
+Do not reconstruct historical surveillance status from current status.
 
 ### Fundamental/governance safety
 
 Basic governance and fundamental sanity remain part of **live execution**, but should not be reconstructed as a historical kernel filter unless genuinely point-in-time structured data is available.
 
-The historical technical test should not use hindsight-heavy manual governance judgments.
+The historical technical test must not use hindsight-heavy manual governance judgments.
 
-## 4. Trend eligibility
+## 4. Price-data treatment
 
-A candidate must satisfy, using information available on the signal date:
+Use a single consistently corporate-action-adjusted daily OHLCV series for strategy calculations where the chosen data source supports it.
+
+The same adjustment convention must be used for:
+
+- High/Low/Close used in pivot/base detection;
+- moving averages;
+- ATR/True Range;
+- breakout returns;
+- stop/exit simulation.
+
+Do not mix adjusted and unadjusted price fields inside one trade lifecycle.
+
+Data-source and adjustment conventions must be documented in the implementation README/audit output.
+
+## 5. Trend eligibility
+
+On the breakout signal date require:
 
 ```text
 Close > SMA50
@@ -99,7 +119,7 @@ Reason: the earlier T3 experiment already tested the rising-SMA50 idea as an inc
 
 SMA50 slope may still be recorded as diagnostic metadata.
 
-## 5. Relative-strength leadership
+## 6. Relative-strength leadership
 
 Use the existing point-in-time cross-sectional stock-RS framework:
 
@@ -114,9 +134,7 @@ Composite_RS =
 + 0.30 × RS126
 ```
 
-### Entry eligibility
-
-Require:
+On the breakout signal date require:
 
 ```text
 Composite_RS >= 70
@@ -132,58 +150,80 @@ Do not introduce a second hard RS threshold before validation.
 
 Store the continuous RS value so 70–80, 80–90 and 90+ can be analyzed diagnostically without permission to retune the strategy after outcomes are known.
 
-## 6. Meaningful pivot
+## 7. Meaningful pivot and base-state machine
 
 The base is anchored to a meaningful intermediate-term price high rather than an arbitrary recent candle.
 
-Define the initial pivot as a:
+### Initial pivot seed
+
+A date `P` may seed a new base when:
 
 ```text
-63-session high
+High[P] = highest High over sessions P-62 through P
 ```
 
-The pivot represents the resistance area that the future base is consolidating beneath.
+The active pivot initially equals `High[P]`.
 
-### Failed probes during the base
+Base session 1 is the next trading session after `P`.
 
-If price trades intraday above the current pivot but **does not close above it**, the pivot may update to that higher failed-probe high without restarting the base.
+Only one active V2 base is tracked per symbol at a time.
 
-A successful closing breakout above the active pivot ends the base and creates the breakout signal.
+### Failed intraday probes
 
-This rule prevents a small intraday overshoot from falsely invalidating an otherwise intact consolidation.
-
-## 7. Base duration
-
-A valid base must contain:
+During an active base, if:
 
 ```text
-10–30 trading sessions
+High[t] > Active_Pivot
+AND
+Close[t] <= Active_Pivot
 ```
 
-Rationale:
+then update:
 
-- fewer than 10 sessions is often ordinary short-term noise rather than meaningful consolidation;
-- more than 30 sessions begins to mix this swing setup with materially longer-duration bases;
-- 10–30 sessions approximately represents a 2–6 week consolidation.
+```text
+Active_Pivot = High[t]
+```
 
-The range is locked for the first V2 validation and must not be adjusted after seeing results merely to improve performance.
+Do **not** restart the base-session count.
+
+The ATR denominator used for the base-depth rule remains `ATR14` from the **original pivot-seed date P**, even if the active pivot later updates after a failed probe.
+
+### Close above pivot before minimum duration
+
+If price closes above the active pivot before 10 base sessions have completed, the candidate has not formed a valid V2 base.
+
+Cancel that active base.
+
+The same day may independently seed a new future base if it satisfies the 63-session-high rule.
+
+### Base expiration
+
+If no qualifying breakout occurs by the end of base session 30, expire the active base.
+
+A later date may independently seed a new base when it satisfies the 63-session-high rule.
+
+### Breakout ends the base
+
+A close above the active pivot on base session 10–30 ends the active base and creates one breakout signal candidate, subject to all signal-date rules.
+
+Once that breakout signal occurs, the old base is not reused for later entries, even if the next-session entry is cancelled by extension/gap rules.
 
 ## 8. Base depth
 
-Do not use one fixed percentage-depth limit across stocks with different volatility profiles.
-
-Define:
+For an active base define:
 
 ```text
 Base_Depth_ATR =
-(Pivot - Base_Low) / ATR14_at_pivot
+(Active_Pivot - lowest Low since base session 1) / ATR14_at_original_pivot_seed
 ```
 
-Require:
+Require throughout the base and on the breakout signal date:
 
 ```text
 Base_Depth_ATR <= 4.0
 ```
+
+If the threshold is breached at any time, invalidate the active base immediately.
 
 Rationale: the base should remain controlled relative to the stock's own normal volatility. Quiet stocks therefore need shallower absolute structures, while naturally volatile stocks receive proportionately more room.
 
@@ -191,12 +231,14 @@ Rationale: the base should remain controlled relative to the stock's own normal 
 
 Volatility contraction is the primary new quality condition in Strategy V2.
 
-For the final valid base immediately before breakout, calculate:
+For the final valid base immediately before breakout calculate:
 
 ```text
-Initial_Volatility = mean True Range of first 5 base sessions
-Final_Volatility   = mean True Range of final 5 pre-breakout sessions
+Initial_Volatility = mean True Range of base sessions 1–5
+Final_Volatility   = mean True Range of final 5 pre-breakout base sessions
 ```
+
+The breakout candle itself is excluded from `Final_Volatility`.
 
 Require:
 
@@ -224,13 +266,25 @@ These would materially increase parameter count before proving that simple struc
 
 ## 10. Breakout trigger
 
-After at least 10 valid base sessions and no more than 30 sessions, generate a breakout signal when:
+On base session 10–30, a breakout candidate occurs when:
 
 ```text
-Daily Close > active Pivot
+Daily Close > Active_Pivot
 ```
 
 The signal is known only after that session closes.
+
+A breakout candidate becomes a valid V2 signal only if all signal-date eligibility rules also pass, including:
+
+- point-in-time Nifty 500 membership;
+- liquidity;
+- trend;
+- Composite RS;
+- base depth;
+- volatility contraction;
+- signal-day extension control.
+
+If price closes above the pivot but any required signal-date rule fails, the base is still considered broken/finished and is not reused.
 
 No same-session entry is assumed in the historical test.
 
@@ -238,7 +292,7 @@ No same-session entry is assumed in the historical test.
 
 The entry occurs no earlier than the next trading session after the breakout signal.
 
-Therefore all close-derived data used to justify the trade must satisfy:
+Therefore all daily close-derived data used to justify the trade must satisfy:
 
 ```text
 Context_Date < Entry_Date
@@ -254,6 +308,7 @@ This applies to:
 - moving averages;
 - ATR;
 - pivot/base state;
+- liquidity calculated from completed daily bars;
 - any future daily close-derived research feature.
 
 No same-entry-day close-derived context may be used to justify an entry at that day's open.
@@ -275,36 +330,42 @@ Use it only as diagnostic metadata in the initial V2 validation.
 
 ## 13. Extension control
 
-Use signal-day ATR14 to prevent chasing breakouts that have already moved too far beyond the pivot.
+Use breakout-signal-day ATR14 for both signal-day and next-session extension checks.
 
 ### Signal-day eligibility
 
 Require:
 
 ```text
-Breakout_Close <= Pivot + 1.0 × ATR14
+Breakout_Close <= Active_Pivot + 1.0 × ATR14_signal
 ```
 
-### Next-session entry eligibility
+### Immediate next-session entry eligibility
 
-At the next session open, require:
+There is exactly **one automatic entry opportunity** from a V2 breakout signal: the open of the immediately following trading session.
+
+Require:
 
 ```text
-Entry_Open >= Pivot
-Entry_Open <= Pivot + 1.0 × ATR14
+Entry_Open >= Active_Pivot
+Entry_Open <= Active_Pivot + 1.0 × ATR14_signal
 ```
 
-If the next open is above `Pivot + 1 ATR`:
+If the next open is above `Active_Pivot + 1 ATR14_signal`:
 
 ```text
-EXTENDED → no trade
+EXTENDED → cancel trade
 ```
 
-If the next open is below the pivot:
+If the next open is below the active pivot:
 
 ```text
-Breakout no longer confirmed → no automatic entry
+Breakout no longer confirmed → cancel trade
 ```
+
+Do not wait for a later session to enter from the same breakout/base.
+
+A later trade requires a newly qualified base and breakout sequence.
 
 No alternate intraday rescue entry is assumed in the historical kernel.
 
@@ -313,11 +374,9 @@ No alternate intraday rescue entry is assumed in the historical kernel.
 For the initial V2 historical validation:
 
 ```text
-Signal = breakout close above pivot
-Entry  = next eligible session open
+Signal = qualifying breakout close above active pivot
+Entry  = immediately following trading session open, if extension rules pass
 ```
-
-Entry must pass the extension-control rules above.
 
 No intraday monitoring is required.
 
@@ -327,24 +386,29 @@ This remains compatible with the strategy's intended end-of-day workflow and man
 
 The initial stop is derived from the final contraction structure rather than the bottom of the entire multi-week base.
 
-Define:
+Define using data known on the signal date:
 
 ```text
 Structural_Stop =
-Final_5_Session_Low - 0.25 × ATR14
+lowest Low of the final 5 pre-breakout base sessions
+- 0.25 × ATR14_signal
 ```
 
-Use ATR known before entry.
+The breakout candle is not part of the final-five-session low.
+
+The initial structural stop remains fixed during the first V2 validation; there is no trailing-stop rule before the SMA20 trend exit.
 
 Rationale: losing the final tight consolidation area materially weakens the breakout thesis, while the ATR buffer avoids treating the exact visible low as a hair-trigger invalidation level.
 
 ## 16. Stop sanity check
 
-Reject a trade if:
+Using the actual next-session entry open, reject the trade before entry if:
 
 ```text
-Entry - Structural_Stop > 2.5 × ATR14
+Entry_Open - Structural_Stop > 2.5 × ATR14_signal
 ```
+
+Also reject if the computed structural stop is not below the entry price.
 
 Do not artificially tighten the structural stop to make position sizing or reward/risk look better.
 
@@ -362,30 +426,43 @@ Quantity:
 
 ```text
 Position_Quantity =
-Portfolio_Risk_Amount / (Entry - Structural_Stop)
+Portfolio_Risk_Amount / (Entry_Open - Structural_Stop)
 ```
 
 Confidence does not override this risk budget.
 
 Portfolio-capacity simulation is not part of the first signal-level edge test.
 
-## 18. Exit architecture
+## 18. Exit architecture and execution
 
-The first V2 validation should avoid simultaneously redesigning both entry and exit logic.
+The first V2 validation avoids simultaneously redesigning both entry and exit logic.
 
-### Initial protection
+### Setup-quality lens
 
-Use the structural stop defined above.
+This lens ignores the structural stop and exits only on the trend rule so that raw breakout quality can be compared without stop-shape effects.
 
-### Trend exit
-
-Generate an exit signal when:
+Generate a trend-exit signal when:
 
 ```text
 Daily Close < SMA20
 ```
 
-Exit on the next trading session.
+Exit at the immediately following trading session open.
+
+### Practical-trading lens
+
+This lens uses both the fixed structural stop and the same SMA20 trend exit.
+
+The structural stop is considered active immediately after entry.
+
+For each session while the position is open:
+
+1. If `Open <= Structural_Stop`, exit at that session's `Open` to model an adverse gap through the stop.
+2. Else if `Low <= Structural_Stop`, exit at `Structural_Stop`.
+3. Else remain open through that session unless a close-based SMA20 exit signal is generated.
+4. If `Close < SMA20`, exit at the next trading session's `Open` unless the position has already exited through the structural stop.
+
+If a prior close generated the SMA20 exit signal, the next session open is the exit price; no later intraday stop logic is needed because the position is closed at that open.
 
 ### No fixed profit target
 
@@ -399,7 +476,45 @@ Do not automatically move the stop to breakeven at +1R.
 
 Record holding duration and stagnation, but do not add a 7-, 10- or 15-day forced exit before seeing whether the entry setup itself has edge.
 
-## 19. Market breadth treatment
+## 19. Outcome definitions
+
+For each completed trade calculate at minimum:
+
+### Setup-quality lens
+
+```text
+Return = (Exit_Price - Entry_Open) / Entry_Open
+```
+
+Return profit factor:
+
+```text
+sum of positive trade returns / absolute sum of negative trade returns
+```
+
+### Practical-trading lens
+
+Define initial risk per share:
+
+```text
+Initial_Risk = Entry_Open - Structural_Stop
+```
+
+Define realized R:
+
+```text
+R_Multiple = (Exit_Price - Entry_Open) / Initial_Risk
+```
+
+R profit factor:
+
+```text
+sum of positive R multiples / absolute sum of negative R multiples
+```
+
+If a gap exits below the structural stop, realized loss may be worse than `-1R`.
+
+## 20. Market breadth treatment
 
 Do **not** use breadth as a V2 entry gate in the primary test.
 
@@ -413,7 +528,7 @@ If V2 independently demonstrates edge, a later isolated hypothesis may test:
 
 Test HOSTILE exclusion before considering a STRONG-only entry requirement.
 
-## 20. Sector relative strength
+## 21. Sector relative strength
 
 Do not use sector RS as a mandatory V2 entry gate in the first validation.
 
@@ -423,7 +538,7 @@ Earlier sector-RS evidence was not strong or monotonic enough to justify a hard 
 
 Sector strength may later be evaluated as a ranking/tiebreaking feature in a separate hypothesis.
 
-## 21. Event-risk treatment
+## 22. Event-risk treatment
 
 Historical kernel validation should not synthesize a hindsight-heavy news filter.
 
@@ -439,7 +554,7 @@ For live execution, retain the operational V1 safety review for:
 
 The live default is to avoid initiating an ordinary momentum trade immediately before a major binary event unless event risk is consciously accepted.
 
-## 22. Overlapping signals and capital constraints
+## 23. Overlapping signals and capital constraints
 
 The first V2 validation asks:
 
@@ -458,7 +573,7 @@ If signal-level V2 passes, run a separate portfolio-level validation incorporati
 
 Do not allow portfolio simulation to hide whether the underlying setup itself works.
 
-## 23. Two validation lenses
+## 24. Two validation lenses
 
 Use the same V2 signal set for two complementary analyses.
 
@@ -469,11 +584,11 @@ Purpose: measure whether the new base/contraction entry architecture improves ra
 Use:
 
 ```text
-Entry = next eligible session open
-Exit  = next-session execution after Daily Close < SMA20
+Entry = immediately following eligible session open
+Exit  = immediately following session open after Daily Close < SMA20
 ```
 
-This lens isolates breakout quality as cleanly as practical.
+The structural stop is ignored in this lens.
 
 ### B. Practical-trading lens
 
@@ -481,14 +596,14 @@ Purpose: measure whether the setup can be traded with realistic structural risk 
 
 Use:
 
-- the same V2 entry;
-- the initial structural stop;
-- next-session SMA20 trend exit;
+- the identical V2 signal/entry set;
+- the fixed initial structural stop;
+- the same next-session SMA20 trend exit;
 - R-normalized outcomes based on initial risk.
 
 Do not change the signal set between the two lenses.
 
-## 24. Precommitted validation gate
+## 25. Precommitted validation gate
 
 The following gates are locked before observing V2 outcomes.
 
@@ -500,7 +615,9 @@ Require:
 Completed trades >= 100
 ```
 
-If fewer than 100 completed trades exist, classify the result as **insufficient evidence**, not success or failure.
+The count refers to V2 entries with completed outcomes in both validation lenses.
+
+If fewer than 100 completed trades exist, classify the result as **INSUFFICIENT_EVIDENCE**, not success or failure.
 
 ### Setup-quality requirements
 
@@ -519,19 +636,88 @@ Require:
 Mean expectancy >= +0.15R per trade
 ```
 
-### Robustness requirements
+Also report practical R profit factor as a primary metric even though no additional precommitted pass threshold beyond the expectancy gate is introduced here.
 
-Require all of the following:
+### Temporal robustness
 
-- positive evidence across at least two materially distinct market periods/episodes where sample size permits;
-- after removing the top five positive-P&L winners, profit factor remains `>= 1.0`;
-- no single stock explains the strategy's edge;
-- no point-in-time/lookahead violations;
-- no outcome-driven parameter changes.
+Use calendar-year entry cohorts as the predefined temporal robustness test.
 
-Year/episode summaries, leave-one-symbol-out tests and positive-winner outlier diagnostics should be produced as audit outputs.
+A **qualifying calendar year** contains at least 20 completed V2 trades.
 
-## 25. Interpretation rules after validation
+Require:
+
+- at least two qualifying calendar years; and
+- at least two qualifying calendar years with both setup-quality mean return `> 0` and practical mean R `> 0`.
+
+If the overall sample has at least 100 trades but fewer than two qualifying calendar years, classify temporal robustness as **INSUFFICIENT_EVIDENCE** rather than silently redefining time periods after seeing outcomes.
+
+### Positive-winner outlier robustness
+
+Run the test independently for each validation lens:
+
+- setup-quality lens: remove the five trades with the highest percentage returns;
+- practical lens: remove the five trades with the highest R multiples.
+
+After removal require:
+
+```text
+Setup-quality Return PF >= 1.0
+Practical R PF >= 1.0
+```
+
+Do not choose a different outlier count after seeing results.
+
+### Single-symbol dependence
+
+Run leave-one-symbol-out analysis across every symbol represented in the completed V2 trade set.
+
+For every leave-one-symbol-out sample require:
+
+```text
+Setup-quality Mean Return > 0
+Setup-quality Return PF >= 1.0
+Practical Mean R > 0
+```
+
+If excluding any single symbol causes those minimum edge conditions to fail, classify the strategy as failing the single-symbol robustness gate.
+
+### Point-in-time integrity
+
+Require zero lookahead violations.
+
+Audit at minimum:
+
+- signal date < entry date;
+- RS context date < entry date;
+- breadth context date < entry date;
+- indicator/base inputs do not use bars after the signal date;
+- point-in-time index membership is evaluated on the signal date;
+- no exit uses a close before that close is known.
+
+### No outcome-driven parameter changes
+
+The parameters in this spec are frozen for the first V2 validation.
+
+Changing any of them after observing outcomes creates a **new hypothesis/version** and must be documented as such rather than replacing the original V2 result.
+
+## 26. Required research outputs
+
+The implementation must generate reproducible machine-readable outputs sufficient to audit the strategy without rerunning calculations by hand.
+
+At minimum produce:
+
+- signal/trade-level dataset with pivot/base/RS/trend/ATR/entry/stop/exit fields;
+- rejected/cancelled-signal audit with explicit reason codes;
+- overall setup-quality summary;
+- overall practical-trading summary;
+- calendar-year summary;
+- leave-one-symbol-out summary;
+- top-five-winner-removal robustness summary;
+- breadth-regime diagnostic summary;
+- validation/invariant report;
+- concise research report stating factual results without tuning recommendations.
+
+## 27. Interpretation rules after validation
 
 ### If V2 passes
 
@@ -561,7 +747,7 @@ Diagnose the failure mode first:
 
 Then decide whether a **new hypothesis** deserves testing.
 
-## 26. Streak vs custom research decision
+## 28. Streak vs custom research decision
 
 ### Decision: `CUSTOM_REQUIRED`
 
@@ -577,12 +763,12 @@ The complete V2 hypothesis cannot be faithfully represented in Streak because it
 
 Do not replace this with a simplified Streak proxy if doing so changes the hypothesis back into a generic recent-high breakout plus indicators.
 
-Custom research should remain narrow and research-oriented rather than becoming production infrastructure.
+Custom research must remain narrow and research-oriented rather than becoming production infrastructure.
 
-## 27. Locked V2 kernel
+## 29. Locked V2 kernel
 
 ```text
-POINT-IN-TIME NIFTY 500
+POINT-IN-TIME NIFTY 500 ON SIGNAL DATE
         ↓
 20-session median traded value >= ₹10 crore
         ↓
@@ -590,36 +776,35 @@ Close > SMA50 > SMA200
         ↓
 Composite_RS >= 70
         ↓
-Establish 63-session pivot/high
+63-session High seeds one active base
         ↓
-10–30 session base
+10–30 base sessions
         ↓
-Base depth <= 4 ATR14-at-pivot
+Base depth <= 4 ATR14-at-original-pivot
         ↓
 Final 5-session mean True Range
 <= 80% of initial 5-session mean True Range
         ↓
 Daily Close breaks active pivot
         ↓
-Breakout Close <= Pivot + 1 ATR14
+Breakout Close <= Pivot + 1 ATR14_signal
         ↓
-Next-session Open remains >= Pivot
-and <= Pivot + 1 ATR14
+Immediate next-session Open remains >= Pivot
+and <= Pivot + 1 ATR14_signal
         ↓
-ENTRY
+Structural Stop = final 5 pre-breakout session low - 0.25 ATR14_signal
         ↓
-Structural Stop = final 5-session low - 0.25 ATR14
+Reject if Entry - Stop > 2.5 ATR14_signal
         ↓
-Reject if Entry - Stop > 2.5 ATR14
+ENTRY AT THAT NEXT OPEN
         ↓
-Practical risk normalization at 1% swing-capital risk
+Setup-quality lens: SMA20 close exit only
+Practical lens: fixed structural stop + SMA20 close exit
         ↓
-Hold while trend survives
-        ↓
-Daily Close < SMA20 → exit next session
+Daily Close < SMA20 → exit next session open
 ```
 
-## 28. Explicitly not part of initial V2
+## 30. Explicitly not part of initial V2
 
 The first validation must not add:
 
@@ -637,9 +822,9 @@ The first validation must not add:
 - portfolio-position limits in the signal-level test;
 - parameter sweeps intended to maximize backtest performance.
 
-## 29. Research handoff after design approval
+## 31. Research handoff after written-spec approval
 
-Once this design document is reviewed and accepted, the next workflow is:
+Once this written design document is reviewed and accepted, the next workflow is:
 
 1. create a dedicated GitHub issue for Strategy V2 historical validation;
 2. create a mechanical implementation plan under `Swing Trading/docs/superpowers/plans/`;

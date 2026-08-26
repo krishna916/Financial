@@ -12,6 +12,7 @@ from research.swing.stock_rs.build_stock_rs import (  # noqa: E402
     assign_rs_status,
     calculate_returns,
     calculate_daily_stock_rs,
+    normalize_yahoo_frame,
 )
 
 
@@ -106,3 +107,52 @@ def test_daily_rs_composite_uses_locked_thirty_forty_thirty_weights():
         + 0.30 * target["RS126_Percentile"]
     )
     assert target["Composite_RS"] == pytest.approx(expected)
+
+
+def test_normalize_yahoo_frame_handles_single_level_columns_and_sorts_dates():
+    downloaded = pd.DataFrame(
+        {
+            "Close": [101.0, 100.0],
+            "Adj Close": [100.5, 99.5],
+        },
+        index=pd.to_datetime(["2026-01-03", "2026-01-02"]),
+    )
+    result = normalize_yahoo_frame(downloaded, "SBIN", "SBIN.NS")
+    assert result.columns.tolist() == [
+        "Date",
+        "Symbol",
+        "Yahoo_Ticker",
+        "Close",
+        "Adj_Close",
+    ]
+    assert result["Date"].tolist() == list(
+        pd.to_datetime(["2026-01-02", "2026-01-03"])
+    )
+    assert result["Symbol"].tolist() == ["SBIN", "SBIN"]
+    assert result["Yahoo_Ticker"].tolist() == ["SBIN.NS", "SBIN.NS"]
+    assert result["Close"].tolist() == [100.0, 101.0]
+    assert result["Adj_Close"].tolist() == [99.5, 100.5]
+
+
+def test_normalize_yahoo_frame_handles_one_ticker_multiindex_columns():
+    columns = pd.MultiIndex.from_tuples(
+        [("Close", "SBIN.NS"), ("Adj Close", "SBIN.NS")]
+    )
+    downloaded = pd.DataFrame(
+        [[100.0, 99.5], [101.0, 100.5]],
+        columns=columns,
+        index=pd.to_datetime(["2026-01-02", "2026-01-03"]),
+    )
+    result = normalize_yahoo_frame(downloaded, "SBIN", "SBIN.NS")
+    assert result[["Close", "Adj_Close"]].to_dict("list") == {
+        "Close": [100.0, 101.0],
+        "Adj_Close": [99.5, 100.5],
+    }
+
+
+def test_normalize_yahoo_frame_rejects_missing_adjusted_close():
+    downloaded = pd.DataFrame(
+        {"Close": [100.0]}, index=pd.to_datetime(["2026-01-02"])
+    )
+    with pytest.raises(ValueError, match="Adj Close"):
+        normalize_yahoo_frame(downloaded, "SBIN", "SBIN.NS")

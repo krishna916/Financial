@@ -2,7 +2,19 @@
 
 from __future__ import annotations
 
+from pathlib import Path
+
 import pandas as pd
+import yfinance as yf
+
+
+START_DATE = "2022-01-01"
+END_DATE_EXCLUSIVE = "2026-08-26"
+INTERVAL = "1d"
+
+BASE_DIR = Path(__file__).resolve().parent
+CONFIG_PATH = BASE_DIR / "stock_ticker_config.csv"
+OUTPUT_DIR = BASE_DIR / "output"
 
 
 def calculate_returns(frame: pd.DataFrame) -> pd.DataFrame:
@@ -87,3 +99,114 @@ def calculate_daily_stock_rs(
     result["Is_Full_Universe"] = True
     result["RS_Status"] = result["Composite_RS"].map(assign_rs_status)
     return result.sort_values(["Date", "Composite_Rank"]).reset_index(drop=True)
+
+
+def _resolve_yahoo_column(downloaded: pd.DataFrame, field: str) -> object:
+    """Resolve a price field from single-level or one-ticker MultiIndex data."""
+
+    if not isinstance(downloaded.columns, pd.MultiIndex):
+        if field in downloaded.columns:
+            return field
+        raise ValueError(
+            f"Yahoo response did not provide a unique {field!r} column; "
+            f"received columns: {list(downloaded.columns)!r}"
+        )
+
+    matches = [
+        column
+        for column in downloaded.columns
+        if field in {str(level) for level in column}
+    ]
+    if len(matches) != 1:
+        raise ValueError(
+            f"Yahoo response did not provide a unique {field!r} column; "
+            f"received columns: {list(downloaded.columns)!r}"
+        )
+    return matches[0]
+
+
+def normalize_yahoo_frame(
+    downloaded: pd.DataFrame, symbol: str, ticker: str
+) -> pd.DataFrame:
+    """Normalize one ticker's Yahoo daily response without filling prices."""
+
+    if downloaded is None or downloaded.empty:
+        raise ValueError("Yahoo returned no daily rows")
+
+    close_column = _resolve_yahoo_column(downloaded, "Close")
+    adjusted_close_column = _resolve_yahoo_column(downloaded, "Adj Close")
+    dates = pd.to_datetime(downloaded.index)
+    if isinstance(dates, pd.DatetimeIndex) and dates.tz is not None:
+        dates = dates.tz_localize(None)
+    if pd.isna(dates).any():
+        raise ValueError("Yahoo response contains invalid dates")
+    if dates.duplicated().any():
+        raise ValueError("Yahoo response contains duplicate dates")
+
+    normalized = pd.DataFrame(
+        {
+            "Date": dates,
+            "Symbol": symbol,
+            "Yahoo_Ticker": ticker,
+            "Close": pd.to_numeric(downloaded[close_column], errors="coerce"),
+            "Adj_Close": pd.to_numeric(
+                downloaded[adjusted_close_column], errors="coerce"
+            ),
+        }
+    )
+    return normalized.sort_values("Date").reset_index(drop=True)
+
+
+def download_stock_history(symbol: str, ticker: str) -> pd.DataFrame:
+    """Download and normalize one configured ticker's daily history."""
+
+    downloaded = yf.download(
+        ticker,
+        start=START_DATE,
+        end=END_DATE_EXCLUSIVE,
+        interval=INTERVAL,
+        auto_adjust=False,
+        progress=False,
+        actions=False,
+    )
+    return normalize_yahoo_frame(downloaded, symbol, ticker)
+
+
+def _format_date(value: object) -> str:
+    if value is None or pd.isna(value):
+        return ""
+    return pd.Timestamp(value).strftime("%Y-%m-%d")
+
+
+def build_raw_validation_row(
+    symbol: str,
+    ticker: str,
+    frame: pd.DataFrame | None,
+    download_status: str = "OK",
+) -> dict[str, object]:
+    """Build one auditable raw-history validation record."""
+
+    if frame is None or frame.empty:
+        return {
+            "Symbol": symbol,
+            "Yahoo_Ticker": ticker,
+            "Download_Status": download_status,
+            "Raw_Rows": 0,
+            "Earliest_Raw_Date": "",
+            "Latest_Raw_Date": "",
+            "Duplicate_Date_Count": 0,
+            "Missing_Close_Count": 0,
+            "Missing_Adj_Close_Count": 0,
+        }
+
+    return {
+        "Symbol": symbol,
+        "Yahoo_Ticker": ticker,
+        "Download_Status": download_status,
+        "Raw_Rows": int(len(frame)),
+        "Earliest_Raw_Date": _format_date(frame["Date"].min()),
+        "Latest_Raw_Date": _format_date(frame["Date"].max()),
+        "Duplicate_Date_Count": int(frame["Date"].duplicated().sum()),
+        "Missing_Close_Count": int(frame["Close"].isna().sum()),
+        "Missing_Adj_Close_Count": int(frame["Adj_Close"].isna().sum()),
+    }

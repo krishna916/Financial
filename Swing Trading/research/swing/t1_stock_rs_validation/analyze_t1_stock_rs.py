@@ -85,6 +85,22 @@ STOCK_RS_FEATURE_COLUMNS = [
     "Is_Full_Universe",
     "RS_Status",
 ]
+STATUS_ORDER = ["PREFERRED", "VALID", "BELOW_VALID"]
+JOINED_TRADE_COLUMNS = [
+    "Symbol",
+    "Entry_Date",
+    "Exit_Date",
+    "Entry_Price",
+    "Exit_Price",
+    "Qty",
+    "Return_Pct",
+    "PnL",
+    "Holding_Days",
+    "Source_Log",
+    "RS_Matched_Date",
+    "RS_Date_Lag_Days",
+    *STOCK_RS_FEATURE_COLUMNS,
+]
 EXPECTED_T1_SYMBOLS = {
     "HDFCBANK",
     "ICICIBANK",
@@ -410,3 +426,54 @@ def validate_stock_rs_join(
         float(joined["PnL"].sum()), expected_total_pnl, abs_tol=0.01
     ):
         raise ValueError("joined stock RS PnL does not reconcile to the locked T1 input")
+
+
+def summarize_status_groups(joined: pd.DataFrame) -> pd.DataFrame:
+    """Summarize the three locked stock-RS status bands in fixed order."""
+
+    _require_columns(joined, ["RS_Status", *["Return_Pct", "PnL", "Holding_Days"]], "joined stock RS data")
+    if not joined["RS_Status"].isin(ALLOWED_RS_STATUSES).all():
+        raise ValueError("joined stock RS data contains an invalid RS_Status")
+    rows = []
+    for status in STATUS_ORDER:
+        group = joined.loc[joined["RS_Status"].eq(status)]
+        rows.append({"RS_Status": status, **calculate_trade_metrics(group)})
+    return pd.DataFrame(rows, columns=["RS_Status", *METRIC_COLUMNS])
+
+
+def prepare_joined_trade_export(joined: pd.DataFrame) -> pd.DataFrame:
+    """Select and deterministically sort the auditable trade-level export."""
+
+    _require_columns(joined, JOINED_TRADE_COLUMNS, "joined stock RS data")
+    return (
+        joined[JOINED_TRADE_COLUMNS]
+        .sort_values(["Entry_Date", "Symbol", "Exit_Date"])
+        .reset_index(drop=True)
+    )
+
+
+def _write_csv(frame: pd.DataFrame, path: Path) -> None:
+    output = frame.copy()
+    for column in output.columns:
+        if pd.api.types.is_datetime64_any_dtype(output[column]):
+            output[column] = output[column].dt.strftime("%Y-%m-%d")
+    output.to_csv(path, index=False, lineterminator="\n")
+
+
+def run_analysis() -> dict[str, pd.DataFrame]:
+    """Run the currently implemented primary validation outputs."""
+
+    trades = load_and_validate_trades()
+    rs = load_and_validate_stock_rs()
+    joined = join_stock_rs_at_decision_time(trades, rs)
+    validate_stock_rs_join(joined)
+    joined_export = prepare_joined_trade_export(joined)
+    status = summarize_status_groups(joined)
+    OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
+    _write_csv(joined_export, OUTPUT_DIR / "t1_stock_rs_joined_trades.csv")
+    _write_csv(status, OUTPUT_DIR / "t1_stock_rs_status_summary.csv")
+    return {"joined": joined, "status": status}
+
+
+if __name__ == "__main__":
+    run_analysis()

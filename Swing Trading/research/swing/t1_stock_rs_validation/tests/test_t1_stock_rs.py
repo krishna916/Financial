@@ -19,6 +19,8 @@ from research.swing.t1_stock_rs_validation.analyze_t1_stock_rs import (  # noqa:
     join_stock_rs_at_decision_time,
     load_and_validate_stock_rs,
     load_and_validate_trades,
+    prepare_joined_trade_export,
+    summarize_status_groups,
     validate_stock_rs_join,
 )
 
@@ -178,3 +180,86 @@ def test_real_stock_rs_join_is_complete_and_reconciles_locked_t1_input():
     assert joined["Is_Full_Universe"].eq(True).all()
     assert joined["Composite_Rank"].between(1, 20).all()
     assert math.isclose(float(joined["PnL"].sum()), -4631.32, abs_tol=0.01)
+
+
+def test_status_summary_preserves_locked_status_order_and_metrics():
+    joined = pd.DataFrame(
+        {
+            "RS_Status": ["BELOW_VALID", "PREFERRED", "VALID"],
+            "Return_Pct": [1.0, 2.0, -1.0],
+            "PnL": [10.0, 20.0, -5.0],
+            "Holding_Days": [3, 4, 5],
+        }
+    )
+
+    result = summarize_status_groups(joined)
+
+    assert result["RS_Status"].tolist() == ["PREFERRED", "VALID", "BELOW_VALID"]
+    assert result.columns.tolist() == ["RS_Status", *[
+        "Trades",
+        "Winners",
+        "Losers",
+        "Win_Rate",
+        "Mean_Return",
+        "Median_Return",
+        "Average_Winner",
+        "Average_Loser",
+        "Payoff_Ratio",
+        "Return_Profit_Factor",
+        "PnL_Profit_Factor",
+        "Total_PnL",
+        "Median_Holding_Days",
+    ]]
+    assert result["Trades"].tolist() == [1, 1, 1]
+
+
+def test_status_summary_reconciles_canonical_join():
+    trades = load_and_validate_trades(T1_TRADES_PATH)
+    rs = load_and_validate_stock_rs(STOCK_RS_PATH)
+    joined = join_stock_rs_at_decision_time(trades, rs)
+
+    result = summarize_status_groups(joined)
+
+    assert result["Trades"].sum() == 218
+    assert math.isclose(float(result["Total_PnL"].sum()), -4631.32, abs_tol=0.01)
+
+
+def test_joined_trade_export_uses_locked_columns_and_sort_order():
+    joined = pd.DataFrame(
+        {
+            "Symbol": ["SBIN", "ADANIENT"],
+            "Entry_Date": pd.to_datetime(["2024-02-01", "2024-01-01"]),
+            "Exit_Date": pd.to_datetime(["2024-02-02", "2024-01-03"]),
+            "Entry_Price": [2.0, 1.0],
+            "Exit_Price": [2.1, 1.1],
+            "Qty": [1, 1],
+            "Return_Pct": [5.0, 10.0],
+            "PnL": [1.0, 2.0],
+            "Holding_Days": [1, 2],
+            "Source_Log": ["b", "a"],
+            "RS_Matched_Date": pd.to_datetime(["2024-01-31", "2023-12-29"]),
+            "RS_Date_Lag_Days": [1, 3],
+            "Ret21": [0.1, 0.2],
+            "Ret63": [0.1, 0.2],
+            "Ret126": [0.1, 0.2],
+            "RS21_Percentile": [80.0, 90.0],
+            "RS63_Percentile": [80.0, 90.0],
+            "RS126_Percentile": [80.0, 90.0],
+            "Composite_RS": [80.0, 90.0],
+            "Composite_Rank": [2, 1],
+            "Stock_Count": [20, 20],
+            "Is_Full_Universe": [True, True],
+            "RS_Status": ["PREFERRED", "PREFERRED"],
+        }
+    )
+
+    result = prepare_joined_trade_export(joined)
+
+    assert result.columns.tolist() == [
+        "Symbol", "Entry_Date", "Exit_Date", "Entry_Price", "Exit_Price", "Qty",
+        "Return_Pct", "PnL", "Holding_Days", "Source_Log", "RS_Matched_Date",
+        "RS_Date_Lag_Days", "Ret21", "Ret63", "Ret126", "RS21_Percentile",
+        "RS63_Percentile", "RS126_Percentile", "Composite_RS", "Composite_Rank",
+        "Stock_Count", "Is_Full_Universe", "RS_Status",
+    ]
+    assert result["Symbol"].tolist() == ["ADANIENT", "SBIN"]

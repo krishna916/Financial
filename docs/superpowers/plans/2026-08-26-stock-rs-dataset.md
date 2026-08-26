@@ -2,19 +2,36 @@
 
 > **For agentic workers:** REQUIRED SUB-SKILL: Use `superpowers:executing-plans` to implement this plan task-by-task using **inline execution only**. Do not use subagent-driven development. Steps use checkbox (`- [ ]`) syntax for tracking.
 
-**Goal:** Build a reproducible, point-in-time stock relative-strength dataset for the fixed 20-stock T1 basket, but only after a Streak-first preflight confirms that Streak cannot express the exact historical cross-sectional RS hypothesis.
+**Goal:** Build a reproducible, point-in-time stock relative-strength dataset for the fixed 20-stock T1 basket for later independent validation against the locked 218 T1 trades.
 
-**Architecture:** First perform a deterministic Streak-capability preflight. If Streak can historically rank each stock against a multi-stock universe on the same date using the locked 21/63/126-session RS composite, stop the custom build and document the exact Streak setup. Otherwise, build a standalone Python pipeline that downloads the fixed 20 stocks, calculates adjusted-price session returns, restricts ranking to complete 20-stock dates, computes same-day percentiles and the locked 30/40/30 composite, validates every invariant, and exports auditable CSVs. Trade P&L is intentionally absent from this phase.
+**Architecture:** The Portfolio Advisor has already made the methodology decision that Streak cannot faithfully test this exact feature because Streak can backtest conditions across a basket but does not historically calculate same-date cross-sectional percentile/rank of each stock against the basket. Therefore this plan has no Streak-capability decision step. Luna only implements the approved custom-data path: download the fixed 20 stocks, calculate adjusted-price 21/63/126-session returns, rank all 20 stocks cross-sectionally on complete dates, compute the locked 30/40/30 composite, validate every invariant, and export auditable artifacts. Trade P&L is intentionally absent from this phase.
 
 **Tech Stack:** Python 3.11+, pandas, numpy, yfinance, pytest.
 
 **Spec:** GitHub Issue #5 — `https://github.com/krishna916/Financial/issues/5`
 
+## Portfolio-Advisor Methodology Decision — DO NOT RE-EVALUATE
+
+The decision for this experiment is already locked:
+
+```text
+Validation source: CUSTOM_REQUIRED
+Reason: the feature is historical same-day cross-sectional RS percentile/rank
+        across a multi-stock comparison universe. Streak does not faithfully
+        expose that feature as a historical strategy condition.
+```
+
+Luna must **not**:
+
+- research whether Streak can do it;
+- replace the feature with RSI, ROC, momentum, SMA, or another single-stock Streak indicator;
+- stop the task because it finds a superficially similar Streak feature;
+- make a new methodological decision.
+
+General project rule remains: **the Portfolio Advisor should prefer Streak whenever Streak can faithfully test the exact hypothesis.** That decision is made before a Luna implementation task is written.
+
 ## Global Constraints
 
-- **Streak first:** if Streak can faithfully perform the exact hypothesis, do not rebuild it in Python.
-- The exact hypothesis is **cross-sectional point-in-time stock RS**, not a single-stock RSI/ROC/MA proxy.
-- Custom data is allowed only when Streak cannot produce the required same-date ranking across the comparison universe.
 - This task is **data preparation only**. Do not inspect or join T1 trade returns/P&L.
 - Fixed universe: exactly the 20 stocks in Issue #5.
 - Historical window: `2022-01-01` through `2026-08-25` inclusive.
@@ -41,7 +58,6 @@ Swing Trading/research/swing/stock_rs/
 ├── stock_ticker_config.csv
 ├── requirements.txt
 ├── README.md
-├── streak_preflight.md
 ├── tests/
 │   └── test_stock_rs.py
 └── output/
@@ -52,87 +68,15 @@ Swing Trading/research/swing/stock_rs/
 
 Responsibilities:
 
-- `streak_preflight.md` — records whether the exact hypothesis is available in Streak and why the custom path is or is not allowed.
-- `stock_ticker_config.csv` — immutable experiment universe.
-- `build_stock_rs.py` — market-data loading, normalization, returns, full-universe ranking, validation, exports.
-- `tests/test_stock_rs.py` — deterministic tests for all non-network methodology.
-- `README.md` — methodology, commands, limitations and Streak-first decision.
-- `output/*.csv` — committed research artifacts only after final verification.
+- `stock_ticker_config.csv` — immutable 20-stock experiment universe.
+- `build_stock_rs.py` — download, normalization, return calculation, full-universe ranking, validation, and exports.
+- `tests/test_stock_rs.py` — deterministic tests for all methodology that does not require live network access.
+- `README.md` — exact methodology, run commands, custom-data limitations, and the Portfolio Advisor's already-made Streak-vs-custom decision.
+- `output/*.csv` — committed generated research artifacts only after final verification.
 
 ---
 
-### Task 1: Perform the Streak-first capability preflight
-
-**Files:**
-- Create: `Swing Trading/research/swing/stock_rs/streak_preflight.md`
-
-**Interfaces:**
-- Produces a single decision: `STREAK_EXACT` or `CUSTOM_REQUIRED`.
-- All later tasks are conditional on `CUSTOM_REQUIRED`.
-
-- [ ] **Step 1: Define the exact capability test before searching**
-
-The only capability that counts as `STREAK_EXACT` is historical support for all of the following together:
-
-```text
-A. Evaluate multiple symbols on the same historical date.
-B. Calculate 21-, 63-, and 126-session stock returns.
-C. Convert each horizon into a cross-sectional percentile/rank against the chosen universe on that date.
-D. Combine those percentiles with fixed 30/40/30 weights.
-E. Use the resulting Composite_RS / percentile as a historical strategy condition or exportable historical feature.
-```
-
-A single-stock ROC/RSI/MA comparison does **not** satisfy this test.
-
-- [ ] **Step 2: Check available Streak documentation/current capabilities**
-
-Prefer official Streak documentation/help/product information when available. Repository notes from prior experiments may also be used as supporting context.
-
-Do not infer capability merely because Streak has an indicator named `Relative Strength` or `RSI`.
-
-- [ ] **Step 3: Write `streak_preflight.md` using exactly one decision**
-
-Template:
-
-```markdown
-# Stock RS Streak Preflight
-
-Decision: CUSTOM_REQUIRED
-
-Exact hypothesis: same-day cross-sectional 21/63/126-session stock RS percentile across the comparison universe, combined 30/40/30.
-
-Evidence checked:
-- <source/capability checked>
-
-Why Streak is insufficient:
-- <specific missing capability>
-
-Important: single-stock momentum indicators are not equivalent to cross-sectional universe percentile ranking.
-```
-
-Use `STREAK_EXACT` instead only if explicit evidence proves A-E above.
-
-- [ ] **Step 4: Apply the stop rule**
-
-If decision is `STREAK_EXACT`:
-
-1. document the exact Streak construction in the same file;
-2. do **not** create Python/yfinance research code;
-3. comment on Issue #5 that custom implementation stopped because Streak can test the exact hypothesis;
-4. stop execution.
-
-If decision is `CUSTOM_REQUIRED`, continue.
-
-- [ ] **Step 5: Commit the preflight**
-
-```bash
-git add "Swing Trading/research/swing/stock_rs/streak_preflight.md"
-git commit -m "research: document stock RS Streak preflight"
-```
-
----
-
-### Task 2: Lock the custom fallback universe and dependencies
+### Task 1: Lock the experiment universe and dependencies
 
 **Files:**
 - Create: `Swing Trading/research/swing/stock_rs/requirements.txt`
@@ -142,17 +86,7 @@ git commit -m "research: document stock RS Streak preflight"
 **Interfaces:**
 - Produces config columns `Symbol,Yahoo_Ticker`.
 
-- [ ] **Step 1: Assert preflight allows custom work**
-
-Before creating the custom pipeline, read `streak_preflight.md` and assert it contains:
-
-```text
-Decision: CUSTOM_REQUIRED
-```
-
-If not, stop.
-
-- [ ] **Step 2: Create `requirements.txt` exactly**
+- [ ] **Step 1: Create `requirements.txt` exactly**
 
 ```text
 yfinance
@@ -161,7 +95,7 @@ numpy
 pytest
 ```
 
-- [ ] **Step 3: Create `stock_ticker_config.csv` exactly**
+- [ ] **Step 2: Create `stock_ticker_config.csv` exactly**
 
 ```csv
 Symbol,Yahoo_Ticker
@@ -187,13 +121,36 @@ ADANIENT,ADANIENT.NS
 ULTRACEMCO,ULTRACEMCO.NS
 ```
 
-- [ ] **Step 4: Create a config test**
+- [ ] **Step 3: Write the config test**
 
 ```python
 from pathlib import Path
 import pandas as pd
 
 BASE_DIR = Path(__file__).resolve().parents[1]
+
+EXPECTED = {
+    "HDFCBANK": "HDFCBANK.NS",
+    "ICICIBANK": "ICICIBANK.NS",
+    "SBIN": "SBIN.NS",
+    "BAJFINANCE": "BAJFINANCE.NS",
+    "TCS": "TCS.NS",
+    "INFY": "INFY.NS",
+    "M&M": "M&M.NS",
+    "MARUTI": "MARUTI.NS",
+    "LT": "LT.NS",
+    "RELIANCE": "RELIANCE.NS",
+    "ONGC": "ONGC.NS",
+    "ITC": "ITC.NS",
+    "HINDUNILVR": "HINDUNILVR.NS",
+    "SUNPHARMA": "SUNPHARMA.NS",
+    "APOLLOHOSP": "APOLLOHOSP.NS",
+    "BHARTIARTL": "BHARTIARTL.NS",
+    "TATASTEEL": "TATASTEEL.NS",
+    "POWERGRID": "POWERGRID.NS",
+    "ADANIENT": "ADANIENT.NS",
+    "ULTRACEMCO": "ULTRACEMCO.NS",
+}
 
 
 def test_stock_config_is_exact_fixed_twenty_stock_universe():
@@ -202,13 +159,10 @@ def test_stock_config_is_exact_fixed_twenty_stock_universe():
     assert len(df) == 20
     assert df["Symbol"].is_unique
     assert df["Yahoo_Ticker"].is_unique
-    mapping = dict(zip(df["Symbol"], df["Yahoo_Ticker"]))
-    assert mapping["M&M"] == "M&M.NS"
-    assert mapping["HDFCBANK"] == "HDFCBANK.NS"
-    assert mapping["ULTRACEMCO"] == "ULTRACEMCO.NS"
+    assert dict(zip(df["Symbol"], df["Yahoo_Ticker"])) == EXPECTED
 ```
 
-- [ ] **Step 5: Run the config test**
+- [ ] **Step 4: Run the config test**
 
 ```bash
 python -m pytest "Swing Trading/research/swing/stock_rs/tests/test_stock_rs.py::test_stock_config_is_exact_fixed_twenty_stock_universe" -v
@@ -216,18 +170,18 @@ python -m pytest "Swing Trading/research/swing/stock_rs/tests/test_stock_rs.py::
 
 Expected: PASS.
 
-- [ ] **Step 6: Commit**
+- [ ] **Step 5: Commit**
 
 ```bash
 git add "Swing Trading/research/swing/stock_rs/requirements.txt" \
         "Swing Trading/research/swing/stock_rs/stock_ticker_config.csv" \
         "Swing Trading/research/swing/stock_rs/tests/test_stock_rs.py"
-git commit -m "research: lock stock RS fallback universe"
+git commit -m "research: lock stock RS universe"
 ```
 
 ---
 
-### Task 3: Implement exact session-return and locked status logic with TDD
+### Task 2: Implement exact session-return and locked status logic with TDD
 
 **Files:**
 - Create: `Swing Trading/research/swing/stock_rs/build_stock_rs.py`
@@ -255,11 +209,8 @@ def test_calculate_returns_uses_exact_adjusted_close_session_shifts():
     assert math.isclose(result.loc[21, "Ret21"], 121.0 / 100.0 - 1.0)
     assert math.isclose(result.loc[63, "Ret63"], 163.0 / 100.0 - 1.0)
     assert math.isclose(result.loc[126, "Ret126"], 226.0 / 100.0 - 1.0)
-```
 
-- [ ] **Step 2: Add failing status-boundary test**
 
-```python
 @pytest.mark.parametrize(
     ("score", "expected"),
     [
@@ -275,7 +226,7 @@ def test_assign_rs_status_uses_locked_v1_thresholds(score, expected):
     assert assign_rs_status(score) == expected
 ```
 
-- [ ] **Step 3: Run tests and verify RED**
+- [ ] **Step 2: Run tests and verify RED**
 
 ```bash
 python -m pytest "Swing Trading/research/swing/stock_rs/tests/test_stock_rs.py" -v
@@ -283,7 +234,7 @@ python -m pytest "Swing Trading/research/swing/stock_rs/tests/test_stock_rs.py" 
 
 Expected: import/function failures.
 
-- [ ] **Step 4: Implement the minimum functions**
+- [ ] **Step 3: Implement the minimum functions**
 
 ```python
 def calculate_returns(frame: pd.DataFrame) -> pd.DataFrame:
@@ -302,13 +253,9 @@ def assign_rs_status(composite_rs: float) -> str:
     return "BELOW_VALID"
 ```
 
-- [ ] **Step 5: Run tests and verify GREEN**
+- [ ] **Step 4: Run tests and verify GREEN**
 
-```bash
-python -m pytest "Swing Trading/research/swing/stock_rs/tests/test_stock_rs.py" -v
-```
-
-- [ ] **Step 6: Commit**
+- [ ] **Step 5: Commit**
 
 ```bash
 git add "Swing Trading/research/swing/stock_rs/build_stock_rs.py" \
@@ -318,7 +265,7 @@ git commit -m "research: add stock RS return rules"
 
 ---
 
-### Task 4: Implement full-20 cross-sectional percentile/composite/rank logic
+### Task 3: Implement full-20 cross-sectional percentile/composite/rank logic
 
 **Files:**
 - Modify: `Swing Trading/research/swing/stock_rs/build_stock_rs.py`
@@ -333,7 +280,7 @@ Required input columns:
 Date,Symbol,Yahoo_Ticker,Close,Adj_Close,Ret21,Ret63,Ret126
 ```
 
-- [ ] **Step 1: Add failing strongest/weakest synthetic test**
+- [ ] **Step 1: Add failing strongest/weakest test**
 
 ```python
 def test_daily_rs_percentiles_and_composite_rank_strongest_stock_first():
@@ -365,11 +312,9 @@ def test_daily_rs_percentiles_and_composite_rank_strongest_stock_first():
 
 - [ ] **Step 2: Add failing incomplete-date test**
 
-Create one date with 20 stocks and one with 19. Assert only the 20-stock date survives.
+Construct one date with 20 stocks and one with 19. Assert only the 20-stock date survives.
 
 - [ ] **Step 3: Add failing composite-equation test**
-
-For a chosen synthetic stock assert:
 
 ```python
 expected = (
@@ -382,19 +327,13 @@ assert target["Composite_RS"] == pytest.approx(expected)
 
 - [ ] **Step 4: Run tests and verify RED**
 
-```bash
-python -m pytest "Swing Trading/research/swing/stock_rs/tests/test_stock_rs.py" -v
-```
-
-- [ ] **Step 5: Implement mechanically**
-
-Implementation order:
+- [ ] **Step 5: Implement mechanically in this exact order**
 
 1. remove rows missing any of `Ret21,Ret63,Ret126`;
 2. reject duplicate `(Date,Symbol)` rows;
 3. calculate date-level distinct symbol count;
 4. retain only dates with exactly 20 stocks;
-5. calculate each horizon percentile via:
+5. calculate each horizon percentile with:
 
 ```python
 result["RS21_Percentile"] = result.groupby("Date")["Ret21"].rank(
@@ -415,7 +354,7 @@ result["Composite_RS"] = (
 ```
 
 7. sort by `Date,Symbol` before ties;
-8. calculate descending per-date Composite_Rank with `method="first"`;
+8. calculate descending per-date `Composite_Rank` with `method="first"`;
 9. set `Stock_Count=20`, `Is_Full_Universe=True`;
 10. derive `RS_Status` from the locked helper;
 11. final sort `Date,Composite_Rank`.
@@ -432,7 +371,7 @@ git commit -m "research: add cross-sectional stock RS ranking"
 
 ---
 
-### Task 5: Implement Yahoo frame normalization and raw-data validation
+### Task 4: Implement Yahoo normalization and raw-data validation
 
 **Files:**
 - Modify: `Swing Trading/research/swing/stock_rs/build_stock_rs.py`
@@ -478,7 +417,7 @@ yf.download(
 )
 ```
 
-Use one ticker per download for simpler validation.
+Use one ticker per download for easier validation.
 
 Normalization must:
 
@@ -503,7 +442,7 @@ git commit -m "research: add stock RS market data loader"
 
 ---
 
-### Task 6: Build the end-to-end dataset and exports
+### Task 5: Build end-to-end dataset and exports
 
 **Files:**
 - Modify: `Swing Trading/research/swing/stock_rs/build_stock_rs.py`
@@ -515,7 +454,7 @@ git commit -m "research: add stock RS market data loader"
   - `build_stock_summary(frame) -> pd.DataFrame`
   - `validate_primary_output(frame) -> None`
 
-- [ ] **Step 1: Validate the config against the exact locked mapping**
+- [ ] **Step 1: Validate config against exact mapping**
 
 Require exactly 20 unique symbols/tickers and exact equality with Issue #5.
 
@@ -525,17 +464,17 @@ For every configured stock:
 
 1. download;
 2. normalize;
-3. create its raw validation record;
+3. create raw validation record;
 4. calculate 21/63/126 returns on that stock's own ordered sessions;
 5. append rows.
 
-If any stock fails, export/print its failure details and terminate before writing `stock_rs_daily.csv` as research-safe output.
+If any stock fails, print/export the failure and terminate before writing a research-safe `stock_rs_daily.csv`.
 
 - [ ] **Step 3: Run cross-sectional ranking only after all 20 histories exist**
 
-Concatenate all calculated-return frames and call `calculate_daily_stock_rs(..., expected_count=20)`.
+Concatenate all return frames and call `calculate_daily_stock_rs(..., expected_count=20)`.
 
-- [ ] **Step 4: Implement primary validation**
+- [ ] **Step 4: Validate primary output**
 
 Fail on any violation:
 
@@ -550,7 +489,7 @@ all horizon percentiles >0 and <=100
 all Composite_RS >0 and <=100
 statuses only PREFERRED/VALID/BELOW_VALID
 Composite_RS equals 30/40/30 recomputation
-rank 1 Composite_RS >= rank 20 Composite_RS for every date
+rank 1 Composite_RS >= rank 20 Composite_RS on every date
 ```
 
 - [ ] **Step 5: Build `stock_rs_summary.csv`**
@@ -570,7 +509,7 @@ Mean_Composite_RS
 Median_Composite_RS
 ```
 
-Assert status counts reconcile to Valid_Ranked_Days.
+Assert status counts reconcile to `Valid_Ranked_Days`.
 
 - [ ] **Step 6: Build `stock_rs_validation.csv`**
 
@@ -615,40 +554,26 @@ Write dates as `YYYY-MM-DD` and sort by `Date,Composite_Rank`.
 
 ---
 
-### Task 7: Add deterministic end-to-end invariant tests
+### Task 6: Add deterministic end-to-end invariant tests
 
 **Files:**
 - Modify: `Swing Trading/research/swing/stock_rs/tests/test_stock_rs.py`
 
-- [ ] **Step 1: Test invalid duplicate row rejection**
+- [ ] **Step 1: Test duplicate `(Date,Symbol)` rejection**
+- [ ] **Step 2: Test invalid rank-set rejection** — modify one rank so the set is not exactly `1..20`; require `ValueError`.
+- [ ] **Step 3: Test invalid universe count/flag rejection** — separately set `Stock_Count=19` and `Is_Full_Universe=False`; require `ValueError`.
+- [ ] **Step 4: Test invalid status rejection** — use `STRONG`; require `ValueError`.
+- [ ] **Step 5: Test summary reconciliation** — `Preferred_Days + Valid_Days + Below_Valid_Days == Valid_Ranked_Days` for every stock.
 
-Construct a valid synthetic 20-stock date, duplicate one `(Date,Symbol)`, assert `ValueError`.
-
-- [ ] **Step 2: Test invalid rank-set rejection**
-
-Modify one rank so the set is not exactly 1..20; assert `ValueError`.
-
-- [ ] **Step 3: Test invalid universe flag/count rejection**
-
-Set one row `Stock_Count=19` and separately one row `Is_Full_Universe=False`; assert `ValueError`.
-
-- [ ] **Step 4: Test invalid status rejection**
-
-Set one status to `STRONG`; assert `ValueError`.
-
-- [ ] **Step 5: Test summary reconciliation**
-
-Assert `Preferred_Days + Valid_Days + Below_Valid_Days == Valid_Ranked_Days` for every stock.
-
-- [ ] **Step 6: Run the full test module**
+- [ ] **Step 6: Run full test module**
 
 ```bash
 python -m pytest "Swing Trading/research/swing/stock_rs/tests/test_stock_rs.py" -v
 ```
 
-Expected: all tests PASS.
+Require zero failures.
 
-- [ ] **Step 7: Commit tests**
+- [ ] **Step 7: Commit**
 
 ```bash
 git add "Swing Trading/research/swing/stock_rs/tests/test_stock_rs.py" \
@@ -658,43 +583,36 @@ git commit -m "test: validate stock RS research invariants"
 
 ---
 
-### Task 8: Write README and document data reliability limitations
+### Task 7: Write README with methodology and reliability limitations
 
 **Files:**
 - Create: `Swing Trading/research/swing/stock_rs/README.md`
 
-- [ ] **Step 1: Document the validation-source hierarchy prominently**
+- [ ] **Step 1: Document source hierarchy accurately**
 
-README must say:
+README must state:
 
 ```text
-Streak is preferred whenever it can faithfully express a hypothesis.
-This custom dataset exists only because the current experiment requires
-same-day cross-sectional historical ranking across multiple stocks.
-It is a proxy-validation input, not a replacement for Streak where Streak
-can perform the exact test.
+Streak is preferred whenever it can faithfully express the exact hypothesis.
+For this experiment the Portfolio Advisor already determined Streak cannot
+perform the required historical same-day cross-sectional universe ranking,
+so the custom dataset path was selected before implementation.
 ```
+
+Do not present that decision as Luna's finding.
 
 - [ ] **Step 2: Document exact methodology**
 
-Include:
-
-- fixed 20-stock universe;
-- adjusted-close 21/63/126 session returns;
-- same-date percentiles;
-- 30/40/30 composite;
-- full-20 date requirement;
-- 70/80 status thresholds;
-- no T1 outcome data used.
+Include fixed 20-stock universe, adjusted-close 21/63/126-session returns, same-date percentiles, 30/40/30 composite, full-20 date requirement, 70/80 statuses, and explicit statement that no T1 outcome data was used.
 
 - [ ] **Step 3: Document reliability caveats**
 
 Explicitly state:
 
-- Yahoo/yfinance data can differ from broker/exchange/Streak histories because of vendor adjustments or corporate-action handling;
-- the fixed 20-stock universe is a methodological proxy and not the intended final Nifty 500 universe;
-- any promising RS result should later receive a robustness/spot-check against trusted market data before live deployment;
-- do not use the custom pipeline where an equivalent exact Streak test is available.
+- Yahoo/yfinance histories can differ from broker/exchange/Streak histories due to vendor adjustments or corporate-action handling;
+- the fixed 20-stock universe is a proxy, not the intended final Nifty 500 universe;
+- any promising result requires spot-checking against trusted market/broker data before live use;
+- future experiments should use Streak instead whenever the exact hypothesis is representable there.
 
 - [ ] **Step 4: Document commands from repo root**
 
@@ -703,7 +621,7 @@ python -m pytest "Swing Trading/research/swing/stock_rs/tests/test_stock_rs.py" 
 python "Swing Trading/research/swing/stock_rs/build_stock_rs.py"
 ```
 
-- [ ] **Step 5: Commit README**
+- [ ] **Step 5: Commit**
 
 ```bash
 git add "Swing Trading/research/swing/stock_rs/README.md"
@@ -712,21 +630,11 @@ git commit -m "docs: document stock RS research pipeline"
 
 ---
 
-### Task 9: Final verification before claiming completion
+### Task 8: Final verification before completion
 
 Use `superpowers:verification-before-completion`.
 
-- [ ] **Step 1: Re-read Streak preflight**
-
-If it says `STREAK_EXACT`, the presence of custom output is an error. Stop and remove the unapproved custom implementation from the branch.
-
-For the custom path, require:
-
-```text
-Decision: CUSTOM_REQUIRED
-```
-
-- [ ] **Step 2: Run full tests fresh**
+- [ ] **Step 1: Run full tests fresh**
 
 ```bash
 python -m pytest "Swing Trading/research/swing/stock_rs/tests/test_stock_rs.py" -v
@@ -734,7 +642,7 @@ python -m pytest "Swing Trading/research/swing/stock_rs/tests/test_stock_rs.py" 
 
 Require zero failures.
 
-- [ ] **Step 3: Run production dataset build fresh**
+- [ ] **Step 2: Run production dataset build fresh**
 
 ```bash
 python "Swing Trading/research/swing/stock_rs/build_stock_rs.py"
@@ -742,9 +650,7 @@ python "Swing Trading/research/swing/stock_rs/build_stock_rs.py"
 
 Require exit code 0.
 
-- [ ] **Step 4: Independently inspect generated artifacts**
-
-Run:
+- [ ] **Step 3: Independently validate generated artifacts**
 
 ```bash
 python - <<'PY'
@@ -772,13 +678,13 @@ PY
 
 Expected: `independent stock-RS artifact validation passed`.
 
-- [ ] **Step 5: Review generated data for suspicious vendor gaps**
+- [ ] **Step 4: Review vendor/calendar anomalies**
 
-Print per-stock raw row counts/date ranges and flag any stock whose history materially differs from peers. Do not silently accept a suspiciously short series merely because the final common-date filter still produces output.
+Print per-stock raw row counts/date ranges and explicitly flag any materially shorter or anomalous history. Do not silently accept it merely because common-date filtering still produces output.
 
-- [ ] **Step 6: Commit verified outputs**
+- [ ] **Step 5: Commit verified outputs**
 
-Only after Steps 1-5 pass:
+Only after Steps 1-4 pass:
 
 ```bash
 git add "Swing Trading/research/swing/stock_rs/output/stock_rs_daily.csv" \
@@ -787,19 +693,18 @@ git add "Swing Trading/research/swing/stock_rs/output/stock_rs_daily.csv" \
 git commit -m "research: add verified stock RS artifacts"
 ```
 
-- [ ] **Step 7: Open PR referencing Issue #5**
+- [ ] **Step 6: Open PR referencing Issue #5**
 
 PR body must include:
 
 ```text
-Streak preflight decision
-Why custom data was required (if CUSTOM_REQUIRED)
+Portfolio Advisor methodology decision: CUSTOM_REQUIRED
 Test command and exact pass count
 Build command and exit result
 Python/yfinance/pandas versions
 20/20 download success status
-Raw date range per dataset / ranked date range
-Primary output row count and number of ranked dates
+Raw and ranked date ranges
+Primary output row count and ranked-date count
 Any vendor/calendar anomalies
 Generated artifact paths
 Explicit statement: no T1 trade P&L was inspected in this issue
@@ -807,9 +712,4 @@ Explicit statement: no T1 trade P&L was inspected in this issue
 
 ## Completion Rule
 
-This task is complete only when either:
-
-1. `STREAK_EXACT` is proven and the custom path is stopped in favor of an exact Streak test; **or**
-2. `CUSTOM_REQUIRED` is documented and a fully verified, fixed-20 point-in-time RS dataset is produced without using T1 outcome data.
-
-The next experiment that joins RS to the 218 T1 trades must be a separate issue so the feature definition remains independent of outcomes.
+The task is complete only when a fully verified fixed-20, point-in-time stock-RS dataset is produced without using T1 outcome data. Luna's responsibility is implementation and verification only. The Portfolio Advisor retains responsibility for methodology choices, including whether Streak can faithfully represent a future hypothesis and whether a generated signal has enough evidence to affect Swing Strategy V1.

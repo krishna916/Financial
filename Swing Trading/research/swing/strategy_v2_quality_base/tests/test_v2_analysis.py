@@ -188,3 +188,32 @@ def test_evaluate_gates_cannot_pass_when_a_locked_gate_is_false():
     result = evaluate_gates(setup, practical)
     assert not bool(result.loc[result["Gate"] == "SETUP_MEAN_RETURN", "Passed"].iloc[0])
     assert result.loc[result["Gate"] == "FINAL_STATUS", "Status"].iloc[0] == "FAIL"
+
+
+def test_temporal_gate_uses_only_locked_setup_year_conditions():
+    rows = []
+    for year in (2023, 2024):
+        for index in range(20):
+            rows.append(
+                {
+                    "Entry_ID": f"{year}-{index}",
+                    "Symbol": "AAA" if index % 2 == 0 else "BBB",
+                    "Entry_Date": pd.Timestamp(year=year, month=1, day=1)
+                    + pd.Timedelta(days=index * 7),
+                    "Return": 0.02 if index < 15 else -0.01,
+                    "Holding_Sessions": 5,
+                }
+            )
+
+    setup = pd.DataFrame(rows)
+    practical = setup.assign(Initial_Risk=1.0, R_Multiple=-0.25)
+
+    result = evaluate_gates(
+        setup,
+        practical,
+        point_in_time_violations=0,
+    )
+    temporal = result.loc[result["Gate"].eq("TEMPORAL_ROBUSTNESS")].iloc[0]
+
+    assert bool(temporal["Passed"])
+    assert int(temporal["Value"]) == 2

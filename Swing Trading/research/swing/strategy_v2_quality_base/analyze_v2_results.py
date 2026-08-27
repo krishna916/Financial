@@ -375,7 +375,6 @@ def evaluate_gates(
         (years["Setup_Completed_Trades"] >= 20)
         & (years["Setup_Mean_Return"] > 0)
         & (years["Setup_Return_PF"] >= 1.0)
-        & (years["Practical_Mean_R"] > 0)
     ] if not years.empty else pd.DataFrame()
     outliers = outlier_robustness(setup, practical)
     leave_out = leave_one_symbol_out(setup, practical)

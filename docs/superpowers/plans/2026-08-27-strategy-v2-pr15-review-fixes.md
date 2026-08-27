@@ -184,8 +184,6 @@ def test_temporal_gate_uses_only_locked_setup_year_conditions():
     assert int(temporal["Value"]) == 2
 ```
 
-If `evaluate_gates()` still has a default point-in-time parameter at this task boundary, passing `point_in_time_violations=0` remains valid and prepares the test for Task 3.
-
 - [ ] **Step 2: Run focused test**
 
 ```bash
@@ -469,7 +467,7 @@ def evaluate_gates(
 ) -> pd.DataFrame:
 ```
 
-Remove the default `= 0`. Update every existing unit test call to pass `point_in_time_violations=0` unless that test intentionally supplies violations.
+Remove the default `= 0`. Update every existing unit-test call to pass `point_in_time_violations=0` unless the test intentionally supplies violations.
 
 - [ ] **Step 5: Wire the derived count into historical analysis**
 
@@ -498,11 +496,11 @@ gates = evaluate_gates(
 )
 ```
 
-A zero-violation run does not need to commit `v2_point_in_time_violations.csv`.
+A zero-violation run does not commit `v2_point_in_time_violations.csv`.
 
 - [ ] **Step 6: Strengthen end-to-end test**
 
-Import `count_point_in_time_violations`. After attaching breadth to both synthetic trade lenses, call the function with the synthetic candidates/entries/trades and assert:
+Import `count_point_in_time_violations`. After attaching breadth to both synthetic trade lenses, call it with the synthetic candidate/entry/trade frames and assert:
 
 ```python
 assert point_in_time_violations == 0
@@ -547,17 +545,6 @@ def overlap_diagnostic(
 ) -> pd.DataFrame:
 ```
 
-Implementation rules:
-
-```text
-Start from all accepted entries.
-Left-join practical Exit_Date by Entry_ID.
-Observation end = max(all Entry_Date values, all completed practical Exit_Date values).
-For diagnostic interval math only, fill missing Exit_Date with observation end.
-Do not create returns/R values for incomplete trades.
-Compute the same four existing output fields.
-```
-
 - [ ] **Step 2: Add regression test**
 
 ```python
@@ -587,7 +574,11 @@ Inside `overlap_diagnostic()`:
 data = entries[["Entry_ID", "Symbol", "Entry_Date"]].copy()
 data["Entry_Date"] = pd.to_datetime(data["Entry_Date"], errors="raise")
 
-exits = practical[["Entry_ID", "Exit_Date"]].copy() if not practical.empty else pd.DataFrame(columns=["Entry_ID", "Exit_Date"])
+exits = (
+    practical[["Entry_ID", "Exit_Date"]].copy()
+    if not practical.empty
+    else pd.DataFrame(columns=["Entry_ID", "Exit_Date"])
+)
 if not exits.empty:
     exits["Exit_Date"] = pd.to_datetime(exits["Exit_Date"], errors="raise")
 
@@ -598,7 +589,7 @@ observation_end = max(latest_entry, latest_exit)
 data["Effective_Exit_Date"] = data["Exit_Date"].fillna(observation_end)
 ```
 
-Use `Effective_Exit_Date` instead of `Exit_Date` for same-symbol and simultaneous overlap calculations. Use all `Entry_Date` rows for same-day entry counts.
+Use `Effective_Exit_Date` for same-symbol and simultaneous-open interval calculations. Use every accepted `Entry_Date` for same-day-entry counts. Do not create a return/R multiple for incomplete trades.
 
 - [ ] **Step 4: Update call site**
 
@@ -640,9 +631,9 @@ git commit -m "fix: reconcile Strategy V2 overlap counts"
 - Modify `Swing Trading/research/swing/strategy_v2_quality_base/README.md` if verification instructions need correction.
 - Do not weaken legacy tests or modify legacy research outputs to make this PR green.
 
-**Known repository fact:** `Swing Trading/research/swing/stock_rs/output/stock_rs_daily.csv` is tracked at PR #15 base SHA `0ca28d4e1175eee4181af23656230051b26bf276`. The PR must not claim that file is absent from the base without reproducing an environment/checkout reason.
+**Known repository fact:** `Swing Trading/research/swing/stock_rs/output/stock_rs_daily.csv` is tracked at PR #15 base SHA `0ca28d4e1175eee4181af23656230051b26bf276`.
 
-- [ ] **Step 1: Verify the tracked fixture in the current checkout**
+- [ ] **Step 1: Verify the tracked fixture**
 
 From repository root:
 
@@ -666,7 +657,7 @@ If it is tracked but missing locally:
 git restore -- "Swing Trading/research/swing/stock_rs/output/stock_rs_daily.csv"
 ```
 
-Then rerun the three checks.
+Then rerun the checks.
 
 - [ ] **Step 2: Run the suite from the correct package root**
 
@@ -676,24 +667,28 @@ python -m pytest -q research/swing
 cd ..
 ```
 
-The legacy suite imports modules as `research.*`; this is the canonical package-root invocation.
+The legacy suite imports `research.*`; this is the canonical invocation.
 
-- [ ] **Step 3: If failures remain, prove whether they are PR regressions**
+- [ ] **Step 3: If failures remain, compare against the PR base**
 
-For each failing node, copy its exact node ID and exception text into the PR working notes. Then compare with base SHA `0ca28d4e1175eee4181af23656230051b26bf276` in a temporary clean worktree:
+Create a temporary clean worktree:
 
 ```bash
 git worktree add ../financial-pr15-base 0ca28d4e1175eee4181af23656230051b26bf276
-cd ../financial-pr15-base/Swing\ Trading
+```
+
+Bash execution:
+
+```bash
+cd "../financial-pr15-base/Swing Trading"
 python -m pytest -q research/swing
 cd ../../Financial
 git worktree remove ../financial-pr15-base
 ```
 
-If the shell is PowerShell, use:
+PowerShell execution:
 
 ```powershell
-git worktree add ../financial-pr15-base 0ca28d4e1175eee4181af23656230051b26bf276
 Set-Location "../financial-pr15-base/Swing Trading"
 python -m pytest -q research/swing
 Set-Location "../../Financial"
@@ -703,15 +698,15 @@ git worktree remove ../financial-pr15-base
 Classification is fixed:
 
 ```text
-Passes on base, fails on PR -> PR regression; fix the V2-caused issue.
-Fails identically on base and PR -> genuinely pre-existing; document exact node IDs and errors.
+Passes on base, fails on PR -> PR regression; fix the V2-caused defect and add a regression test.
+Fails identically on base and PR -> stop and report the exact node IDs/errors before claiming PR completion.
 Fails only from repository root but passes from Swing Trading -> verification-command defect; correct README/PR wording.
 Tracked fixture missing only locally -> checkout/environment defect; restore and rerun.
 ```
 
-- [ ] **Step 4: Require clean verification**
+Do not modify legacy methodology/tests to silence a failure.
 
-Run:
+- [ ] **Step 4: Require clean verification before proceeding**
 
 ```bash
 python -m pytest -q "Swing Trading/research/swing/strategy_v2_quality_base/tests"
@@ -720,7 +715,7 @@ python -m pytest -q research/swing
 cd ..
 ```
 
-Expected: both PASS unless Task 5 Step 3 proves an identical base-SHA failure.
+Expected: both PASS. If base and PR both fail identically, stop this plan at Task 5 and surface the proven repository blocker instead of claiming completion.
 
 - [ ] **Step 5: Commit only if code/docs changed**
 
@@ -731,7 +726,7 @@ git add "Swing Trading/research/swing/strategy_v2_quality_base/README.md"
 git commit -m "docs: correct Strategy V2 regression verification"
 ```
 
-If a V2 code change was required, commit that V2 fix and its regression test with a message describing the actual defect.
+If a V2 code change was required, commit that V2 fix with its regression test using a message naming the defect.
 
 ---
 
@@ -740,11 +735,9 @@ If a V2 code change was required, commit that V2 fix and its regression test wit
 **Files:**
 - Regenerate: every file in `Swing Trading/research/swing/strategy_v2_quality_base/output/`
 
-**Requirement:** The old `250 qualified / 90 accepted / 85 completed` counts and the old final status are stale after Task 1. Do not preserve or target them.
+**Requirement:** The old `250 qualified / 90 accepted / 85 completed` counts and old final status are stale after Task 1. Do not preserve or target them.
 
 - [ ] **Step 1: Run the full pipeline**
-
-From repository root:
 
 ```bash
 python "Swing Trading/research/swing/strategy_v2_quality_base/build_v2_features.py"
@@ -752,28 +745,26 @@ python "Swing Trading/research/swing/strategy_v2_quality_base/generate_v2_signal
 python "Swing Trading/research/swing/strategy_v2_quality_base/analyze_v2_results.py"
 ```
 
-Do not alter any strategy or validation threshold after seeing the regenerated output.
+Do not alter any strategy or validation threshold after seeing regenerated output.
 
 - [ ] **Step 2: Reconcile generated artifacts**
-
-Run this platform-neutral command from repository root:
 
 ```bash
 python -c "from pathlib import Path; import pandas as pd; out=Path(r'Swing Trading/research/swing/strategy_v2_quality_base/output'); s=pd.read_csv(out/'v2_signal_candidates.csv'); e=pd.read_csv(out/'v2_entries.csv'); c=pd.read_csv(out/'v2_entry_cancellations.csv'); q=int(s['Signal_Qualified'].astype(str).str.lower().eq('true').sum()); a=pd.read_csv(out/'v2_setup_quality_trades.csv'); p=pd.read_csv(out/'v2_practical_trades.csv'); o=pd.read_csv(out/'v2_overlap_diagnostic.csv'); g=pd.read_csv(out/'v2_validation_gates.csv'); assert q==len(e)+len(c),(q,len(e),len(c)); assert set(a['Entry_ID'])==set(p['Entry_ID']); assert set(a['Entry_ID']).issubset(set(e['Entry_ID'])); assert int(o.loc[0,'Total_Accepted_Entries'])==len(e); pit=g.loc[g['Gate'].eq('POINT_IN_TIME_INTEGRITY')].iloc[0]; assert int(float(pit['Value']))==0; print({'qualified':q,'accepted':len(e),'cancelled':len(c),'completed':len(a),'status':g.loc[g['Gate'].eq('FINAL_STATUS'),'Status'].iloc[0]})"
 ```
 
-Expected: no assertion failure and a factual dictionary of the new counts/status.
+Expected: no assertion failure and factual regenerated counts/status printed.
 
 - [ ] **Step 3: Verify report content**
 
-`output/research_report.md` must contain the regenerated:
+`output/research_report.md` must contain regenerated:
 
 ```text
 usable/audited symbol counts
 base-event counts
-qualified signal count
-accepted entry count
-incomplete outcome count
+qualified signals
+accepted entries
+incomplete outcomes
 setup-quality metrics
 practical metrics
 year summary
@@ -798,7 +789,7 @@ python -m pytest -q research/swing
 cd ..
 ```
 
-Expected: PASS except only an exact base-SHA failure proven in Task 5.
+Expected: both PASS.
 
 - [ ] **Step 5: Check scope**
 
@@ -807,7 +798,7 @@ git status --short
 git diff --stat master...HEAD
 ```
 
-Allowed changes:
+Allowed:
 
 ```text
 V2 code/tests/README
@@ -815,7 +806,7 @@ V2 compact generated evidence
 this remediation plan
 ```
 
-Forbidden changes:
+Forbidden:
 
 ```text
 raw Yahoo OHLCV cache
@@ -835,37 +826,93 @@ git commit -m "research: regenerate corrected Strategy V2 evidence"
 
 ---
 
-### Task 7: Update PR #15 verification and hand back for review
+### Task 7: Update PR #15 mechanically from regenerated evidence
 
-- [ ] **Step 1: Replace stale PR verification counts**
+**Files:**
+- Create temporarily and do not commit: `.pr15_update.py`
 
-PR #15 body must report the newly generated values for:
+- [ ] **Step 1: Create the temporary PR metadata updater**
 
-```text
-V2 tests passed
-legacy swing-suite result using the correct package-root command
-usable/audited symbols
-qualified signals
-accepted entries
-completed paired outcomes
-point-in-time violation count derived from artifacts
-mechanical final status
-```
+Create `.pr15_update.py` at repository root with exactly:
 
-It must explicitly retain:
+```python
+from pathlib import Path
+import re
+import subprocess
+import sys
 
-```text
-No Strategy V2 threshold or filter was changed after observing outcomes.
-```
+import pandas as pd
 
-If a legacy failure is genuinely pre-existing, list its exact test node ID(s), exception text summary, and confirmation that the same failure reproduced at base SHA `0ca28d4e1175eee4181af23656230051b26bf276`.
 
-- [ ] **Step 2: Add a factual PR comment**
+ROOT = Path(__file__).resolve().parent
+OUT = ROOT / "Swing Trading/research/swing/strategy_v2_quality_base/output"
 
-Use this exact comment, replacing only the bracketed counts/status with regenerated factual values:
 
-```text
-Implemented the Portfolio Advisor review remediation plan.
+def run_tests(args: list[str], cwd: Path | None = None) -> tuple[int, str]:
+    result = subprocess.run(
+        [sys.executable, "-m", "pytest", "-q", *args],
+        cwd=cwd or ROOT,
+        text=True,
+        capture_output=True,
+        check=False,
+    )
+    output = (result.stdout + "\n" + result.stderr).strip()
+    if result.returncode != 0:
+        raise SystemExit(output)
+    match = re.search(r"(\d+) passed", output)
+    if not match:
+        raise SystemExit(f"could not parse pytest pass count:\n{output}")
+    return int(match.group(1)), output
+
+
+v2_passed, _ = run_tests(
+    ["Swing Trading/research/swing/strategy_v2_quality_base/tests"]
+)
+legacy_passed, _ = run_tests(
+    ["research/swing"],
+    cwd=ROOT / "Swing Trading",
+)
+
+validation = pd.read_csv(OUT / "v2_data_validation.csv")
+signals = pd.read_csv(OUT / "v2_signal_candidates.csv")
+entries = pd.read_csv(OUT / "v2_entries.csv")
+setup = pd.read_csv(OUT / "v2_setup_quality_trades.csv")
+gates = pd.read_csv(OUT / "v2_validation_gates.csv")
+
+usable = int(validation["Usable"].astype(str).str.lower().eq("true").sum())
+audited = len(validation)
+qualified = int(signals["Signal_Qualified"].astype(str).str.lower().eq("true").sum())
+accepted = len(entries)
+completed = len(setup)
+pit = int(float(gates.loc[gates["Gate"].eq("POINT_IN_TIME_INTEGRITY"), "Value"].iloc[0]))
+status = str(gates.loc[gates["Gate"].eq("FINAL_STATUS"), "Status"].iloc[0])
+
+if pit != 0:
+    raise SystemExit(f"refusing PR update with point-in-time violations={pit}")
+
+body = f"""Implements #13.
+
+## Scope
+
+- Implements the locked Strategy V2 point-in-time Nifty 500 RS, quality-base state machine, breakout/entry mechanics, structural stop, two exit lenses, diagnostics, robustness checks, and precommitted gates.
+- Includes the Portfolio Advisor PR-review corrections for same-bar reseeding, exact temporal-gate semantics, derived point-in-time integrity, regression verification, and accepted-entry overlap reconciliation.
+- Keeps Strategy V2 methodology frozen; no threshold/filter was tuned after observing outcomes.
+
+## Verification
+
+- Strategy V2 tests: {v2_passed} passed.
+- Full swing research suite from `Swing Trading`: {legacy_passed} passed.
+- Historical data: {usable}/{audited} audited symbols usable.
+- Qualified signals: {qualified}.
+- Accepted entries: {accepted}.
+- Completed paired outcomes: {completed}.
+- Derived point-in-time violations: {pit}.
+- Locked validation status: {status}.
+
+Portfolio Advisor retains strategy interpretation.
+"""
+
+comment = f"""Implemented the Portfolio Advisor review remediation plan.
 
 - Restored same-bar reseeding after depth invalidation and added regression coverage.
 - Aligned temporal robustness with the exact precommitted setup-quality year gate.
@@ -873,16 +920,44 @@ Implemented the Portfolio Advisor review remediation plan.
 - Reproduced the legacy suite from the correct package root and corrected the verification result/wording.
 - Reconciled overlap diagnostics to all accepted entries, including incomplete outcomes.
 
-Regenerated historical evidence: qualified signals = [QUALIFIED], accepted entries = [ACCEPTED], completed paired outcomes = [COMPLETED], point-in-time violations = 0, final status = [STATUS].
+Regenerated historical evidence: qualified signals = {qualified}, accepted entries = {accepted}, completed paired outcomes = {completed}, point-in-time violations = {pit}, final status = {status}.
 
 No Strategy V2 threshold/filter was changed in response to results. Portfolio Advisor retains strategy interpretation.
+"""
+
+subprocess.run(
+    ["gh", "pr", "edit", "15", "--body", body],
+    cwd=ROOT,
+    check=True,
+)
+subprocess.run(
+    ["gh", "pr", "comment", "15", "--body", comment],
+    cwd=ROOT,
+    check=True,
+)
 ```
 
-The bracket replacement is not an implementation decision: copy the exact values produced by Task 6 Step 2.
-
-- [ ] **Step 3: Final clean-tree check**
+- [ ] **Step 2: Run the updater**
 
 ```bash
+python .pr15_update.py
+```
+
+Expected:
+
+```text
+Both test suites pass.
+Point-in-time violations equal zero.
+PR #15 body is replaced with factual regenerated verification.
+PR #15 receives one factual remediation comment.
+```
+
+If `gh` is not authenticated, stop and report that execution blocker rather than manually inventing/transcribing counts.
+
+- [ ] **Step 3: Remove the temporary updater and verify clean tree**
+
+```bash
+python -c "from pathlib import Path; Path('.pr15_update.py').unlink()"
 git status --short
 ```
 
@@ -909,7 +984,7 @@ Then provide PR #15 URL and latest head SHA for Portfolio Advisor review.
 - [ ] Old 250/90/85 counts are not manually preserved.
 - [ ] All locked Strategy V2 thresholds remain unchanged.
 - [ ] V2 tests pass.
-- [ ] Legacy swing suite passes or any remaining failure is reproduced identically at the base SHA and documented exactly.
+- [ ] Full swing research suite passes.
 - [ ] Research report remains evidence-only.
 - [ ] No raw market-data cache is committed.
 

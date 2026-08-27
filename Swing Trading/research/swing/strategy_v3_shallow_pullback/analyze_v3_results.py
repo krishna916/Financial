@@ -346,3 +346,330 @@ def summarize_lens(trades: pd.DataFrame, lens: str) -> dict[str, object]:
         "R_PF": safe_profit_factor(r_values),
         "Median_Holding_Sessions": float(holding.median()) if holding.notna().any() else np.nan,
     }
+
+
+def _paired_trades(setup: pd.DataFrame, practical: pd.DataFrame) -> tuple[pd.DataFrame, pd.DataFrame]:
+    ids = set(setup.get("Entry_ID", pd.Series(dtype=str)).astype(str)) & set(
+        practical.get("Entry_ID", pd.Series(dtype=str)).astype(str)
+    )
+    return (
+        setup.loc[setup["Entry_ID"].astype(str).isin(ids)].copy() if "Entry_ID" in setup else setup.copy(),
+        practical.loc[practical["Entry_ID"].astype(str).isin(ids)].copy()
+        if "Entry_ID" in practical
+        else practical.copy(),
+    )
+
+
+def year_summary(setup: pd.DataFrame, practical: pd.DataFrame) -> pd.DataFrame:
+    setup, practical = _paired_trades(setup, practical)
+    setup_dates = pd.to_datetime(setup.get("Entry_Date", pd.Series(dtype="datetime64[ns]")), errors="coerce")
+    practical_dates = pd.to_datetime(practical.get("Entry_Date", pd.Series(dtype="datetime64[ns]")), errors="coerce")
+    years = sorted(set(setup_dates.dropna().dt.year) | set(practical_dates.dropna().dt.year))
+    rows: list[dict[str, object]] = []
+    for year in years:
+        setup_year = setup.loc[setup_dates.dt.year.eq(year)]
+        practical_year = practical.loc[practical_dates.dt.year.eq(year)]
+        setup_metrics = summarize_lens(setup_year, "setup")
+        practical_metrics = summarize_lens(practical_year, "practical")
+        rows.append(
+            {
+                "Entry_Year": int(year),
+                **{f"Setup_{key}": value for key, value in setup_metrics.items()},
+                **{f"Practical_{key}": value for key, value in practical_metrics.items()},
+            }
+        )
+    return pd.DataFrame(rows)
+
+
+def outlier_robustness(setup: pd.DataFrame, practical: pd.DataFrame) -> pd.DataFrame:
+    setup, practical = _paired_trades(setup, practical)
+    columns = [
+        "Removed_Top_N",
+        "Removed_Entry_IDs",
+        "Removed_Symbols",
+        "Remaining_Entry_Count",
+        "Setup_Mean_Return",
+        "Setup_Return_PF",
+        "Practical_Mean_R",
+        "Practical_R_PF",
+    ]
+    if setup.empty:
+        return pd.DataFrame(columns=columns)
+    ranked = setup.sort_values(["Return", "Entry_ID"], ascending=[False, True]).reset_index(drop=True)
+    rows: list[dict[str, object]] = []
+    for count in (1, 3, 5):
+        removed = ranked.head(count)
+        remaining_ids = set(ranked.iloc[count:]["Entry_ID"].astype(str))
+        setup_remaining = setup.loc[setup["Entry_ID"].astype(str).isin(remaining_ids)]
+        practical_remaining = practical.loc[practical["Entry_ID"].astype(str).isin(remaining_ids)]
+        setup_metrics = summarize_lens(setup_remaining, "setup")
+        practical_metrics = summarize_lens(practical_remaining, "practical")
+        rows.append(
+            {
+                "Removed_Top_N": count,
+                "Removed_Entry_IDs": ";".join(removed["Entry_ID"].astype(str)),
+                "Removed_Symbols": ";".join(removed.get("Symbol", pd.Series(dtype=str)).astype(str)),
+                "Remaining_Entry_Count": len(remaining_ids),
+                "Setup_Mean_Return": setup_metrics["Mean_Return"],
+                "Setup_Return_PF": setup_metrics["Return_PF"],
+                "Practical_Mean_R": practical_metrics["Mean_R"],
+                "Practical_R_PF": practical_metrics["R_PF"],
+            }
+        )
+    return pd.DataFrame(rows, columns=columns)
+
+
+def leave_one_symbol_out(setup: pd.DataFrame, practical: pd.DataFrame) -> pd.DataFrame:
+    setup, practical = _paired_trades(setup, practical)
+    symbols = sorted(set(setup.get("Symbol", pd.Series(dtype=str)).dropna().astype(str)))
+    rows: list[dict[str, object]] = []
+    for symbol in symbols:
+        setup_remaining = setup.loc[setup["Symbol"].astype(str) != symbol]
+        practical_remaining = practical.loc[practical["Symbol"].astype(str) != symbol]
+        setup_metrics = summarize_lens(setup_remaining, "setup")
+        practical_metrics = summarize_lens(practical_remaining, "practical")
+        rows.append(
+            {
+                "Omitted_Symbol": symbol,
+                "Remaining_Entry_Count": len(setup_remaining),
+                "Setup_Mean_Return": setup_metrics["Mean_Return"],
+                "Setup_Return_PF": setup_metrics["Return_PF"],
+                "Practical_Mean_R": practical_metrics["Mean_R"],
+                "Practical_R_PF": practical_metrics["R_PF"],
+            }
+        )
+    return pd.DataFrame(rows)
+
+
+def overlap_diagnostic(entries: pd.DataFrame, practical: pd.DataFrame) -> pd.DataFrame:
+    """Measure overlap across every accepted entry, including incomplete positions."""
+
+    if entries.empty:
+        return pd.DataFrame(
+            [
+                {
+                    "Total_Accepted_Entries": 0,
+                    "Entries_With_Another_Open_Same_Symbol_Trade": 0,
+                    "Max_Simultaneous_Signal_Level_Trades": 0,
+                    "Max_Same_Day_Entries": 0,
+                }
+            ]
+        )
+    data = entries[["Entry_ID", "Symbol", "Entry_Date"]].copy()
+    data["Entry_ID"] = data["Entry_ID"].astype(str)
+    data["Entry_Date"] = pd.to_datetime(data["Entry_Date"], errors="raise")
+    if practical.empty:
+        exits = pd.DataFrame(columns=["Entry_ID", "Exit_Date"])
+    else:
+        exits = practical[["Entry_ID", "Exit_Date"]].copy()
+        exits["Entry_ID"] = exits["Entry_ID"].astype(str)
+        exits["Exit_Date"] = pd.to_datetime(exits["Exit_Date"], errors="raise")
+    data = data.merge(exits, on="Entry_ID", how="left", validate="one_to_one")
+    latest_entry = data["Entry_Date"].max()
+    latest_exit = exits["Exit_Date"].max() if not exits.empty else latest_entry
+    observation_end = max(latest_entry, latest_exit)
+    data["Effective_Exit_Date"] = data["Exit_Date"].fillna(observation_end)
+    overlap_count = 0
+    max_simultaneous = 0
+    for _, current in data.iterrows():
+        others = data.loc[
+            (data["Symbol"] == current["Symbol"])
+            & (data["Entry_ID"] != current["Entry_ID"])
+            & (data["Entry_Date"] <= current["Entry_Date"])
+            & (data["Effective_Exit_Date"] >= current["Entry_Date"])
+        ]
+        overlap_count += int(not others.empty)
+    for date in sorted(set(data["Entry_Date"])):
+        open_at_date = data.loc[
+            (data["Entry_Date"] <= date) & (data["Effective_Exit_Date"] >= date)
+        ]
+        max_simultaneous = max(max_simultaneous, len(open_at_date))
+    return pd.DataFrame(
+        [
+            {
+                "Total_Accepted_Entries": len(data),
+                "Entries_With_Another_Open_Same_Symbol_Trade": overlap_count,
+                "Max_Simultaneous_Signal_Level_Trades": max_simultaneous,
+                "Max_Same_Day_Entries": int(data["Entry_Date"].value_counts().max()),
+            }
+        ]
+    )
+
+
+def _bucket_value(dimension: str, row: pd.Series) -> str | None:
+    value_name = {
+        "Pullback_Age": "Pullback_Age",
+        "Pullback_Depth_ATR": "Pullback_Depth_ATR",
+        "Composite_RS": "Composite_RS",
+        "Resumption_Volume_Ratio": "Resumption_Volume_Ratio",
+        "Entry_Extension_ATR_vs_Leader": "Entry_Extension_ATR_vs_Leader",
+    }[dimension]
+    value = row.get(value_name, np.nan)
+    if dimension == "Resumption_Volume_Ratio" and not _finite(value):
+        return "MISSING"
+    if not _finite(value):
+        return None
+    number = float(value)
+    if dimension == "Pullback_Age":
+        return next((bucket for bucket, low, high in [("3-4", 3, 4), ("5-6", 5, 6), ("7-8", 7, 8), ("9-10", 9, 10)] if low <= number <= high), None)
+    if dimension == "Pullback_Depth_ATR":
+        if 0.5 <= number < 1.0:
+            return "[0.5,1.0)"
+        if 1.0 <= number < 1.5:
+            return "[1.0,1.5)"
+        if 1.5 <= number < 2.0:
+            return "[1.5,2.0)"
+        if 2.0 <= number <= 2.5:
+            return "[2.0,2.5]"
+    if dimension == "Composite_RS":
+        if 70 <= number < 80:
+            return "[70,80)"
+        if 80 <= number < 90:
+            return "[80,90)"
+        if 90 <= number <= 100:
+            return "[90,100]"
+    if dimension == "Resumption_Volume_Ratio":
+        if number < 0.8:
+            return "<0.8"
+        if number < 1.2:
+            return "[0.8,1.2)"
+        return ">=1.2"
+    if dimension == "Entry_Extension_ATR_vs_Leader":
+        if number <= 0:
+            return "<=0"
+        if number <= 0.25:
+            return "(0,0.25]"
+        if number <= 0.5:
+            return "(0.25,0.5]"
+    return None
+
+
+def pullback_diagnostics(entries: pd.DataFrame, setup: pd.DataFrame, practical: pd.DataFrame) -> pd.DataFrame:
+    """Summarize fixed diagnostic buckets without turning them into gates."""
+
+    paired_setup, paired_practical = _paired_trades(setup, practical)
+    if paired_setup.empty:
+        paired = pd.DataFrame()
+    else:
+        metadata = entries.copy()
+        metadata["Entry_ID"] = metadata["Entry_ID"].astype(str)
+        paired = paired_setup.copy()
+        paired["Entry_ID"] = paired["Entry_ID"].astype(str)
+        for column in [
+            "Pullback_Age",
+            "Pullback_Depth_ATR",
+            "Composite_RS",
+            "Resumption_Volume_Ratio",
+            "Entry_Open",
+            "Leader_Close",
+            "ATR14_Signal",
+        ]:
+            if column not in paired.columns and column in metadata.columns:
+                paired = paired.merge(metadata[["Entry_ID", column]], on="Entry_ID", how="left", validate="one_to_one")
+        paired["Entry_Extension_ATR_vs_Leader"] = (
+            pd.to_numeric(paired.get("Entry_Open"), errors="coerce")
+            - pd.to_numeric(paired.get("Leader_Close"), errors="coerce")
+        ) / pd.to_numeric(paired.get("ATR14_Signal"), errors="coerce")
+        practical_by_id = paired_practical.set_index(paired_practical["Entry_ID"].astype(str))
+        paired["_Practical_R"] = paired["Entry_ID"].map(
+            pd.to_numeric(practical_by_id["R_Multiple"], errors="coerce")
+        )
+
+    fixed = {
+        "Pullback_Age": ["3-4", "5-6", "7-8", "9-10"],
+        "Pullback_Depth_ATR": ["[0.5,1.0)", "[1.0,1.5)", "[1.5,2.0)", "[2.0,2.5]"],
+        "Composite_RS": ["[70,80)", "[80,90)", "[90,100]"],
+        "Resumption_Volume_Ratio": ["<0.8", "[0.8,1.2)", ">=1.2", "MISSING"],
+        "Entry_Extension_ATR_vs_Leader": ["<=0", "(0,0.25]", "(0.25,0.5]"],
+    }
+    rows: list[dict[str, object]] = []
+    for dimension, buckets in fixed.items():
+        for bucket in buckets:
+            if paired.empty:
+                selected = paired
+            else:
+                mask = paired.apply(lambda row: _bucket_value(dimension, row) == bucket, axis=1)
+                selected = paired.loc[mask]
+            practical_selected = paired_practical.loc[
+                paired_practical["Entry_ID"].astype(str).isin(set(selected["Entry_ID"].astype(str)))
+            ] if not selected.empty else paired_practical.iloc[0:0]
+            setup_metrics = summarize_lens(selected, "setup")
+            practical_metrics = summarize_lens(practical_selected, "practical")
+            rows.append(
+                {
+                    "Dimension": dimension,
+                    "Bucket": bucket,
+                    "Completed_Trades": setup_metrics["Completed_Trades"],
+                    "Setup_Mean_Return": setup_metrics["Mean_Return"],
+                    "Setup_Return_PF": setup_metrics["Return_PF"],
+                    "Practical_Mean_R": practical_metrics["Mean_R"],
+                    "Practical_R_PF": practical_metrics["R_PF"],
+                }
+            )
+    return pd.DataFrame(rows)
+
+
+def evaluate_gates(
+    setup: pd.DataFrame,
+    practical: pd.DataFrame,
+    *,
+    point_in_time_violations: int,
+) -> pd.DataFrame:
+    """Evaluate the precommitted V3 gates without optimizing any threshold."""
+
+    setup, practical = _paired_trades(setup, practical)
+    setup_metrics = summarize_lens(setup, "setup")
+    practical_metrics = summarize_lens(practical, "practical")
+    years = year_summary(setup, practical)
+    qualifying_years = (
+        years.loc[
+            (years["Setup_Completed_Trades"] >= 20)
+            & (years["Setup_Mean_Return"] > 0)
+            & (years["Setup_Return_PF"] >= 1.0)
+        ]
+        if not years.empty
+        else pd.DataFrame()
+    )
+    outliers = outlier_robustness(setup, practical)
+    leave_out = leave_one_symbol_out(setup, practical)
+    top_five = outliers.loc[outliers["Removed_Top_N"].eq(5)] if not outliers.empty else pd.DataFrame()
+    rows = [
+        {"Gate": "COMPLETED_TRADES", "Passed": len(setup) >= 100, "Value": len(setup)},
+        {"Gate": "SETUP_MEAN_RETURN", "Passed": bool(setup_metrics["Mean_Return"] > 0), "Value": setup_metrics["Mean_Return"]},
+        {"Gate": "SETUP_RETURN_PF", "Passed": bool(setup_metrics["Return_PF"] >= 1.20), "Value": setup_metrics["Return_PF"]},
+        {"Gate": "PRACTICAL_MEAN_R", "Passed": bool(practical_metrics["Mean_R"] >= 0.15), "Value": practical_metrics["Mean_R"]},
+        {"Gate": "PRACTICAL_R_PF", "Passed": bool(practical_metrics["R_PF"] >= 1.20), "Value": practical_metrics["R_PF"]},
+        {"Gate": "TEMPORAL_ROBUSTNESS", "Passed": len(qualifying_years) >= 2, "Value": len(qualifying_years)},
+        {
+            "Gate": "TOP_FIVE_OUTLIER_ROBUSTNESS",
+            "Passed": bool(
+                not top_five.empty
+                and top_five.iloc[0]["Setup_Mean_Return"] > 0
+                and top_five.iloc[0]["Setup_Return_PF"] >= 1.0
+            ),
+            "Value": "top5",
+        },
+        {
+            "Gate": "LEAVE_ONE_SYMBOL_OUT",
+            "Passed": bool(
+                not leave_out.empty
+                and (leave_out["Setup_Mean_Return"] > 0).all()
+                and (leave_out["Setup_Return_PF"] >= 1.0).all()
+            ),
+            "Value": len(leave_out),
+        },
+        {
+            "Gate": "POINT_IN_TIME_INTEGRITY",
+            "Passed": point_in_time_violations == 0,
+            "Value": point_in_time_violations,
+        },
+    ]
+    all_passed = all(bool(row["Passed"]) for row in rows)
+    status = "INSUFFICIENT_EVIDENCE" if len(setup) < 100 else ("PASS" if all_passed else "FAIL")
+    rows.append({"Gate": "FINAL_STATUS", "Passed": status == "PASS", "Value": status, "Status": status})
+    result = pd.DataFrame(rows)
+    result["Status"] = result.get("Status", result["Passed"].map(lambda value: "PASS" if value else "FAIL"))
+    result.loc[result["Gate"] != "FINAL_STATUS", "Status"] = result.loc[
+        result["Gate"] != "FINAL_STATUS", "Passed"
+    ].map(lambda value: "PASS" if value else "FAIL")
+    return result

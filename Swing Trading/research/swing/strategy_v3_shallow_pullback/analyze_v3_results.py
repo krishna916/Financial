@@ -673,3 +673,258 @@ def evaluate_gates(
         result["Gate"] != "FINAL_STATUS", "Passed"
     ].map(lambda value: "PASS" if value else "FAIL")
     return result
+
+
+def breadth_summary(setup: pd.DataFrame, practical: pd.DataFrame) -> pd.DataFrame:
+    setup, practical = _paired_trades(setup, practical)
+    if "Regime" not in setup.columns:
+        return pd.DataFrame()
+    rows: list[dict[str, object]] = []
+    for regime in sorted(set(setup["Regime"].dropna().astype(str))):
+        setup_regime = setup.loc[setup["Regime"].astype(str).eq(regime)]
+        practical_regime = practical.loc[practical["Regime"].astype(str).eq(regime)]
+        rows.append(
+            {
+                "Regime": regime,
+                **{f"Setup_{key}": value for key, value in summarize_lens(setup_regime, "setup").items()},
+                **{f"Practical_{key}": value for key, value in summarize_lens(practical_regime, "practical").items()},
+            }
+        )
+    return pd.DataFrame(rows)
+
+
+def _read_csv_or_empty(path: Path, **kwargs: object) -> pd.DataFrame:
+    try:
+        return pd.read_csv(path, **kwargs)
+    except (FileNotFoundError, pd.errors.EmptyDataError):
+        return pd.DataFrame()
+
+
+def _completed_trade_frames(
+    entries: pd.DataFrame,
+    membership: pd.DataFrame,
+) -> tuple[pd.DataFrame, pd.DataFrame, int]:
+    """Rebuild represented-symbol prices and retain only paired completed outcomes."""
+
+    if entries.empty:
+        return pd.DataFrame(), pd.DataFrame(), 0
+    from build_v3_features import (
+        DOWNLOAD_END_EXCLUSIVE,
+        DOWNLOAD_START,
+        compute_price_features,
+        download_adjusted_ohlcv,
+    )
+
+    ticker_by_symbol = (
+        membership.loc[:, ["Symbol", "Yahoo_Ticker"]]
+        .drop_duplicates("Symbol")
+        .set_index("Symbol")["Yahoo_Ticker"]
+        .to_dict()
+    )
+    setup_rows: list[dict[str, object]] = []
+    practical_rows: list[dict[str, object]] = []
+    incomplete = 0
+    for symbol, group in entries.groupby("Symbol", sort=True):
+        ticker = str(ticker_by_symbol.get(symbol, ""))
+        if not ticker:
+            incomplete += len(group)
+            continue
+        try:
+            prices = compute_price_features(
+                download_adjusted_ohlcv(ticker, DOWNLOAD_START, DOWNLOAD_END_EXCLUSIVE)
+            )
+        except Exception:  # noqa: BLE001 - preserve incomplete accepted entries
+            incomplete += len(group)
+            continue
+        for _, entry in group.iterrows():
+            setup_trade = simulate_setup_quality_trade(entry, prices)
+            practical_trade = simulate_practical_trade(entry, prices)
+            if setup_trade is None or practical_trade is None:
+                incomplete += 1
+                continue
+            setup_rows.append(setup_trade)
+            practical_rows.append(practical_trade)
+    return pd.DataFrame(setup_rows), pd.DataFrame(practical_rows), incomplete
+
+
+def _frame_text(frame: pd.DataFrame) -> str:
+    return frame.to_string(index=False) if not frame.empty else "No rows."
+
+
+def write_evidence_report(
+    output_dir: Path,
+    *,
+    validation: pd.DataFrame,
+    rs_audit: pd.DataFrame,
+    states: pd.DataFrame,
+    signals: pd.DataFrame,
+    entries: pd.DataFrame,
+    cancellations: pd.DataFrame,
+    setup: pd.DataFrame,
+    practical: pd.DataFrame,
+    year: pd.DataFrame,
+    outliers: pd.DataFrame,
+    leave_out: pd.DataFrame,
+    breadth: pd.DataFrame,
+    diagnostics: pd.DataFrame,
+    overlap: pd.DataFrame,
+    gates: pd.DataFrame,
+    pit_count: int,
+    incomplete: int,
+) -> Path:
+    """Write the evidence-only report from actual generated artifacts."""
+
+    output_dir.mkdir(parents=True, exist_ok=True)
+    setup_metrics = summarize_lens(setup, "setup")
+    practical_metrics = summarize_lens(practical, "practical")
+    final_rows = gates.loc[gates["Gate"].eq("FINAL_STATUS")] if "Gate" in gates.columns else pd.DataFrame()
+    final_status = str(final_rows["Status"].iloc[0]) if not final_rows.empty else "UNKNOWN"
+    qualified_count = int(signals["Signal_Qualified"].map(_truthy).sum()) if "Signal_Qualified" in signals else 0
+    unsafe_count = int((~_truthy_series(rs_audit["RS_Research_Safe"])).sum()) if "RS_Research_Safe" in rs_audit else 0
+    usable_count = int(_truthy_series(validation["Usable"]).sum()) if "Usable" in validation else 0
+    state_counts = states["Event"].value_counts().to_dict() if "Event" in states else {}
+    rejection_counts = signals["Signal_Rejection_Reason"].value_counts(dropna=False).to_dict() if "Signal_Rejection_Reason" in signals else {}
+    lines = [
+        "# Strategy V3 Shallow-Pullback Resumption Validation",
+        "",
+        "## 1. Hypothesis and locked specification",
+        "Strategy V3 tests RS leader → shallow 3–10 session pullback → first resumption → next-session entry → structural stop + SMA20 exit.",
+        "Design spec: `Swing Trading/docs/superpowers/specs/2026-08-27-strategy-v3-shallow-pullback-resumption-design.md`.",
+        "",
+        "## 2. Data, timing, and pre-window PIT support",
+        "Yahoo Finance adjusted OHLCV uses `auto_adjust=True`; the signal window is 2023-08-01 through 2026-08-25 inclusive.",
+        "Canonical sessions use the long Nifty 500 index history; pre-window seeds are allowed only within the ten-session boundary and actual PIT membership manifest.",
+        "",
+        "## 3. Audit counts",
+        f"Usable symbols: {usable_count}/{len(validation)}; RS audit dates: {len(rs_audit)}; unsafe RS dates: {unsafe_count}.",
+        f"State events: {state_counts}.",
+        "",
+        "## 4. RS coverage",
+        f"Minimum required coverage: 0.80; observed minimum: {rs_audit['RS_Coverage'].min() if 'RS_Coverage' in rs_audit and not rs_audit.empty else np.nan}; median: {rs_audit['RS_Coverage'].median() if 'RS_Coverage' in rs_audit and not rs_audit.empty else np.nan}.",
+        "",
+        "## 5. Candidates, rejection, and cancellation counts",
+        f"Resumption candidates: {len(signals)}; qualified signals: {qualified_count}; rejection reasons: {rejection_counts}.",
+        f"Accepted entries: {len(entries)}; cancellations: {len(cancellations)}; cancellation reasons: {cancellations['Cancellation_Reason'].value_counts().to_dict() if 'Cancellation_Reason' in cancellations else {}}.",
+        "",
+        "## 6. Accepted, completed, and incomplete accounting",
+        f"Qualified = accepted + cancelled: {qualified_count} = {len(entries)} + {len(cancellations)}.",
+        f"Completed paired outcomes: {len(setup)}; incomplete accepted entries: {incomplete}.",
+        "",
+        "## 7. Setup-quality metrics",
+        str(setup_metrics),
+        "",
+        "## 8. Practical metrics",
+        str(practical_metrics),
+        "",
+        "## 9. Temporal summary",
+        _frame_text(year),
+        "",
+        "## 10. Winner-removal robustness",
+        _frame_text(outliers),
+        "",
+        "## 11. Leave-one-symbol-out robustness",
+        _frame_text(leave_out),
+        "",
+        "## 12. Breadth diagnostic",
+        _frame_text(breadth),
+        "",
+        "## 13. Pullback diagnostics",
+        _frame_text(diagnostics),
+        "",
+        "## 14. Overlap diagnostic",
+        _frame_text(overlap),
+        "",
+        "## 15. Point-in-time audit",
+        f"Derived point-in-time violations: {pit_count}.",
+        "",
+        "## 16. Precommitted validation gates",
+        _frame_text(gates),
+        "",
+        f"## 17. Final status: {final_status}",
+        "",
+        "This report does not tune Strategy V3 or prescribe a follow-up threshold/filter. Portfolio Advisor retains strategy interpretation.",
+    ]
+    path = output_dir / "research_report.md"
+    path.write_text("\n".join(lines) + "\n", encoding="utf-8")
+    return path
+
+
+def _attach_breadth_to_lenses(
+    setup: pd.DataFrame,
+    practical: pd.DataFrame,
+    breadth: pd.DataFrame,
+) -> tuple[pd.DataFrame, pd.DataFrame]:
+    return attach_prior_breadth(setup, breadth), attach_prior_breadth(practical, breadth)
+
+
+if __name__ == "__main__":
+    from build_v3_features import load_membership
+    from generate_v3_signals import load_canonical_market_sessions
+
+    root = Path(__file__).resolve().parents[4]
+    module_dir = Path(__file__).resolve().parent
+    output_dir = module_dir / "output"
+    membership = load_membership(root / "Swing Trading/research/swing/market_breadth/config/nifty500_membership.csv")
+    entries = _read_csv_or_empty(output_dir / "v3_entries.csv", parse_dates=["Leader_Date", "Signal_Date", "Entry_Date"])
+    cancellations = _read_csv_or_empty(output_dir / "v3_entry_cancellations.csv", parse_dates=["Signal_Date", "Next_Session_Date"])
+    signals = _read_csv_or_empty(output_dir / "v3_signal_candidates.csv", parse_dates=["Leader_Date", "Signal_Date"])
+    states = _read_csv_or_empty(output_dir / "v3_pullback_state_audit.csv", parse_dates=["Date", "Leader_Date"])
+    validation = _read_csv_or_empty(output_dir / "v3_data_validation.csv")
+    rs_audit = _read_csv_or_empty(output_dir / "v3_universe_rs_audit.csv", parse_dates=["Date"])
+    setup, practical, incomplete = _completed_trade_frames(entries, membership)
+    breadth_daily = pd.read_csv(root / "Swing Trading/research/swing/market_breadth/output/nifty500_breadth_daily.csv", parse_dates=["Date"])
+    setup, practical = _attach_breadth_to_lenses(setup, practical, breadth_daily)
+    validate_trade_integrity(setup, practical)
+    extra_dates = pd.DatetimeIndex()
+    if not entries.empty and pd.Timestamp("2026-08-26") in set(pd.to_datetime(entries["Entry_Date"])):
+        extra_dates = pd.DatetimeIndex([pd.Timestamp("2026-08-26")])
+    sessions = load_canonical_market_sessions(root / "Swing Trading/nifty500_regime_daily.csv", extra_dates)
+    pit_count, pit_audit = count_point_in_time_violations(
+        signals, entries, setup, practical, membership, sessions
+    )
+    if pit_count:
+        pit_audit.to_csv(output_dir / "v3_point_in_time_violations.csv", index=False)
+        raise AssertionError(f"point-in-time integrity violations: {pit_count}")
+    year = year_summary(setup, practical)
+    outliers = outlier_robustness(setup, practical)
+    leave_out = leave_one_symbol_out(setup, practical)
+    breadth = breadth_summary(setup, practical)
+    overlap = overlap_diagnostic(entries, practical)
+    diagnostics = pullback_diagnostics(entries, setup, practical)
+    gates = evaluate_gates(setup, practical, point_in_time_violations=pit_count)
+    setup.to_csv(output_dir / "v3_setup_quality_trades.csv", index=False, date_format="%Y-%m-%d")
+    practical.to_csv(output_dir / "v3_practical_trades.csv", index=False, date_format="%Y-%m-%d")
+    pd.DataFrame(
+        [
+            {"Lens": "setup-quality", **summarize_lens(setup, "setup")},
+            {"Lens": "practical", **summarize_lens(practical, "practical")},
+        ]
+    ).to_csv(output_dir / "v3_validation_summary.csv", index=False)
+    year.to_csv(output_dir / "v3_year_summary.csv", index=False)
+    outliers.to_csv(output_dir / "v3_outlier_robustness.csv", index=False)
+    leave_out.to_csv(output_dir / "v3_leave_one_symbol_out.csv", index=False)
+    breadth.to_csv(output_dir / "v3_breadth_summary.csv", index=False)
+    diagnostics.to_csv(output_dir / "v3_pullback_diagnostics.csv", index=False)
+    overlap.to_csv(output_dir / "v3_overlap_diagnostic.csv", index=False)
+    gates.to_csv(output_dir / "v3_validation_gates.csv", index=False)
+    write_evidence_report(
+        output_dir,
+        validation=validation,
+        rs_audit=rs_audit,
+        states=states,
+        signals=signals,
+        entries=entries,
+        cancellations=cancellations,
+        setup=setup,
+        practical=practical,
+        year=year,
+        outliers=outliers,
+        leave_out=leave_out,
+        breadth=breadth,
+        diagnostics=diagnostics,
+        overlap=overlap,
+        gates=gates,
+        pit_count=pit_count,
+        incomplete=incomplete,
+    )
+    print(gates.to_string(index=False))

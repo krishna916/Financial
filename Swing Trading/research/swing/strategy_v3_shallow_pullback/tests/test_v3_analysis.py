@@ -11,6 +11,7 @@ from analyze_v3_results import (  # noqa: E402
     attach_prior_breadth,
     count_point_in_time_violations,
     evaluate_gates,
+    _analysis_extra_dates,
     leave_one_symbol_out,
     overlap_diagnostic,
     outlier_robustness,
@@ -21,6 +22,12 @@ from analyze_v3_results import (  # noqa: E402
     validate_trade_integrity,
     year_summary,
 )
+
+
+def test_analysis_extra_dates_is_empty_for_entries_without_2026_08_26():
+    result = _analysis_extra_dates(pd.DataFrame({"Entry_Date": [pd.Timestamp("2024-01-11")]}))
+    assert isinstance(result, pd.DatetimeIndex)
+    assert result.empty
 
 
 def setup_entry() -> pd.Series:

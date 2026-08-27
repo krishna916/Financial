@@ -857,6 +857,12 @@ def _attach_breadth_to_lenses(
     return attach_prior_breadth(setup, breadth), attach_prior_breadth(practical, breadth)
 
 
+def _analysis_extra_dates(entries: pd.DataFrame) -> pd.DatetimeIndex:
+    if not entries.empty and pd.Timestamp("2026-08-26") in set(pd.to_datetime(entries["Entry_Date"])):
+        return pd.DatetimeIndex([pd.Timestamp("2026-08-26")])
+    return pd.DatetimeIndex([])
+
+
 if __name__ == "__main__":
     from build_v3_features import load_membership
     from generate_v3_signals import load_canonical_market_sessions
@@ -875,9 +881,7 @@ if __name__ == "__main__":
     breadth_daily = pd.read_csv(root / "Swing Trading/research/swing/market_breadth/output/nifty500_breadth_daily.csv", parse_dates=["Date"])
     setup, practical = _attach_breadth_to_lenses(setup, practical, breadth_daily)
     validate_trade_integrity(setup, practical)
-    extra_dates = pd.DatetimeIndex()
-    if not entries.empty and pd.Timestamp("2026-08-26") in set(pd.to_datetime(entries["Entry_Date"])):
-        extra_dates = pd.DatetimeIndex([pd.Timestamp("2026-08-26")])
+    extra_dates = _analysis_extra_dates(entries)
     sessions = load_canonical_market_sessions(root / "Swing Trading/nifty500_regime_daily.csv", extra_dates)
     pit_count, pit_audit = count_point_in_time_violations(
         signals, entries, setup, practical, membership, sessions

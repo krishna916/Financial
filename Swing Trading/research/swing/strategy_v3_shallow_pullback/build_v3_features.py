@@ -120,6 +120,7 @@ def download_adjusted_ohlcv(ticker: str, start: str, end_exclusive: str) -> pd.D
         actions=False,
         progress=False,
         threads=False,
+        timeout=30,
     )
     if raw is None or raw.empty:
         raise ValueError(f"Yahoo returned no daily rows for {ticker}")

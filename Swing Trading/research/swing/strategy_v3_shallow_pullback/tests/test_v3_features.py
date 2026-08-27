@@ -6,6 +6,7 @@ import pandas as pd
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
+import build_v3_features as features  # noqa: E402
 from build_v3_features import (  # noqa: E402
     active_members_on,
     compute_price_features,
@@ -105,3 +106,24 @@ def test_pre_window_rs_requires_actual_pre_window_membership():
     membership.loc[:, "Member_From"] = pd.Timestamp("2023-08-01")
     _, no_july_audit = rank_point_in_time_rs(frames, membership)
     assert no_july_audit.empty
+
+
+def test_download_adjusted_ohlcv_uses_bounded_provider_timeout(monkeypatch):
+    calls = {}
+
+    def fake_download(**kwargs):
+        calls.update(kwargs)
+        return pd.DataFrame(
+            {
+                "Date": [pd.Timestamp("2023-01-03")],
+                "Open": [100.0],
+                "High": [101.0],
+                "Low": [99.0],
+                "Close": [100.0],
+                "Volume": [1_000_000.0],
+            }
+        )
+
+    monkeypatch.setattr(features.yf, "download", fake_download)
+    features.download_adjusted_ohlcv("AAA.NS", "2023-01-01", "2023-01-05")
+    assert calls["timeout"] == 30

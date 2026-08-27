@@ -28,11 +28,11 @@ Relative-strength leader
 → SMA20 trend-following exit
 ```
 
-The key conceptual change versus V2 is the entry architecture. V2 bought a close above a structural pivot after a base. V3 first identifies an existing leader, then waits through a controlled retracement and attempts to enter the continuation before another full breakout develops.
+The key change versus V2 is entry architecture. V2 bought a close above a structural pivot after a base. V3 identifies an existing leader, waits through a controlled retracement, and attempts to enter continuation before another full breakout develops.
 
 ## 2. Research discipline
 
-Use the same research discipline applied to V2:
+Use the same discipline applied to V2:
 
 > **One hypothesis → one predefined change → test → document → decide → move on.**
 
@@ -54,23 +54,29 @@ Use **point-in-time Nifty 500 membership**.
 
 A valid V3 leader seed must occur while the symbol belongs to the point-in-time Nifty 500 on the seed date. A valid resumption signal must also occur while the symbol belongs to the point-in-time Nifty 500 on the signal date.
 
-Do not use today's Nifty 500 membership retrospectively.
+Do not apply today's Nifty 500 membership retrospectively.
 
-Historical OHLCV before index entry may be used to warm moving averages, ATR, rolling highs, and RS lookbacks, but cannot create a valid seed or signal while the symbol is inactive.
+Historical OHLCV before index entry may warm moving averages, ATR, rolling highs and RS lookbacks, but cannot create a valid seed or signal while the symbol is inactive.
 
-### Historical signal window
+### Primary signal window
 
-Use the same primary historical comparison window as V2:
+Use the same primary comparison window as V2:
 
 ```text
-2023-08-01 through 2026-08-25 inclusive
+Resumption Signal_Date: 2023-08-01 through 2026-08-25 inclusive
 ```
+
+Only **resumption signal dates** are constrained by this primary window.
+
+A leader seed may occur up to 10 trading sessions before 2023-08-01 so that a pullback already in progress can generate a fair in-window signal. Such a pre-window seed is valid only if all normal seed-date PIT membership, RS-safety, liquidity, trend and RS rules are satisfied from information genuinely available on that seed date.
+
+No trade is counted unless its V3 resumption signal date is inside the primary signal window.
 
 The final signal date is 2026-08-25 so an immediately following 2026-08-26 entry bar can be evaluated where data exists.
 
 ### Download warmup
 
-Reuse the V2 warmup convention where practical:
+Reuse the V2 convention where practical:
 
 ```text
 Download start: 2022-01-01
@@ -79,22 +85,13 @@ Download end:   exclusive 2026-08-27
 
 ### Corporate-action treatment
 
-Use Yahoo Finance adjusted OHLCV with the same convention as V2:
+Use Yahoo Finance adjusted OHLCV with:
 
 ```text
 auto_adjust=True
 ```
 
-The same adjusted series must be used consistently for:
-
-- Open / High / Low / Close;
-- moving averages;
-- True Range and ATR;
-- leader detection;
-- pullback depth;
-- entry simulation;
-- structural stop;
-- exits and returns.
+Use the same adjusted series consistently for Open/High/Low/Close, moving averages, True Range/ATR, leader detection, pullback depth, entry, stop, exits and returns.
 
 Do not mix adjusted and unadjusted fields in one trade lifecycle.
 
@@ -107,7 +104,7 @@ Use **Wilder ATR14**, identical to V2:
 
 ## 4. Liquidity
 
-Require on both the leader-seed date and resumption-signal date:
+Require on both leader-seed and resumption-signal dates:
 
 ```text
 20-session median daily traded value >= ₹10 crore
@@ -115,18 +112,16 @@ Require on both the leader-seed date and resumption-signal date:
 
 This is a hard eligibility rule.
 
-Median traded value remains preferable to raw volume because it is less sensitive to abnormal one-day activity.
-
 ## 5. Trend eligibility
 
-Require on both the leader-seed date and resumption-signal date:
+Require on both leader-seed and resumption-signal dates:
 
 ```text
 Close > SMA50
 SMA50 > SMA200
 ```
 
-During the active pullback, apply one additional structural protection rule:
+During an active pullback:
 
 ```text
 No daily Close < SMA50
@@ -134,79 +129,60 @@ No daily Close < SMA50
 
 A close below SMA50 invalidates the active pullback immediately.
 
-Do not require:
-
-- rising SMA50;
-- `SMA20 > SMA50`;
-- ADX;
-- MACD;
-- RSI.
+Do not require rising SMA50, `SMA20 > SMA50`, ADX, MACD or RSI.
 
 ## 6. Relative-strength leadership
 
-Reuse the V2 point-in-time cross-sectional RS framework across the active Nifty 500 universe:
+Reuse V2's point-in-time cross-sectional RS framework across the active Nifty 500 universe:
 
 ```text
-RS21 percentile weight  = 30%
-RS63 percentile weight  = 40%
-RS126 percentile weight = 30%
-
-Composite_RS =
-0.30 × RS21
-+ 0.40 × RS63
-+ 0.30 × RS126
+Composite_RS = 0.30 × RS21 + 0.40 × RS63 + 0.30 × RS126
 ```
 
-Require on both the leader-seed date and resumption-signal date:
+Require on both leader-seed and resumption-signal dates:
 
 ```text
 Composite_RS >= 70
 ```
 
-Interpretation remains diagnostic only:
+RS bands remain diagnostic only:
 
-- `70–79.99`: valid leadership;
-- `80–89.99`: preferred leadership;
-- `>=90`: exceptional leadership.
+- `70–79.99`: valid;
+- `80–89.99`: preferred;
+- `>=90`: exceptional.
 
-Do not introduce a second hard RS threshold during V3 validation.
-
-Use the same per-date RS research-safety rule as V2:
+Use the V2 research-safety rule:
 
 ```text
-RS coverage >= 80% of the active point-in-time Nifty 500 universe
+RS coverage >= 80% of the active PIT Nifty 500 universe
 ```
 
 A seed or signal from an unsafe RS date is invalid.
 
 ## 7. Leader seed
 
-A date `P` may seed a V3 pullback state when all seed-date eligibility rules pass and:
+A date `P` may seed a V3 pullback when all seed-date eligibility rules pass and:
 
 ```text
 Close[P] = highest Close over sessions P-19 through P
 ```
 
-This is a **20-session closing high**. It is evidence of recent momentum leadership; it is **not an entry trigger**.
+This is a 20-session closing high. Equality is intentional; the rule is not changed to a strict new-high comparison after outcomes are seen.
 
-Store at seed time:
+The seed is evidence of prior leadership, **not an entry**.
+
+Store:
 
 - `Leader_Date = P`;
 - `Leader_Close = Close[P]`;
 - `ATR14_Seed = ATR14[P]`;
-- seed-date RS values;
+- seed-date RS values and coverage;
 - seed-date liquidity;
 - seed-date trend values.
 
-Only one active V3 pullback is tracked per symbol at a time.
+Only one active V3 pullback is tracked per symbol. Pullback session 1 is the next trading session after `Leader_Date`.
 
-Pullback session 1 is the next trading session after the leader seed.
-
-## 8. Pullback state and age
-
-An active pullback may last from **3 through 10 sessions**.
-
-The state age is defined as:
+## 8. Pullback age
 
 ```text
 Pullback_Age = number of trading sessions completed after Leader_Date
@@ -214,73 +190,61 @@ Pullback_Age = number of trading sessions completed after Leader_Date
 
 Therefore:
 
-- leader seed date = age 0;
-- immediately following session = age 1;
-- earliest valid resumption candidate = age 3;
-- latest valid resumption candidate = age 10.
+- seed date = age 0;
+- next session = age 1;
+- earliest valid resumption = age 3;
+- latest valid resumption = age 10.
 
-If no resumption candidate occurs by the end of age 10, expire the active pullback.
-
-A later qualifying leader seed may start a new pullback.
+If no resumption candidate occurs by the end of age 10, expire the state.
 
 ## 9. Pullback depth
-
-Measure pullback depth from the original leader close using ATR14 from the original leader-seed date.
 
 Define:
 
 ```text
-Pullback_Low[t] = lowest Low from pullback session 1 through session t
+Pullback_Low[t] = lowest Low from pullback session 1 through t
 
 Pullback_Depth_ATR[t] =
 (Leader_Close - Pullback_Low[t]) / ATR14_Seed
 ```
 
-The denominator never changes during the active pullback.
+`ATR14_Seed` never changes during the active pullback.
 
 ### Maximum depth
 
-Require throughout the active pullback:
+Require throughout:
 
 ```text
 Pullback_Depth_ATR <= 2.5
 ```
 
-If depth exceeds 2.5 ATR at any time, invalidate the active pullback immediately.
+A breach invalidates immediately.
 
 ### Minimum depth
 
-A resumption candidate is valid only if the pullback has actually retraced enough to distinguish it from ordinary one-day noise:
+At the first resumption trigger require:
 
 ```text
 Pullback_Depth_ATR >= 0.5
 ```
 
-This minimum is evaluated when the first resumption trigger occurs.
+If the first resumption trigger occurs below 0.5 ATR depth, classify `PULLBACK_TOO_SHALLOW`, close the state and do not wait for another trigger from the same leader.
 
-If a resumption trigger occurs while depth is still below 0.5 ATR, classify the setup as `PULLBACK_TOO_SHALLOW` and end that active pullback. Do not keep waiting for a second resumption trigger from the same leader.
+## 10. New leader during a pullback
 
-## 10. New leader during an active pullback
-
-V3 is specifically testing a retracement-and-resumption structure rather than another fresh-high breakout.
-
-If during an active pullback:
+If:
 
 ```text
 Close[t] > Leader_Close
 ```
 
-then the old pullback ends immediately as `NEW_LEADER_CLOSE` and does **not** create a V3 resumption candidate.
+close the old state as `NEW_LEADER_CLOSE` and do **not** create a V3 resumption candidate from it.
 
-After closing the old state, independently test the same bar as a possible new V3 leader seed using the normal 20-session closing-high and seed-eligibility rules.
-
-This same-bar reseeding rule applies after every type of V3 state closure, cancellation, invalidation, or expiry where the closing bar itself qualifies as a fresh leader seed.
+After closing, independently test the same bar as a possible new leader seed using the normal seed rules.
 
 ## 11. Resumption trigger
 
-The resumption rule is deliberately simple.
-
-During pullback ages 3–10, the **first** session satisfying:
+The trigger is deliberately simple:
 
 ```text
 Close[t] > High[t-1]
@@ -288,72 +252,52 @@ AND
 Close[t] > SMA20[t]
 ```
 
-creates exactly one resumption candidate from the active pullback.
-
-The trigger means price has closed through the prior session's high and reclaimed/held above the short-term trend reference.
-
-The trigger is evaluated after hard invalidations and the `NEW_LEADER_CLOSE` rule.
+The first such session is the only resumption attempt from the active leader state.
 
 ### Too-short resumption
 
-If the same technical resumption condition occurs at pullback age 1 or 2, classify the setup as `TOO_SHORT_RESUMPTION` and end the active pullback.
+If the condition occurs at age 1 or 2, classify `TOO_SHORT_RESUMPTION`, close the state, and independently test the same bar for a new leader seed.
 
-The same bar may independently seed a new leader state if it satisfies all leader-seed rules.
+### Valid timing
 
-### Candidate does not imply acceptance
+If it occurs at age 3–10, create exactly one resumption candidate. The active state closes whether the candidate later passes or fails signal-date gates.
 
-Once the first resumption trigger occurs, the active pullback is finished whether the candidate ultimately passes or fails the other signal-date rules.
-
-Do not wait for another resumption trigger from the same leader.
+Do not wait for a second resumption trigger.
 
 ## 12. Resumption-signal eligibility
 
-A resumption candidate becomes a valid V3 signal only if all of the following are true on the signal date:
+A candidate becomes a qualified V3 signal only if all are true on the signal date:
 
-- point-in-time Nifty 500 membership is active;
-- RS coverage is research-safe;
+- active PIT Nifty 500 membership;
+- RS coverage research-safe;
 - 20-session median traded value >= ₹10 crore;
 - `Close > SMA50 > SMA200`;
 - `Composite_RS >= 70`;
-- `Pullback_Age` is between 3 and 10 inclusive;
+- `Pullback_Age` 3–10 inclusive;
 - `0.5 <= Pullback_Depth_ATR <= 2.5`;
-- no prior daily close during the active pullback was below SMA50;
+- no earlier close in this active pullback below SMA50;
 - resumption trigger is true;
 - `Close <= Leader_Close`.
 
-The final condition preserves the intended distinction from a breakout entry. If the signal-day close is already above the original leader close, it is not a V3 pullback-resumption entry.
+`Close <= Leader_Close` preserves the distinction from a fresh-high breakout entry.
 
-## 13. Point-in-time timing rule
+## 13. Point-in-time timing
 
 No same-session entry is assumed.
 
-All close-derived justification must satisfy:
+All close-derived context must satisfy:
 
 ```text
 Context_Date < Entry_Date
 ```
 
-This applies to:
+This includes membership, RS, RS coverage, liquidity, moving averages, ATR, leader state, pullback state, resumption trigger, breadth and any future daily close-derived field.
 
-- point-in-time membership;
-- stock RS;
-- RS universe coverage;
-- liquidity;
-- moving averages;
-- ATR;
-- leader state;
-- pullback age/depth;
-- resumption trigger;
-- market breadth diagnostics;
-- any future close-derived V3 feature.
-
-No entry-day close may be used to justify an entry at that day's open.
+No entry-day close may justify an entry at that day's open.
 
 ## 14. Immediate next-session entry
 
-Each qualified V3 signal receives exactly **one automatic entry opportunity**: the open of the immediately following market session.
-
-Do not delay entry to a later session if that immediate opportunity fails.
+Each qualified signal gets exactly one automatic opportunity: the **immediately following market-session Open**.
 
 Require:
 
@@ -367,7 +311,7 @@ and:
 Entry_Open <= Leader_Close + 0.5 × ATR14_signal
 ```
 
-where `SMA20_signal` and `ATR14_signal` are known from the completed resumption-signal bar.
+where signal-day SMA20 and ATR14 are fully known before entry.
 
 Cancellation reasons must distinguish at minimum:
 
@@ -375,15 +319,13 @@ Cancellation reasons must distinguish at minimum:
 - `MISSING_NEXT_SESSION_BAR`;
 - `OPEN_BELOW_SMA20_SIGNAL`;
 - `OPEN_ABOVE_EXTENSION_LIMIT`;
-- structural-stop rejection reasons defined below.
+- structural-stop rejection reasons.
 
-There is no later rescue entry from the same pullback.
+Do not delay or rescue the same signal on a later session.
 
 ## 15. Structural stop
 
-The V3 practical stop is anchored to the actual pullback structure.
-
-Define on the resumption signal date:
+On the resumption signal date define:
 
 ```text
 Structural_Stop =
@@ -391,74 +333,62 @@ lowest Low from pullback session 1 through the resumption-signal session, inclus
 - 0.25 × ATR14_signal
 ```
 
-Including the resumption bar makes the definition deterministic and ensures the complete known pullback/resumption structure is respected.
-
-Reject the trade before entry if:
+Reject before entry if:
 
 ```text
 Structural_Stop >= Entry_Open
 ```
 
-Also reject if:
+or:
 
 ```text
 Entry_Open - Structural_Stop > 2.5 × ATR14_signal
 ```
 
-Do not artificially tighten the stop to make the setup pass.
+Do not tighten the stop artificially to make a trade pass.
 
 ## 16. Position sizing assumption
 
-For eventual live use:
+For eventual live deployment:
 
 ```text
 Planned portfolio risk per trade = 1% of dedicated swing capital
 ```
-
-Quantity would be:
 
 ```text
 Position_Quantity =
 Portfolio_Risk_Amount / (Entry_Open - Structural_Stop)
 ```
 
-Confidence does not override the risk budget.
-
-Position sizing and a 3–5-position capital-capacity simulation are **not** part of the first V3 signal-level edge test. They may be evaluated only if signal-level V3 demonstrates sufficient edge.
+Position sizing and 3–5-position capital constraints are not part of this first signal-level V3 edge test.
 
 ## 17. Exit lenses
 
-Reuse the V2 exit architecture to isolate the change to the entry family.
+Reuse V2's exit architecture so V3 primarily changes the entry family.
 
 ### Lens A — setup quality
 
 Ignore the structural stop.
 
-Generate an exit signal when:
-
 ```text
-Close < SMA20
+Close < SMA20 → exit at immediately following trading-session Open
 ```
-
-Exit at the immediately following trading session open.
-
-This lens measures whether the V3 entry itself captures favorable continuation without stop-shape effects.
 
 ### Lens B — practical trading
 
-Use the fixed V3 structural stop plus the same SMA20 trend exit.
+Use the fixed structural stop plus the same SMA20 trend exit.
 
-For each session while open, use this precedence:
+Per open position, precedence is:
 
-1. If a prior close generated the SMA20 exit signal, exit at the current session Open before any intraday stop logic.
-2. Otherwise, if `Open <= Structural_Stop`, exit at that Open to model a gap through the stop.
-3. Otherwise, if `Low <= Structural_Stop`, exit at `Structural_Stop`.
-4. Otherwise, if `Close < SMA20`, schedule an exit for the next session Open.
-5. Otherwise remain open.
+1. prior-close SMA20 exit signal → current Open exit first;
+2. otherwise `Open <= Structural_Stop` → exit at Open;
+3. otherwise `Low <= Structural_Stop` → exit at Structural_Stop;
+4. otherwise `Close < SMA20` → schedule next-session Open exit;
+5. otherwise remain open.
 
-No target, breakeven rule, or hard time stop is introduced in the initial V3 validation.
+No fixed profit target, breakeven rule, trailing ATR stop or hard time stop is introduced.
 
-## 18. Outcome definitions
+## 18. Outcomes
 
 ### Setup-quality lens
 
@@ -466,48 +396,36 @@ No target, breakeven rule, or hard time stop is introduced in the initial V3 val
 Return = (Exit_Price - Entry_Open) / Entry_Open
 ```
 
-Return profit factor:
-
-```text
-sum positive trade returns / absolute sum negative trade returns
-```
+Return PF = sum positive returns / absolute sum negative returns.
 
 ### Practical lens
 
 ```text
 Initial_Risk = Entry_Open - Structural_Stop
-
-R_Multiple =
-(Exit_Price - Entry_Open) / Initial_Risk
+R_Multiple = (Exit_Price - Entry_Open) / Initial_Risk
 ```
 
-R profit factor:
+R PF = sum positive R multiples / absolute sum negative R multiples.
 
-```text
-sum positive R multiples / absolute sum negative R multiples
-```
+Gap losses may be worse than `-1R`.
 
-Adverse gaps may produce realized losses worse than `-1R`.
+## 19. Breadth
 
-## 19. Breadth treatment
+Breadth is **diagnostic only**.
 
-Do **not** use market breadth as a V3 entry gate.
-
-Attach the existing point-in-time Nifty 500 breadth regime using the latest available breadth row strictly before entry:
+Attach the latest available existing Nifty 500 breadth row strictly before entry:
 
 ```text
 Breadth_Context_Date < Entry_Date
 ```
 
-Breadth remains diagnostic only.
+Do not test HOSTILE exclusion or STRONG-only entry as part of primary V3.
 
-In particular, do not test a HOSTILE exclusion as part of the primary V3 run. V2 did not demonstrate sufficient standalone entry quality to justify treating breadth as the next rescue mechanism.
+## 20. Volume
 
-## 20. Volume treatment
+Volume is **diagnostic only**.
 
-Do **not** use volume as a hard V3 gate.
-
-Record diagnostic metadata such as:
+Record, where available:
 
 ```text
 Resumption_Volume_Ratio =
@@ -518,50 +436,46 @@ Do not promote an observed favorable volume subgroup into V3 after results are k
 
 ## 21. Diagnostics
 
-Record continuous raw variables so behavior can be understood without creating post-result filters.
-
-At minimum summarize results by:
+At minimum retain/summarize:
 
 - pullback duration;
-- pullback-depth bands;
-- Composite RS bands (`70–79.99`, `80–89.99`, `>=90`);
+- pullback depth;
+- RS band;
 - breadth regime;
-- resumption volume ratio bands;
-- entry extension relative to Leader_Close and ATR;
+- resumption-volume ratio;
+- entry extension versus `Leader_Close` and ATR;
 - holding duration;
 - exit reason.
 
-These are explanatory diagnostics only.
+Diagnostic subgroup results are explanatory only.
 
-## 22. State-machine ordering
+## 22. Locked state-machine ordering
 
-For each symbol and each new session while a V3 pullback is active, apply this deterministic order:
+For each active symbol/session:
 
 1. Increment `Pullback_Age`.
-2. Add the current session to the pullback window and update `Pullback_Low`.
-3. Recalculate `Pullback_Depth_ATR` using the original `ATR14_Seed`.
-4. If the current Close is below SMA50, close as `SMA50_INVALIDATED`.
-5. Else if depth exceeds 2.5 ATR, close as `DEPTH_INVALIDATED`.
-6. Else if `Close > Leader_Close`, close as `NEW_LEADER_CLOSE`; do not create a V3 candidate from the old state.
-7. Else evaluate the resumption condition `Close > prior session High AND Close > SMA20`.
+2. Add current bar to the pullback window and update `Pullback_Low`.
+3. Recalculate depth using original `ATR14_Seed`.
+4. If `Close < SMA50`, close as `SMA50_INVALIDATED`.
+5. Else if depth >2.5 ATR, close as `DEPTH_INVALIDATED`.
+6. Else if `Close > Leader_Close`, close as `NEW_LEADER_CLOSE`; no candidate from old state.
+7. Else evaluate `Close > prior High AND Close > SMA20`.
 8. If resumption occurs at age 1–2, close as `TOO_SHORT_RESUMPTION`.
-9. If resumption occurs at age 3–10, create exactly one candidate; evaluate minimum-depth and all signal-date gates; close the active state regardless of acceptance.
+9. If resumption occurs at age 3–10, create exactly one candidate, evaluate minimum depth and signal gates, then close the state regardless of acceptance.
 10. If no resumption occurred and age reaches 10, close as `EXPIRED`.
-11. After **any** state close/cancel/invalidation above, independently test the same bar as a possible new leader seed. If all seed rules pass, create a fresh state with age 0; its pullback session 1 begins on the following market session.
+11. After **any** state closure/invalidation/expiry above, independently test the same bar as a new leader seed. If eligible, create a fresh age-0 state whose session 1 begins on the following market session.
 
-This ordering is locked before historical outcomes are observed.
+This ordering is frozen before historical outcomes are observed.
 
-## 23. Candidate and entry accounting
+## 23. Accounting
 
-Keep the research accounting explicit:
+Track explicitly:
 
 ```text
 All resumption candidates
 → qualified signals
-→ accepted next-session entries
-   + entry cancellations
-→ completed setup/practical outcomes
-   + accepted entries still incomplete at observation end
+→ accepted entries + entry cancellations
+→ completed paired outcomes + incomplete accepted entries
 ```
 
 Require:
@@ -570,155 +484,123 @@ Require:
 Qualified_Signals = Accepted_Entries + Entry_Cancellations
 ```
 
-Every accepted entry must reference exactly one qualified signal.
+Every accepted entry must reference one qualified signal.
 
 Setup-quality and practical completed outcomes must use the same completed `Entry_ID` set.
 
-Incomplete accepted positions must remain visible in entry/overlap diagnostics rather than disappearing from accepted-entry counts.
+Incomplete accepted entries remain visible in entry and overlap diagnostics.
 
-## 24. Overlap diagnostic
+## 24. Overlap
 
-The initial V3 question is signal-level edge, not constrained portfolio performance.
+The first question is individual-signal edge, not constrained portfolio performance.
 
-Do not suppress otherwise valid signals because capital would have been occupied by another signal.
+Do not suppress otherwise valid entries due to capital occupancy.
 
-Still calculate overlap over **all accepted entries**, including incomplete positions through the observation end:
+Calculate overlap across **all accepted entries**, including incomplete positions through observation end:
 
 - total accepted entries;
 - entries overlapping another open trade in the same symbol;
 - maximum simultaneous signal-level trades;
-- maximum same-day accepted entries.
+- maximum same-day entries.
 
-If V3 passes signal-level validation, portfolio-capacity constraints can be tested separately.
+## 25. PIT integrity audit
 
-## 25. Point-in-time integrity audit
-
-The final validation must derive integrity from actual artifacts; it must not default to zero.
+The final result must derive PIT integrity from actual artifacts; it must never default to zero.
 
 Audit at minimum:
 
 - accepted entry has a qualified V3 signal;
-- leader seed date precedes resumption signal date;
-- resumption signal date strictly precedes entry date;
-- leader seed and signal dates are inside the historical research window where required;
-- seed and signal occur while the symbol is an active point-in-time Nifty 500 member;
-- RS coverage is research-safe on seed and signal dates;
-- seed and signal `Composite_RS >= 70`;
-- breadth diagnostic date is strictly before entry;
-- accepted entry is the immediate next market session after the signal;
-- setup/practical completed `Entry_ID` sets match.
+- `Leader_Date < Signal_Date < Entry_Date`;
+- every counted resumption `Signal_Date` is within 2023-08-01 through 2026-08-25 inclusive;
+- a pre-window leader seed is at most 10 market sessions before 2023-08-01 and satisfies all normal PIT seed rules;
+- seed and signal are active PIT Nifty 500 members;
+- seed and signal have research-safe RS coverage;
+- seed and signal have `Composite_RS >=70`;
+- accepted entry is the immediate next market session after signal;
+- breadth context is strictly before entry;
+- setup/practical completed Entry_ID sets match.
 
-Any non-zero integrity violation count must abort profitability interpretation and produce an explicit audit artifact.
+Any non-zero PIT violation count must create an explicit audit artifact and abort profitability interpretation.
 
 ## 26. Precommitted validation gates
 
-Reuse the V2 gates so the standard is not weakened after V2's negative result.
+Reuse V2's main gates.
 
 ### Sample sufficiency
 
 ```text
-Completed paired trades >= 100
+Completed paired trades >=100
 ```
 
-If completed trades are below 100, formal final status is:
+Below 100, final formal status is `INSUFFICIENT_EVIDENCE`. Strongly negative observed evidence should still be described as negative rather than neutral.
+
+### Setup edge
 
 ```text
-INSUFFICIENT_EVIDENCE
+Setup mean return >0
+Setup Return PF >=1.20
 ```
 
-This does not require describing strongly negative observed metrics as neutral.
-
-### Setup-quality expectancy
-
-Require:
+### Practical edge
 
 ```text
-Setup mean return > 0
-Setup Return PF >= 1.20
-```
-
-### Practical expectancy
-
-Require:
-
-```text
-Practical mean >= +0.15R per trade
-Practical R PF >= 1.20
+Practical mean >= +0.15R/trade
+Practical R PF >=1.20
 ```
 
 ### Temporal robustness
 
-A calendar year qualifies only if it contains at least 20 completed paired trades and:
+A calendar year qualifies only with >=20 completed paired trades and:
 
 ```text
-Setup mean return > 0
-Setup Return PF >= 1.0
+Setup mean return >0
+Setup Return PF >=1.0
 ```
 
-Require at least **two qualifying calendar years**.
+Require >=2 qualifying years.
 
-Do not add a practical-R requirement to the per-year temporal gate.
+Do **not** add Practical_Mean_R to the year qualification rule.
 
 ### Winner-removal robustness
 
-Remove the top 1, top 3, and top 5 setup-quality winners by return.
-
-For the top-5 removal test require the remaining sample to satisfy:
+Remove top 1/3/5 setup winners. After top-5 removal require:
 
 ```text
-Setup mean return > 0
-Setup Return PF >= 1.0
+Setup mean return >0
+Setup Return PF >=1.0
 ```
 
-### Leave-one-symbol-out robustness
+### Leave-one-symbol-out
 
-For every symbol represented among completed accepted entries, remove all completed entries from that symbol and recompute setup metrics.
-
-Every leave-one-symbol-out sample must satisfy:
+For every represented symbol, remove all its completed entries. Every remaining sample must satisfy:
 
 ```text
-Setup mean return > 0
-Setup Return PF >= 1.0
+Setup mean return >0
+Setup Return PF >=1.0
 ```
 
-### Point-in-time integrity
-
-Require:
+### PIT integrity
 
 ```text
 PIT violations = 0
 ```
 
-### Final decision
+### Final status
 
-If completed trades >=100:
+If completed paired trades >=100: `PASS` only if every gate passes, else `FAIL`.
 
-```text
-PASS only if every precommitted gate passes
-otherwise FAIL
-```
+If completed paired trades <100: `INSUFFICIENT_EVIDENCE`.
 
-If completed trades <100:
+## 27. Required outputs
 
-```text
-INSUFFICIENT_EVIDENCE
-```
-
-## 27. Required historical outputs
-
-Use a dedicated research directory, suggested:
+Use:
 
 ```text
 Swing Trading/research/swing/strategy_v3_shallow_pullback/
-```
-
-and write generated evidence under:
-
-```text
 Swing Trading/research/swing/strategy_v3_shallow_pullback/output/
 ```
 
-At minimum produce:
+At minimum generate:
 
 - `v3_data_validation.csv`;
 - `v3_universe_rs_audit.csv`;
@@ -737,105 +619,102 @@ At minimum produce:
 - `v3_overlap_diagnostic.csv`;
 - `v3_validation_gates.csv`;
 - `research_report.md`;
-- `v3_point_in_time_violations.csv` only if violations exist.
+- `v3_point_in_time_violations.csv` only when violations exist.
 
-The research report must present evidence and methodology only. It must not tune thresholds or prescribe post-result rescue changes.
+The report is evidence-only and must not prescribe post-result threshold tuning.
 
-## 28. Reuse versus new implementation
+## 28. Reuse versus new code
 
 Reuse proven V2 infrastructure where semantics are identical:
 
-- point-in-time Nifty 500 membership loading;
-- adjusted Yahoo OHLCV convention;
-- price features and Wilder ATR14;
-- point-in-time cross-sectional RS ranking and 80% coverage safety;
-- liquidity calculation;
+- PIT Nifty 500 membership;
+- adjusted Yahoo OHLCV;
+- price features/Wilder ATR14;
+- PIT cross-sectional RS and 80% coverage safety;
+- median traded-value liquidity;
 - immediate-next-session market-session handling;
-- setup-quality and practical SMA20 exit simulators where compatible;
-- breadth strict-prior join;
-- safe profit-factor calculation;
-- year summary, outlier robustness, LOSO, overlap, and gate patterns where semantics remain unchanged.
+- SMA20 exit simulation where compatible;
+- strict-prior breadth join;
+- profit-factor calculation;
+- year/outlier/LOSO/overlap/gate patterns where semantics remain unchanged.
 
-Do **not** mutate V2 outputs or V2 research code in a way that changes its historical evidence.
+Do not alter V2 evidence.
 
-V3 should have its own state machine, signal artifacts, tests, and outputs.
+V3 gets its own state machine, signal artifacts, tests and outputs.
 
-## 29. Required regression tests
+## 29. Required regression coverage
 
-Implementation must include deterministic tests covering at minimum:
+Implementation must deterministically test at minimum:
 
 1. 20-session closing-high leader seed.
-2. Seed requires PIT membership, safe RS coverage, liquidity, trend, and `Composite_RS >=70`.
-3. Pullback age starts at 1 on the session after the leader.
-4. Depth uses `Leader_Close`, running lowest Low, and original `ATR14_Seed`.
-5. Depth >2.5 ATR invalidates immediately.
-6. Close below SMA50 invalidates immediately.
-7. Resumption at age 1–2 is too short and closes the state.
-8. Resumption at age 3 is valid timing.
-9. Resumption at age 10 is valid timing.
-10. No resumption by age 10 expires the state.
-11. Resumption trigger is exactly `Close > previous High AND Close > SMA20`.
-12. First resumption ends the pullback even if minimum depth or another signal gate fails.
-13. Minimum depth <0.5 ATR rejects as `PULLBACK_TOO_SHALLOW`.
-14. `Close > Leader_Close` ends old state without a V3 candidate.
-15. Same-bar reseeding works after invalidation, too-short resumption, new leader close, candidate closure, and expiry when the bar qualifies.
+2. Seed PIT membership, safe RS coverage, liquidity, trend and `Composite_RS >=70`.
+3. Age 1 starts on the session after seed.
+4. Depth uses `Leader_Close`, running lowest Low and original `ATR14_Seed`.
+5. >2.5 ATR depth invalidation.
+6. Close below SMA50 invalidation.
+7. Age-1/2 resumption is too short.
+8. Age-3 resumption is valid timing.
+9. Age-10 resumption is valid timing.
+10. No resumption by age 10 expires.
+11. Trigger is exactly `Close > previous High AND Close > SMA20`.
+12. First trigger closes state even when another signal gate fails.
+13. <0.5 ATR depth rejects `PULLBACK_TOO_SHALLOW`.
+14. `Close > Leader_Close` closes old state without candidate.
+15. Same-bar reseeding after every closure type when eligible.
 16. Qualified signal requires `Close <= Leader_Close`.
-17. Entry is only the immediate next market session.
-18. Missing immediate symbol bar cancels rather than delays.
-19. Entry open below `SMA20_signal` cancels.
-20. Entry open above `Leader_Close + 0.5 ATR14_signal` cancels.
-21. Structural stop uses the lowest Low through the resumption signal session inclusive minus `0.25 ATR14_signal`.
-22. Structural stop not below entry cancels.
-23. Stop distance >2.5 ATR14_signal cancels.
-24. Setup-quality SMA20 exit occurs at the next open.
-25. Practical prior-close SMA20 scheduled exit precedes same-day stop checks.
-26. Practical gap stop and intraday stop behavior.
-27. Breadth context is strictly prior to entry.
-28. PIT audit detects same-day/same-entry-date leakage.
-29. Setup/practical completed `Entry_ID` mismatch is detected.
-30. Overlap counts all accepted entries, including incomplete ones.
-31. Temporal gate uses only the locked setup-quality year conditions.
+17. Immediate-next-market-session entry only.
+18. Missing immediate symbol bar cancels instead of delaying.
+19. Open below `SMA20_signal` cancellation.
+20. Open above `Leader_Close + 0.5 ATR14_signal` cancellation.
+21. Stop uses lowest Low through signal bar inclusive minus `0.25 ATR14_signal`.
+22. Stop not below entry cancellation.
+23. Stop distance >2.5 ATR cancellation.
+24. Setup SMA20 next-open exit.
+25. Practical prior-close SMA20 exit precedence.
+26. Practical gap/intraday stop behavior.
+27. Strict-prior breadth.
+28. PIT audit catches timing leakage.
+29. Lens Entry_ID mismatch detection.
+30. Overlap includes incomplete accepted entries.
+31. Temporal gate uses only locked setup-year conditions.
 32. Final status is `INSUFFICIENT_EVIDENCE` below 100 completed paired trades.
+33. A seed up to 10 market sessions before 2023-08-01 can generate an in-window signal, while an out-of-window signal is excluded.
 
-## 30. What V3 deliberately does not test
+## 30. Deliberately excluded from initial V3
 
-Do not add any of the following to the initial V3 kernel:
+Do not add:
 
 - HOSTILE breadth exclusion;
 - STRONG-only breadth requirement;
 - sector-RS gate;
-- breakout-volume requirement;
-- low-volume pullback requirement;
-- RSI threshold;
-- MACD crossover;
-- ADX threshold;
-- candlestick pattern scoring;
+- breakout-volume gate;
+- low-volume-pullback gate;
+- RSI/MACD/ADX;
+- candlestick scoring;
 - higher-low count;
-- Fibonacci retracement bands;
+- Fibonacci bands;
 - exact support-line geometry;
-- earnings/news hindsight filters;
+- hindsight earnings/news filters;
 - profit target;
-- automatic breakeven stop;
+- breakeven move;
 - trailing ATR stop;
 - hard time exit;
-- 3–5 position capital constraint;
+- 3–5 position cap;
 - outcome-driven tuning of pullback duration/depth/RS thresholds.
 
-Each is a separate future hypothesis only if the evidence justifies testing it.
+Each is a separate future hypothesis only if evidence later justifies testing it.
 
-## 31. Research interpretation after the run
+## 31. Interpretation after the run
 
-The first question after V3 is not “which threshold would make it win?”
+Interpret in this order:
 
-Interpret results in this order:
+1. Did V3 show positive raw setup expectancy?
+2. Did the practical structural stop preserve or destroy that edge?
+3. Is performance robust across years and symbols?
+4. Is performance dominated by a few winners?
+5. Do diagnostics suggest a plausible market-behavior explanation without becoming retroactive filters?
+6. Does evidence justify continuing this strategy family?
 
-1. Did the entry family demonstrate positive raw setup expectancy?
-2. Did the structural stop preserve or destroy that edge?
-3. Is the result robust across years and symbols?
-4. Is performance dominated by a handful of winners?
-5. Do diagnostics reveal a plausible market-behavior explanation without being used as a retroactive filter?
-6. Does the evidence justify continuing this strategy family at all?
+If V3 fails materially, do not rescue it by narrowing to the best observed pullback-depth, duration, RS, breadth or volume subgroup.
 
-If V3 fails materially, do not rescue it by narrowing to the best observed pullback-depth, duration, RS, or breadth subgroup.
-
-If V3 passes, the next isolated research stage may evaluate portfolio capacity and/or one predeclared contextual filter, but only after the base V3 edge is established.
+If V3 passes, portfolio capacity and any contextual filter must be separate, predeclared research stages.

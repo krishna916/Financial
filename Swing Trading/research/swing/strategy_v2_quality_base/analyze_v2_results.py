@@ -404,8 +404,8 @@ def leave_one_symbol_out(setup: pd.DataFrame, practical: pd.DataFrame) -> pd.Dat
     return pd.DataFrame(rows)
 
 
-def overlap_diagnostic(practical: pd.DataFrame) -> pd.DataFrame:
-    if practical.empty:
+def overlap_diagnostic(entries: pd.DataFrame, practical: pd.DataFrame) -> pd.DataFrame:
+    if entries.empty:
         return pd.DataFrame(
             [
                 {
@@ -416,9 +416,23 @@ def overlap_diagnostic(practical: pd.DataFrame) -> pd.DataFrame:
                 }
             ]
         )
-    data = practical.copy()
-    data["Entry_Date"] = pd.to_datetime(data["Entry_Date"])
-    data["Exit_Date"] = pd.to_datetime(data["Exit_Date"])
+    data = entries[["Entry_ID", "Symbol", "Entry_Date"]].copy()
+    data["Entry_Date"] = pd.to_datetime(data["Entry_Date"], errors="raise")
+
+    exits = (
+        practical[["Entry_ID", "Exit_Date"]].copy()
+        if not practical.empty
+        else pd.DataFrame(columns=["Entry_ID", "Exit_Date"])
+    )
+    if not exits.empty:
+        exits["Exit_Date"] = pd.to_datetime(exits["Exit_Date"], errors="raise")
+
+    data = data.merge(exits, on="Entry_ID", how="left", validate="one_to_one")
+    latest_entry = data["Entry_Date"].max()
+    latest_exit = exits["Exit_Date"].max() if not exits.empty else latest_entry
+    observation_end = max(latest_entry, latest_exit)
+    data["Effective_Exit_Date"] = data["Exit_Date"].fillna(observation_end)
+
     overlap_count = 0
     max_simultaneous = 0
     for _, current in data.iterrows():
@@ -426,12 +440,14 @@ def overlap_diagnostic(practical: pd.DataFrame) -> pd.DataFrame:
             (data["Symbol"] == current["Symbol"])
             & (data["Entry_ID"] != current["Entry_ID"])
             & (data["Entry_Date"] <= current["Entry_Date"])
-            & (data["Exit_Date"] >= current["Entry_Date"])
+            & (data["Effective_Exit_Date"] >= current["Entry_Date"])
         ]
         overlap_count += int(not others.empty)
     dates = sorted(set(data["Entry_Date"]))
     for date in dates:
-        open_at_date = data.loc[(data["Entry_Date"] <= date) & (data["Exit_Date"] >= date)]
+        open_at_date = data.loc[
+            (data["Entry_Date"] <= date) & (data["Effective_Exit_Date"] >= date)
+        ]
         max_simultaneous = max(max_simultaneous, len(open_at_date))
     max_same_day = int(data["Entry_Date"].value_counts().max())
     return pd.DataFrame(
@@ -681,7 +697,7 @@ if __name__ == "__main__":
     outliers = outlier_robustness(setup, practical)
     leave_out = leave_one_symbol_out(setup, practical)
     breadth = breadth_summary(setup, practical)
-    overlap = overlap_diagnostic(practical)
+    overlap = overlap_diagnostic(entries, practical)
     gates = evaluate_gates(
         setup,
         practical,

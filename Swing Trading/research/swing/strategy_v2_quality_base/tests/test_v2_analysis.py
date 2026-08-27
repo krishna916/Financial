@@ -11,6 +11,7 @@ from analyze_v2_results import (  # noqa: E402
     count_point_in_time_violations,
     evaluate_gates,
     breadth_summary,
+    overlap_diagnostic,
     safe_profit_factor,
     simulate_practical_trade,
     simulate_setup_quality_trade,
@@ -280,3 +281,25 @@ def test_temporal_gate_uses_only_locked_setup_year_conditions():
 
     assert bool(temporal["Passed"])
     assert int(temporal["Value"]) == 2
+
+
+def test_overlap_diagnostic_counts_incomplete_accepted_entries():
+    entries = pd.DataFrame(
+        {
+            "Entry_ID": ["A", "B", "C"],
+            "Symbol": ["AAA", "BBB", "CCC"],
+            "Entry_Date": pd.to_datetime(["2026-08-20", "2026-08-21", "2026-08-26"]),
+        }
+    )
+    practical = pd.DataFrame(
+        {
+            "Entry_ID": ["A", "B"],
+            "Symbol": ["AAA", "BBB"],
+            "Entry_Date": pd.to_datetime(["2026-08-20", "2026-08-21"]),
+            "Exit_Date": pd.to_datetime(["2026-08-25", "2026-08-25"]),
+        }
+    )
+
+    row = overlap_diagnostic(entries, practical).iloc[0]
+    assert row["Total_Accepted_Entries"] == 3
+    assert row["Max_Same_Day_Entries"] == 1

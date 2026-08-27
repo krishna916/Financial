@@ -7,6 +7,8 @@ import pytest
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
+REPO_ROOT = Path(__file__).resolve().parents[5]
+
 from generate_v3_signals import (  # noqa: E402
     SIGNAL_END,
     SIGNAL_START,
@@ -63,7 +65,7 @@ def state_events(frame: pd.DataFrame) -> pd.DataFrame:
 
 def test_canonical_session_spine_and_prewindow_boundary():
     loaded = load_canonical_market_sessions(
-        Path("Swing Trading/nifty500_regime_daily.csv"),
+        REPO_ROOT / "Swing Trading/nifty500_regime_daily.csv",
         pd.DatetimeIndex([pd.Timestamp("2026-08-27")]),
     )
     assert pd.Timestamp("2026-08-27") in loaded

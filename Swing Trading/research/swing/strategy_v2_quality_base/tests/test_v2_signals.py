@@ -85,8 +85,27 @@ def test_failed_probe_rechecks_depth_using_raised_pivot():
     events_on_probe_day = audit.loc[
         audit["Date"] == frame.loc[67, "Date"], "Event"
     ].tolist()
-    assert events_on_probe_day == ["FAILED_PROBE", "DEPTH_INVALIDATED"]
+    assert events_on_probe_day == ["FAILED_PROBE", "DEPTH_INVALIDATED", "SEEDED"]
     assert len(candidates) == 0
+
+
+def test_depth_invalidation_reseeds_same_bar_when_bar_is_new_63_session_high():
+    frame = make_valid_base_frame()
+    frame.loc[67, ["High", "Low", "Close"]] = [104.0, 95.0, 99.0]
+
+    audit, candidates = scan_symbol_bases("AAA", frame)
+
+    events = audit.loc[audit["Date"].eq(frame.loc[67, "Date"]), "Event"].tolist()
+    assert events == ["FAILED_PROBE", "DEPTH_INVALIDATED", "SEEDED"]
+
+    reseed = audit.loc[
+        audit["Date"].eq(frame.loc[67, "Date"])
+        & audit["Event"].eq("SEEDED")
+    ].iloc[0]
+    assert reseed["Base_Age"] == 0
+    assert reseed["Original_Pivot"] == 104.0
+    assert reseed["Active_Pivot"] == 104.0
+    assert candidates.empty
 
 
 def test_breakout_before_ten_sessions_is_too_short():

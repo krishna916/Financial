@@ -275,7 +275,6 @@ def scan_symbol_bases(symbol: str, frame: pd.DataFrame) -> tuple[pd.DataFrame, p
         active["Base_Indices"].append(index)
         active["Base_Low"] = min(float(active["Base_Low"]), float(row["Low"])) if _finite(row["Low"]) else active["Base_Low"]
         closed = False
-        reseed_on_close = True
         close = row.get("Close", np.nan)
         high = row.get("High", np.nan)
         if _finite(close) and float(close) > float(active["Active_Pivot"]):
@@ -283,7 +282,6 @@ def scan_symbol_bases(symbol: str, frame: pd.DataFrame) -> tuple[pd.DataFrame, p
             if not _finite(depth) or depth > MAX_BASE_DEPTH_ATR:
                 _record_event(events, symbol, row, active, "DEPTH_INVALIDATED")
                 closed = True
-                reseed_on_close = False
             elif int(active["Age"]) < MIN_BASE_AGE:
                 _record_event(events, symbol, row, active, "TOO_SHORT_BREAKOUT")
                 closed = True
@@ -304,20 +302,18 @@ def scan_symbol_bases(symbol: str, frame: pd.DataFrame) -> tuple[pd.DataFrame, p
             if not _finite(depth) or depth > MAX_BASE_DEPTH_ATR:
                 _record_event(events, symbol, row, active, "DEPTH_INVALIDATED")
                 closed = True
-                reseed_on_close = False
         else:
             depth = _depth(active)
             if not _finite(depth) or depth > MAX_BASE_DEPTH_ATR:
                 _record_event(events, symbol, row, active, "DEPTH_INVALIDATED")
                 closed = True
-                reseed_on_close = False
 
         if not closed and int(active["Age"]) >= MAX_BASE_AGE:
             _record_event(events, symbol, row, active, "EXPIRED")
             closed = True
         if closed:
             active = None
-            if reseed_on_close and _is_seed(data, index):
+            if _is_seed(data, index):
                 active = _new_base(symbol, data, index)
                 _record_event(events, symbol, row, active, "SEEDED")
 

@@ -25,6 +25,10 @@ def _finite(value: object) -> bool:
         return False
 
 
+def _truthy(series: pd.Series) -> pd.Series:
+    return series.astype(str).str.strip().str.lower().isin({"true", "1", "yes", "y"})
+
+
 def _prices_for_trade(prices: pd.DataFrame) -> pd.DataFrame:
     required = {"Date", "Open", "High", "Low", "Close", "SMA20"}
     missing = required.difference(prices.columns)
@@ -182,6 +186,107 @@ def validate_trade_integrity(setup: pd.DataFrame, practical: pd.DataFrame) -> No
         matched = trades["Breadth_Matched_Date"].notna()
         if (trades.loc[matched, "Breadth_Matched_Date"] >= trades.loc[matched, "Entry_Date"]).any():
             raise AssertionError("breadth context is not strictly prior to entry")
+
+
+def count_point_in_time_violations(
+    signals: pd.DataFrame,
+    entries: pd.DataFrame,
+    setup: pd.DataFrame,
+    practical: pd.DataFrame,
+) -> tuple[int, pd.DataFrame]:
+    columns = ["Entry_ID", "Symbol", "Violation"]
+    violations: list[dict[str, object]] = []
+
+    accepted = entries.copy()
+    qualified = signals.copy()
+    if not qualified.empty and "Signal_Qualified" in qualified.columns:
+        qualified = qualified.loc[_truthy(qualified["Signal_Qualified"])].copy()
+
+    qualified_ids = set(qualified.get("Entry_ID", pd.Series(dtype=str)).astype(str))
+    for row in accepted.itertuples(index=False):
+        entry_id = str(row.Entry_ID)
+        symbol = str(getattr(row, "Symbol", ""))
+        if entry_id not in qualified_ids:
+            violations.append(
+                {
+                    "Entry_ID": entry_id,
+                    "Symbol": symbol,
+                    "Violation": "ACCEPTED_ENTRY_MISSING_QUALIFIED_SIGNAL",
+                }
+            )
+
+    if not accepted.empty and not qualified.empty:
+        signal_columns = [
+            "Entry_ID",
+            "Signal_Date",
+            "Membership_OK",
+            "RS_Coverage_OK",
+            "RS_Coverage",
+            "Composite_RS",
+        ]
+        merged = accepted[["Entry_ID", "Symbol", "Entry_Date"]].merge(
+            qualified[signal_columns],
+            on="Entry_ID",
+            how="inner",
+            validate="one_to_one",
+        )
+        merged["Signal_Date"] = pd.to_datetime(merged["Signal_Date"], errors="coerce")
+        merged["Entry_Date"] = pd.to_datetime(merged["Entry_Date"], errors="coerce")
+        membership_ok = _truthy(merged["Membership_OK"])
+        coverage_ok = _truthy(merged["RS_Coverage_OK"])
+
+        for index, row in merged.iterrows():
+            entry_id = str(row["Entry_ID"])
+            symbol = str(row["Symbol"])
+            if pd.isna(row["Signal_Date"]) or pd.isna(row["Entry_Date"]) or row["Signal_Date"] >= row["Entry_Date"]:
+                violations.append({"Entry_ID": entry_id, "Symbol": symbol, "Violation": "SIGNAL_NOT_BEFORE_ENTRY"})
+            if pd.notna(row["Signal_Date"]) and row["Signal_Date"] < pd.Timestamp("2023-08-01"):
+                violations.append({"Entry_ID": entry_id, "Symbol": symbol, "Violation": "SIGNAL_BEFORE_WINDOW"})
+            if not bool(membership_ok.loc[index]):
+                violations.append({"Entry_ID": entry_id, "Symbol": symbol, "Violation": "INACTIVE_MEMBER_SIGNAL"})
+            coverage = pd.to_numeric(pd.Series([row["RS_Coverage"]]), errors="coerce").iloc[0]
+            if not bool(coverage_ok.loc[index]) or pd.isna(coverage) or float(coverage) < 0.80:
+                violations.append({"Entry_ID": entry_id, "Symbol": symbol, "Violation": "UNSAFE_RS_COVERAGE_SIGNAL"})
+            composite = pd.to_numeric(pd.Series([row["Composite_RS"]]), errors="coerce").iloc[0]
+            if pd.isna(composite) or float(composite) < 70.0:
+                violations.append({"Entry_ID": entry_id, "Symbol": symbol, "Violation": "RS_BELOW_THRESHOLD_SIGNAL"})
+
+    for frame, code in (
+        (setup, "BREADTH_NOT_STRICT_PRIOR_SETUP"),
+        (practical, "BREADTH_NOT_STRICT_PRIOR_PRACTICAL"),
+    ):
+        if frame.empty or "Breadth_Matched_Date" not in frame.columns:
+            continue
+        check = frame.copy()
+        check["Entry_Date"] = pd.to_datetime(check["Entry_Date"], errors="coerce")
+        check["Breadth_Matched_Date"] = pd.to_datetime(check["Breadth_Matched_Date"], errors="coerce")
+        bad = check.loc[
+            check["Breadth_Matched_Date"].notna()
+            & (check["Breadth_Matched_Date"] >= check["Entry_Date"])
+        ]
+        for row in bad.itertuples(index=False):
+            violations.append(
+                {
+                    "Entry_ID": str(row.Entry_ID),
+                    "Symbol": str(getattr(row, "Symbol", "")),
+                    "Violation": code,
+                }
+            )
+
+    setup_ids = set(setup.get("Entry_ID", pd.Series(dtype=str)).astype(str))
+    practical_ids = set(practical.get("Entry_ID", pd.Series(dtype=str)).astype(str))
+    if setup_ids != practical_ids:
+        for entry_id in sorted(setup_ids.symmetric_difference(practical_ids)):
+            violations.append(
+                {
+                    "Entry_ID": entry_id,
+                    "Symbol": "",
+                    "Violation": "LENS_ENTRY_ID_MISMATCH",
+                }
+            )
+
+    audit = pd.DataFrame(violations, columns=columns)
+    return len(audit), audit
 
 
 def summarize_lens(trades: pd.DataFrame, lens: str) -> dict[str, object]:
@@ -363,7 +468,7 @@ def evaluate_gates(
     setup: pd.DataFrame,
     practical: pd.DataFrame,
     *,
-    point_in_time_violations: int = 0,
+    point_in_time_violations: int,
 ) -> pd.DataFrame:
     """Evaluate the precommitted V2 gates without optimizing any threshold."""
 
@@ -558,12 +663,30 @@ if __name__ == "__main__":
     )
     setup, practical = _attach_breadth_to_lenses(setup, practical, breadth_daily)
     validate_trade_integrity(setup, practical)
+    point_in_time_violations, pit_audit = count_point_in_time_violations(
+        candidates,
+        entries,
+        setup,
+        practical,
+    )
+    if point_in_time_violations:
+        pit_audit.to_csv(
+            output_dir / "v2_point_in_time_violations.csv",
+            index=False,
+        )
+        raise AssertionError(
+            f"point-in-time integrity violations: {point_in_time_violations}"
+        )
     year = year_summary(setup, practical)
     outliers = outlier_robustness(setup, practical)
     leave_out = leave_one_symbol_out(setup, practical)
     breadth = breadth_summary(setup, practical)
     overlap = overlap_diagnostic(practical)
-    gates = evaluate_gates(setup, practical)
+    gates = evaluate_gates(
+        setup,
+        practical,
+        point_in_time_violations=point_in_time_violations,
+    )
     setup.to_csv(output_dir / "v2_setup_quality_trades.csv", index=False, date_format="%Y-%m-%d")
     practical.to_csv(output_dir / "v2_practical_trades.csv", index=False, date_format="%Y-%m-%d")
     pd.DataFrame(

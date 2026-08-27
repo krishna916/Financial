@@ -8,6 +8,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 from analyze_v2_results import (  # noqa: E402
     attach_prior_breadth,
+    count_point_in_time_violations,
     evaluate_gates,
     breadth_summary,
     safe_profit_factor,
@@ -159,6 +160,68 @@ def test_breadth_summary_has_one_row_per_regime():
     assert summary["Regime"].tolist() == ["NORMAL"]
 
 
+def test_point_in_time_audit_reports_zero_for_valid_artifacts():
+    signals = pd.DataFrame([{
+        "Entry_ID": "AAA-1",
+        "Symbol": "AAA",
+        "Signal_Date": pd.Timestamp("2024-01-10"),
+        "Signal_Qualified": True,
+        "Membership_OK": True,
+        "RS_Coverage_OK": True,
+        "RS_Coverage": 0.95,
+        "Composite_RS": 80.0,
+    }])
+    entries = pd.DataFrame([{
+        "Entry_ID": "AAA-1",
+        "Symbol": "AAA",
+        "Signal_Date": pd.Timestamp("2024-01-10"),
+        "Entry_Date": pd.Timestamp("2024-01-11"),
+    }])
+    setup = pd.DataFrame([{
+        "Entry_ID": "AAA-1",
+        "Symbol": "AAA",
+        "Entry_Date": pd.Timestamp("2024-01-11"),
+        "Breadth_Matched_Date": pd.Timestamp("2024-01-10"),
+    }])
+    practical = setup.copy()
+
+    count, audit = count_point_in_time_violations(signals, entries, setup, practical)
+    assert count == 0
+    assert audit.empty
+
+
+def test_point_in_time_audit_detects_same_day_signal_and_breadth():
+    signals = pd.DataFrame([{
+        "Entry_ID": "AAA-1",
+        "Symbol": "AAA",
+        "Signal_Date": pd.Timestamp("2024-01-10"),
+        "Signal_Qualified": True,
+        "Membership_OK": True,
+        "RS_Coverage_OK": True,
+        "RS_Coverage": 0.95,
+        "Composite_RS": 80.0,
+    }])
+    entries = pd.DataFrame([{
+        "Entry_ID": "AAA-1",
+        "Symbol": "AAA",
+        "Signal_Date": pd.Timestamp("2024-01-10"),
+        "Entry_Date": pd.Timestamp("2024-01-10"),
+    }])
+    setup = pd.DataFrame([{
+        "Entry_ID": "AAA-1",
+        "Symbol": "AAA",
+        "Entry_Date": pd.Timestamp("2024-01-10"),
+        "Breadth_Matched_Date": pd.Timestamp("2024-01-10"),
+    }])
+    practical = setup.copy()
+
+    count, audit = count_point_in_time_violations(signals, entries, setup, practical)
+    assert count >= 3
+    assert "SIGNAL_NOT_BEFORE_ENTRY" in set(audit["Violation"])
+    assert "BREADTH_NOT_STRICT_PRIOR_SETUP" in set(audit["Violation"])
+    assert "BREADTH_NOT_STRICT_PRIOR_PRACTICAL" in set(audit["Violation"])
+
+
 def _synthetic_trades(count: int, return_value: float = 0.01) -> tuple[pd.DataFrame, pd.DataFrame]:
     dates = pd.date_range("2023-01-01", periods=count, freq="7D")
     setup = pd.DataFrame(
@@ -179,13 +242,13 @@ def _synthetic_trades(count: int, return_value: float = 0.01) -> tuple[pd.DataFr
 
 def test_evaluate_gates_is_insufficient_at_ninety_nine_completed_trades():
     setup, practical = _synthetic_trades(99)
-    result = evaluate_gates(setup, practical)
+    result = evaluate_gates(setup, practical, point_in_time_violations=0)
     assert result.loc[result["Gate"] == "FINAL_STATUS", "Status"].iloc[0] == "INSUFFICIENT_EVIDENCE"
 
 
 def test_evaluate_gates_cannot_pass_when_a_locked_gate_is_false():
     setup, practical = _synthetic_trades(100, return_value=-0.01)
-    result = evaluate_gates(setup, practical)
+    result = evaluate_gates(setup, practical, point_in_time_violations=0)
     assert not bool(result.loc[result["Gate"] == "SETUP_MEAN_RETURN", "Passed"].iloc[0])
     assert result.loc[result["Gate"] == "FINAL_STATUS", "Status"].iloc[0] == "FAIL"
 

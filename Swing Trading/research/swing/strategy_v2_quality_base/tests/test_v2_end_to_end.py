@@ -8,6 +8,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 from analyze_v2_results import (  # noqa: E402
     attach_prior_breadth,
+    count_point_in_time_violations,
     simulate_practical_trade,
     simulate_setup_quality_trade,
 )
@@ -121,8 +122,17 @@ def test_strategy_v2_pure_flow_preserves_timing_and_breadth_integrity():
             "Regime": ["NORMAL", "HOSTILE"],
         }
     )
-    joined = attach_prior_breadth(pd.DataFrame([setup_trade]), breadth)
-    assert joined.iloc[0]["Breadth_Matched_Date"] < joined.iloc[0]["Entry_Date"]
+    joined_setup = attach_prior_breadth(pd.DataFrame([setup_trade]), breadth)
+    joined_practical = attach_prior_breadth(pd.DataFrame([practical_trade]), breadth)
+    assert joined_setup.iloc[0]["Breadth_Matched_Date"] < joined_setup.iloc[0]["Entry_Date"]
+    point_in_time_violations, pit_audit = count_point_in_time_violations(
+        signal,
+        accepted_entries,
+        joined_setup,
+        joined_practical,
+    )
+    assert point_in_time_violations == 0
+    assert pit_audit.empty
     assert cancellations.empty
     assert "BREAKOUT_CANDIDATE" in set(audit["Event"])
 

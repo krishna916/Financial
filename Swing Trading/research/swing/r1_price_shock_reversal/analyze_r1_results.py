@@ -761,6 +761,298 @@ def overlap_diagnostics(entries: pd.DataFrame, canonical_sessions: pd.DatetimeIn
     )
 
 
+def _greater_than(value: object, threshold: float) -> bool:
+    return _finite(value) and float(value) > threshold
+
+
+def _greater_or_equal(value: object, threshold: float) -> bool:
+    return _finite(value) and float(value) >= threshold
+
+
+def _gate_row(
+    gate: str,
+    observed: object,
+    threshold: object,
+    passed: bool,
+) -> dict[str, object]:
+    return {
+        "Gate": gate,
+        "Observed": observed,
+        "Threshold": threshold,
+        "Pass": bool(passed),
+        "Mandatory": True,
+    }
+
+
+def evaluate_gates(
+    metrics: dict[str, object],
+    temporal: pd.DataFrame,
+    outlier: pd.DataFrame,
+    loso: pd.DataFrame,
+    control: pd.DataFrame,
+    completed_count: int,
+    integrity_violations: int,
+) -> tuple[str, pd.DataFrame]:
+    """Evaluate R1's frozen gates with invalid/insufficient precedence."""
+
+    control_row = control.iloc[0].to_dict() if not control.empty else {}
+    low_mean = control_row.get("Low_Volume_Gross_Mean_Return", np.nan)
+    high_mean = control_row.get("High_Volume_Gross_Mean_Return", np.nan)
+    low_pf = control_row.get("Low_Volume_Gross_PF", np.nan)
+    high_pf = control_row.get("High_Volume_Gross_PF", np.nan)
+    control_mean_pass = _finite(low_mean) and _finite(high_mean) and float(low_mean) > float(high_mean)
+    control_pf_pass = _finite(low_pf) and _finite(high_pf) and float(low_pf) > float(high_pf)
+    rows = [
+        _gate_row("SAMPLE_SUFFICIENCY", completed_count, ">= 300", completed_count >= 300),
+        _gate_row("GROSS_SETUP_MEAN", metrics.get("Gross_Return_Mean", np.nan), "> 0", _greater_than(metrics.get("Gross_Return_Mean"), 0.0)),
+        _gate_row("BASE_NET_SETUP_MEAN", metrics.get("Base_Net_Mean_Return", np.nan), ">= 0.002", _greater_or_equal(metrics.get("Base_Net_Mean_Return"), 0.002)),
+        _gate_row("BASE_NET_SETUP_PF", metrics.get("Base_Net_Return_PF", np.nan), ">= 1.20", _greater_or_equal(metrics.get("Base_Net_Return_PF"), 1.20)),
+        _gate_row("STRESS_NET_SETUP_MEAN", metrics.get("Stress_Net_Mean_Return", np.nan), "> 0", _greater_than(metrics.get("Stress_Net_Mean_Return"), 0.0)),
+        _gate_row("STRESS_NET_SETUP_PF", metrics.get("Stress_Net_Return_PF", np.nan), "> 1.00", _greater_than(metrics.get("Stress_Net_Return_PF"), 1.0)),
+        _gate_row("BASE_PRACTICAL_MEAN_R", metrics.get("Base_Net_Mean_R", np.nan), ">= 0.15", _greater_or_equal(metrics.get("Base_Net_Mean_R"), 0.15)),
+        _gate_row("BASE_PRACTICAL_R_PF", metrics.get("Base_Net_R_PF", np.nan), ">= 1.20", _greater_or_equal(metrics.get("Base_Net_R_PF"), 1.20)),
+        _gate_row(
+            "CONTROL_GROSS_MEAN",
+            low_mean,
+            "> high-volume mean",
+            control_mean_pass,
+        ),
+        _gate_row(
+            "CONTROL_GROSS_PF",
+            low_pf,
+            "> high-volume PF",
+            control_pf_pass,
+        ),
+    ]
+    temporal_by_period = {
+        str(row["Period"]): row
+        for _, row in temporal.iterrows()
+        if "Period" in row.index
+    }
+    for period in ("FIRST_HALF", "SECOND_HALF"):
+        row = temporal_by_period.get(period, {})
+        rows.extend(
+            [
+                _gate_row(
+                    f"TEMPORAL_{period}_MEAN",
+                    row.get("Base_Net_Mean_Return", np.nan),
+                    "> 0",
+                    _greater_than(row.get("Base_Net_Mean_Return"), 0.0),
+                ),
+                _gate_row(
+                    f"TEMPORAL_{period}_PF",
+                    row.get("Base_Net_Return_PF", np.nan),
+                    "> 1.0",
+                    _greater_than(row.get("Base_Net_Return_PF"), 1.0),
+                ),
+            ]
+        )
+    outlier_row = outlier.iloc[0] if not outlier.empty else pd.Series(dtype=object)
+    rows.extend(
+        [
+            _gate_row(
+                "TOP_FIVE_REMOVED_MEAN",
+                outlier_row.get("Base_Net_Mean_Return", np.nan),
+                "> 0",
+                _greater_than(outlier_row.get("Base_Net_Mean_Return"), 0.0),
+            ),
+            _gate_row(
+                "TOP_FIVE_REMOVED_PF",
+                outlier_row.get("Base_Net_Return_PF", np.nan),
+                "> 1.0",
+                _greater_than(outlier_row.get("Base_Net_Return_PF"), 1.0),
+            ),
+        ]
+    )
+    loso_mean_pass = not loso.empty and bool(loso["Base_Net_Mean_Return"].map(lambda value: _greater_than(value, 0.0)).all())
+    loso_pf_pass = not loso.empty and bool(loso["Base_Net_Return_PF"].map(lambda value: _greater_than(value, 1.0)).all())
+    rows.extend(
+        [
+            _gate_row("LOSO_ALL_MEAN", loso["Base_Net_Mean_Return"].min() if not loso.empty else np.nan, "> 0 for every symbol", loso_mean_pass),
+            _gate_row("LOSO_ALL_PF", loso["Base_Net_Return_PF"].min() if not loso.empty else np.nan, "> 1.0 for every symbol", loso_pf_pass),
+            _gate_row("INTEGRITY_ZERO", integrity_violations, "== 0", integrity_violations == 0),
+        ]
+    )
+    gates = pd.DataFrame(rows)
+    if integrity_violations > 0:
+        status = "INVALID_RESEARCH_RUN"
+    elif completed_count < 300:
+        status = "INSUFFICIENT_EVIDENCE"
+    elif bool(gates["Pass"].all()):
+        status = "PASS"
+    else:
+        status = "FAIL"
+    return status, gates
+
+
+def calendar_year_summary(setup: pd.DataFrame) -> pd.DataFrame:
+    """Produce calendar-year setup diagnostics without making them gates."""
+
+    if setup.empty:
+        return pd.DataFrame(
+            columns=["Year", "Completed_Trades", "Gross_Mean_Return", "Base_Net_Mean_Return", "Base_Net_Return_PF"]
+        )
+    frame = setup.copy()
+    frame["Year"] = pd.to_datetime(frame["Signal_Date"], errors="coerce").dt.year
+    rows: list[dict[str, object]] = []
+    for year, group in frame.groupby("Year", sort=True):
+        values = _finite_values(group["Base_Net_Return"])
+        rows.append(
+            {
+                "Year": int(year),
+                "Completed_Trades": len(values),
+                "Gross_Mean_Return": float(_finite_values(group["Gross_Return"]).mean()),
+                "Base_Net_Mean_Return": float(values.mean()) if len(values) else np.nan,
+                "Base_Net_Return_PF": safe_profit_factor(pd.Series(values)),
+            }
+        )
+    return pd.DataFrame(rows)
+
+
+def forward_diagnostic_summary(forward: pd.DataFrame) -> pd.DataFrame:
+    if forward.empty:
+        return pd.DataFrame(columns=["Holding_Sessions", "Observations", "Mean_Return", "Median_Return"])
+    rows = []
+    for horizon, group in forward.groupby("Holding_Sessions", sort=True):
+        values = _finite_values(group["Forward_Return"])
+        rows.append(
+            {
+                "Holding_Sessions": int(horizon),
+                "Observations": len(values),
+                "Mean_Return": float(values.mean()) if len(values) else np.nan,
+                "Median_Return": float(np.median(values)) if len(values) else np.nan,
+            }
+        )
+    return pd.DataFrame(rows)
+
+
+def _report_table(frame: pd.DataFrame) -> str:
+    return frame.to_string(index=False) if not frame.empty else "(none)"
+
+
+def write_evidence_report(
+    path: Path,
+    validation: pd.DataFrame,
+    candidates: pd.DataFrame,
+    low_signals: pd.DataFrame,
+    high_signals: pd.DataFrame,
+    entries: pd.DataFrame,
+    cancellations: pd.DataFrame,
+    setup: pd.DataFrame,
+    practical: pd.DataFrame,
+    controls: pd.DataFrame,
+    forward: pd.DataFrame,
+    summary: pd.DataFrame,
+    temporal: pd.DataFrame,
+    outlier: pd.DataFrame,
+    loso: pd.DataFrame,
+    control: pd.DataFrame,
+    bootstrap: pd.DataFrame,
+    overlap: pd.DataFrame,
+    pit_audit: pd.DataFrame,
+    gates: pd.DataFrame,
+    status: str,
+) -> None:
+    """Write a factual evidence report; no optimization recommendation is emitted."""
+
+    usable = (
+        int(
+            validation["Usable"].map(
+                lambda value: value
+                if isinstance(value, (bool, np.bool_))
+                else str(value).strip().lower() in {"true", "1", "yes", "y"}
+            ).sum()
+        )
+        if not validation.empty
+        else 0
+    )
+    failed = int(validation["Download_Error"].fillna("").ne("").sum()) if not validation.empty else 0
+    cancellation_counts = (
+        cancellations["Cancellation_Reason"].value_counts().to_dict()
+        if "Cancellation_Reason" in cancellations.columns
+        else {}
+    )
+    candidates_by_cohort = candidates.get("Cohort", pd.Series(dtype=str)).value_counts().to_dict()
+    incomplete = len(entries) - len(setup)
+    year = calendar_year_summary(setup)
+    forward_summary = forward_diagnostic_summary(forward)
+    summary_text = _report_table(summary)
+    path.write_text(
+        "\n".join(
+            [
+                "# R1 Short-Term Price-Shock Reversal — Historical Evidence",
+                "",
+                f"Formal status: `{status}`",
+                "",
+                "This report records the frozen R1 experiment mechanically. It is evidence only; no post-hoc filter, threshold, subgroup rescue, or strategy recommendation is generated here.",
+                "",
+                "## Frozen methodology",
+                "",
+                "Point-in-time Nifty 500 membership; signal window 2023-08-01 through 2026-08-25; prior-20 sample volatility (ddof=1), prior-20 median volume and traded value; Shock_Score <= -2.0; low-volume ratio <= 1.0; high-volume control ratio >= 1.5; immediate next-session Open entry; structural stop at shock-day Low - 0.25 ATR14; T+6 Open exit; five-session horizon; base/stress/severe friction 0.40%/0.60%/0.80%; bootstrap 10,000 resamples with seed 20260828.",
+                "",
+                "## Data coverage",
+                "",
+                f"Manifest symbols: {len(validation)}; usable/downloaded symbols: {usable}; visible download failures: {failed}.",
+                "",
+                "## Cohorts and accounting",
+                "",
+                f"All Shock_Score <= -2 candidates: {len(candidates)}; cohort counts: {candidates_by_cohort}.",
+                f"Qualified low-volume signals: {len(low_signals)}; accepted entries: {len(entries)}; incomplete accepted entries: {incomplete}; cancellations: {len(cancellations)}.",
+                f"Cancellation reasons: {cancellation_counts}.",
+                f"High-volume control signals: {len(high_signals)}; completed raw control outcomes: {len(controls)}.",
+                "",
+                "## Setup and practical outcomes",
+                "",
+                summary_text,
+                "",
+                "## High-volume falsification comparison",
+                "",
+                _report_table(control),
+                "",
+                "## Temporal robustness",
+                "",
+                _report_table(temporal),
+                "",
+                "## Calendar-year diagnostics",
+                "",
+                _report_table(year),
+                "",
+                "## Outlier and leave-one-symbol-out diagnostics",
+                "",
+                _report_table(outlier),
+                "",
+                _report_table(loso),
+                "",
+                "## Forward-return diagnostics",
+                "",
+                _report_table(forward_summary),
+                "",
+                "## Bootstrap intervals",
+                "",
+                _report_table(bootstrap),
+                "",
+                "## Overlap/capacity diagnostics",
+                "",
+                _report_table(overlap),
+                "",
+                "## Point-in-time and integrity audit",
+                "",
+                f"Persisted audit violation rows: {len(pit_audit)}. Numeric comparisons use np.isclose(rtol=1e-9, atol=1e-12); dates and integers use exact equality.",
+                "",
+                "## Mandatory validation gates",
+                "",
+                _report_table(gates),
+                "",
+                "## Artifact inventory",
+                "",
+                "The accompanying CSV artifacts contain feature validation, shock cohorts, entries/cancellations, setup/practical/control outcomes, forward diagnostics, validation metrics, temporal/outlier/LOSO/control/bootstrap summaries, overlap diagnostics, PIT audit, and this report.",
+                "",
+            ]
+        ),
+        encoding="utf-8",
+    )
+
+
 def _read_csv_or_empty(path: Path, parse_dates: list[str] | None = None) -> pd.DataFrame:
     if not path.exists():
         return pd.DataFrame()
@@ -806,6 +1098,7 @@ if __name__ == "__main__":
     else:
         feature_frames, validation = cached
     validation.to_csv(output_dir / "r1_data_validation.csv", index=False)
+    candidates = _read_csv_or_empty(output_dir / "r1_shock_candidates.csv", ["Signal_Date"])
     entries = _read_csv_or_empty(
         output_dir / "r1_entries.csv", ["Signal_Date", "Entry_Date", "Scheduled_Exit_Date"]
     )
@@ -868,30 +1161,69 @@ if __name__ == "__main__":
                         "Forward_Return": value,
                     }
                 )
+    forward = pd.DataFrame(forward_rows)
+    setup_metrics = summarize_lens(setup, "setup")
+    practical_metrics = summarize_lens(practical, "practical")
+    summary = pd.DataFrame([setup_metrics, practical_metrics])
+    temporal = temporal_summary(setup)
+    outlier = outlier_robustness(setup)
+    loso = leave_one_symbol_out(setup)
+    control = control_comparison(setup, controls)
+    bootstrap = bootstrap_summary(setup, practical, controls)
+    overlap = overlap_diagnostics(entries, sessions)
+    status, gates = evaluate_gates(
+        {**setup_metrics, **practical_metrics},
+        temporal,
+        outlier,
+        loso,
+        control,
+        len(setup),
+        audit_count,
+    )
     setup.to_csv(output_dir / "r1_setup_quality_trades.csv", index=False, date_format="%Y-%m-%d")
     practical.to_csv(output_dir / "r1_practical_trades.csv", index=False, date_format="%Y-%m-%d")
     controls.to_csv(output_dir / "r1_control_outcomes.csv", index=False, date_format="%Y-%m-%d")
-    pd.DataFrame(forward_rows).to_csv(
+    forward.to_csv(
         output_dir / "r1_forward_diagnostics.csv", index=False, date_format="%Y-%m-%d"
     )
-    pd.DataFrame([summarize_lens(setup, "setup"), summarize_lens(practical, "practical")]).to_csv(
+    summary.to_csv(
         output_dir / "r1_validation_summary.csv", index=False
     )
-    temporal_summary(setup).to_csv(
+    temporal.to_csv(
         output_dir / "r1_temporal_summary.csv", index=False, date_format="%Y-%m-%d"
     )
-    outlier_robustness(setup).to_csv(output_dir / "r1_outlier_robustness.csv", index=False)
-    leave_one_symbol_out(setup).to_csv(output_dir / "r1_leave_one_symbol_out.csv", index=False)
-    control_comparison(setup, controls).to_csv(output_dir / "r1_control_comparison.csv", index=False)
-    bootstrap_summary(setup, practical, controls).to_csv(
-        output_dir / "r1_bootstrap_summary.csv", index=False
-    )
+    outlier.to_csv(output_dir / "r1_outlier_robustness.csv", index=False)
+    loso.to_csv(output_dir / "r1_leave_one_symbol_out.csv", index=False)
+    control.to_csv(output_dir / "r1_control_comparison.csv", index=False)
+    bootstrap.to_csv(output_dir / "r1_bootstrap_summary.csv", index=False)
     pit_audit.to_csv(output_dir / "r1_pit_audit.csv", index=False)
-    overlap_diagnostics(entries, sessions).to_csv(
-        output_dir / "r1_overlap_diagnostic.csv", index=False
+    overlap.to_csv(output_dir / "r1_overlap_diagnostic.csv", index=False)
+    gates.to_csv(output_dir / "r1_validation_gates.csv", index=False)
+    write_evidence_report(
+        output_dir / "research_report.md",
+        validation,
+        candidates,
+        low_signals,
+        high_signals,
+        entries,
+        cancellations,
+        setup,
+        practical,
+        controls,
+        forward,
+        summary,
+        temporal,
+        outlier,
+        loso,
+        control,
+        bootstrap,
+        overlap,
+        pit_audit,
+        gates,
+        status,
     )
     print(
         f"paired_setup={len(setup)} paired_practical={len(practical)} "
         f"control_outcomes={len(controls)} forward_rows={len(forward_rows)} "
-        f"integrity_violations={audit_count}"
+        f"integrity_violations={audit_count} status={status}"
     )

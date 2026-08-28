@@ -14,6 +14,7 @@ from analyze_r1_results import (  # noqa: E402
     bootstrap_difference_ci,
     bootstrap_mean_ci,
     count_integrity_violations,
+    evaluate_gates,
     overlap_diagnostics,
     safe_profit_factor,
     simulate_control_outcome,
@@ -291,3 +292,85 @@ def test_overlap_diagnostics_reports_open_lifecycle_overlap():
     assert row["Max_Simultaneous_Trades"] == 2
     assert row["Overlapping_Entries"] == 2
     assert row["Max_Same_Day_Entries"] == 1
+
+
+def _passing_gate_inputs(completed_count=300, integrity_violations=0):
+    metrics = {
+        "Gross_Return_Mean": 0.01,
+        "Base_Net_Mean_Return": 0.002,
+        "Base_Net_Return_PF": 1.20,
+        "Stress_Net_Mean_Return": 0.001,
+        "Stress_Net_Return_PF": 1.01,
+        "Base_Net_Mean_R": 0.15,
+        "Base_Net_R_PF": 1.20,
+    }
+    temporal = pd.DataFrame(
+        {
+            "Period": ["FIRST_HALF", "SECOND_HALF"],
+            "Base_Net_Mean_Return": [0.001, 0.001],
+            "Base_Net_Return_PF": [1.01, 1.01],
+        }
+    )
+    outlier = pd.DataFrame(
+        [{"Base_Net_Mean_Return": 0.001, "Base_Net_Return_PF": 1.01}]
+    )
+    loso = pd.DataFrame(
+        [{"Omitted_Symbol": "AAA", "Base_Net_Mean_Return": 0.001, "Base_Net_Return_PF": 1.01}]
+    )
+    control = pd.DataFrame(
+        [
+            {
+                "Low_Volume_Gross_Mean_Return": 0.02,
+                "High_Volume_Gross_Mean_Return": 0.01,
+                "Low_Volume_Gross_PF": 2.0,
+                "High_Volume_Gross_PF": 1.0,
+            }
+        ]
+    )
+    return (
+        metrics,
+        temporal,
+        outlier,
+        loso,
+        control,
+        completed_count,
+        integrity_violations,
+    )
+
+
+def test_integrity_failure_has_invalid_status_precedence():
+    status, _ = evaluate_gates(*_passing_gate_inputs(integrity_violations=1))
+
+    assert status == "INVALID_RESEARCH_RUN"
+
+
+def test_sample_count_299_has_insufficient_evidence_status():
+    status, _ = evaluate_gates(*_passing_gate_inputs(completed_count=299))
+
+    assert status == "INSUFFICIENT_EVIDENCE"
+
+
+def test_exact_setup_mean_and_pf_boundaries_pass():
+    status, gates = evaluate_gates(*_passing_gate_inputs())
+
+    assert status == "PASS"
+    assert bool(gates.loc[gates["Gate"].eq("BASE_NET_SETUP_MEAN"), "Pass"].iloc[0])
+    assert bool(gates.loc[gates["Gate"].eq("BASE_NET_SETUP_PF"), "Pass"].iloc[0])
+
+
+def test_exact_stress_zero_boundary_fails():
+    args = list(_passing_gate_inputs())
+    args[0]["Stress_Net_Mean_Return"] = 0.0
+
+    status, gates = evaluate_gates(*args)
+
+    assert status == "FAIL"
+    assert not bool(gates.loc[gates["Gate"].eq("STRESS_NET_SETUP_MEAN"), "Pass"].iloc[0])
+
+
+def test_exact_practical_boundaries_pass():
+    status, gates = evaluate_gates(*_passing_gate_inputs())
+
+    assert status == "PASS"
+    assert bool(gates.loc[gates["Gate"].eq("BASE_PRACTICAL_MEAN_R"), "Pass"].iloc[0])
+    assert bool(gates.loc[gates["Gate"].eq("BASE_PRACTICAL_R_PF"), "Pass"].iloc[0])

@@ -1,6 +1,6 @@
 # R1 Short-Term Price-Shock Reversal — Research Design
 
-**Status:** Design approved in chat; implementation and historical validation not started  
+**Status:** Design approved in chat and self-reviewed; implementation and historical validation not started  
 **Design date:** 28 August 2026  
 **Repository:** `krishna916/Financial`  
 **Research family:** Short-horizon reversal / temporary price-pressure mean reversion  
@@ -165,6 +165,8 @@ These signals are **not R1 trades**. They form a control cohort used to test whe
 
 The control cohort must use the same PIT universe, liquidity eligibility, signal window, immediate-next-open forward-return timing, five-session primary horizon, and same-symbol lockout logic as the low-volume cohort.
 
+The control cohort is evaluated only through the fixed-horizon setup-quality return. It does not use R1's structural-stop cancellation or practical-stop exit, because those mechanics are not part of the raw low-volume-versus-high-volume reversal comparison.
+
 ### Middle-volume diagnostic cohort
 
 Signals satisfying:
@@ -237,17 +239,37 @@ A session becomes a qualified low-volume R1 signal only if all are true:
 7. `Volume_Ratio <= 1.0`.
 8. At least 20 valid prior traded-value observations exist.
 9. `Prior20_Median_Traded_Value >= ₹10 crore`.
-10. The signal is not blocked by the same-symbol lifecycle lockout described later.
 
 All close-derived signal information is known only after the signal session closes.
 
 No same-session entry is assumed.
 
+The same-symbol lifecycle lockout is intentionally **not** part of signal qualification. A fully qualified low-volume signal that occurs during an active same-symbol lockout remains in the qualified-signal population and is recorded as an entry cancellation with reason `SAME_SYMBOL_LOCKOUT`. This preserves the accounting identity defined later.
+
 ---
 
 ## 9. ATR and structural stop
 
-Use Wilder ATR14, consistent with the established swing-research convention.
+Use **Wilder ATR14**, consistent with the established swing-research convention.
+
+True Range is:
+
+```text
+TR[t] = max(
+    High[t] - Low[t],
+    abs(High[t] - Close[t-1]),
+    abs(Low[t] - Close[t-1])
+)
+```
+
+ATR initialization and recursion are frozen as:
+
+```text
+first valid ATR14 = mean of the first 14 valid True Range observations
+
+subsequent ATR14 =
+(previous_ATR14 × 13 + current_TR) / 14
+```
 
 On the signal date define:
 
@@ -320,7 +342,7 @@ Therefore the position is exposed across five complete sessions beginning with t
 
 The lockout remains in force until that scheduled exit point even if the practical lens stops out early.
 
-Additional qualifying low-volume shocks during lockout remain visible and are classified:
+Additional qualified low-volume signals during lockout remain visible and are cancelled with:
 
 ```text
 SAME_SYMBOL_LOCKOUT
@@ -382,7 +404,7 @@ For each holding session from entry through the fifth complete holding session, 
 3. Otherwise remain open.
 4. If no stop has occurred by the end of the fifth complete holding session, exit at the Open of the immediately following canonical session.
 
-Because entry itself is cancelled when `Entry_Open <= Structural_Stop`, rule 1 begins after a valid accepted entry and covers subsequent overnight gaps as well as any later holding session.
+Because entry itself is cancelled when `Entry_Open <= Structural_Stop`, the entry-session open cannot itself create an accepted-trade gap stop. On the entry session, after a valid entry, an intraday `Low <= Structural_Stop` exits at the structural stop. On later sessions, the Open-before-Low precedence applies normally.
 
 No profit target or trailing logic is introduced.
 
@@ -432,7 +454,7 @@ Use the **0.40% base** model for primary net-return and primary practical R gate
 
 Use **0.60% stress** for mandatory friction robustness gates.
 
-Use **0.80% severe** diagnostically; it does not independently create a PASS/FAIL gate unless the design is explicitly revised before any historical outcomes are viewed.
+Use **0.80% severe** diagnostically; it does not independently create a PASS/FAIL gate.
 
 These fixed percentages are research assumptions intended to include taxes, fees, DP/brokerage effects in aggregate, and slippage. Broker-specific rupee economics and small-account fixed charges must be modeled separately before live deployment.
 
@@ -494,6 +516,8 @@ Qualified R1 signals
 -> accepted entries + entry cancellations
 -> completed paired outcomes + incomplete accepted entries
 ```
+
+A qualified R1 signal has already passed the frozen PIT/data/liquidity/shock/low-volume rules. Entry-stage mechanics may still cancel it.
 
 Entry-cancellation reasons must distinguish at minimum:
 
@@ -561,6 +585,14 @@ Do not invent ranking rules inside R1.
 
 The final run must derive PIT integrity from persisted numeric/date evidence. It must not rely only on convenience booleans such as `PIT_OK=True`.
 
+For independent numeric comparisons in the audit, use the deterministic tolerance convention:
+
+```text
+np.isclose(observed, recomputed, rtol=1e-9, atol=1e-12)
+```
+
+unless exact integer/date equality is appropriate.
+
 For every accepted low-volume R1 entry, independently verify at minimum:
 
 1. `Signal_Date < Entry_Date`.
@@ -569,7 +601,7 @@ For every accepted low-volume R1 entry, independently verify at minimum:
 4. `Entry_Date` is the immediately following canonical market session.
 5. Twenty valid prior returns genuinely precede the signal date.
 6. Persisted `Sigma20` matches a recomputation from only prior returns.
-7. Persisted `Shock_Score` matches persisted signal return and recomputed `Sigma20` within a documented floating-point tolerance.
+7. Persisted `Shock_Score` matches persisted signal return and recomputed `Sigma20` within the frozen tolerance.
 8. `Shock_Score <= -2.0` for every accepted low-volume trade.
 9. Twenty valid prior volume observations genuinely precede the signal date.
 10. Persisted prior median volume and `Volume_Ratio` match an independent recomputation.
@@ -578,7 +610,7 @@ For every accepted low-volume R1 entry, independently verify at minimum:
 13. Persisted prior median traded value matches an independent recomputation.
 14. Prior median traded value is at least ₹10 crore.
 15. `ATR14_signal` and `Shock_Day_Low` are known no later than the signal close.
-16. Persisted structural stop matches `Shock_Day_Low - 0.25 × ATR14_signal` within tolerance.
+16. Persisted structural stop matches `Shock_Day_Low - 0.25 × ATR14_signal` within the frozen tolerance.
 17. `Entry_Open > Structural_Stop` for every accepted trade.
 18. The same-symbol lockout was respected.
 19. Setup/practical completed Entry_ID sets match exactly.
@@ -666,7 +698,7 @@ Frozen reporting convention:
 
 ```text
 Bootstrap resamples = 10,000
-RNG seed            = fixed and documented in implementation
+RNG seed            = 20260828
 Confidence interval = 95%
 ```
 
@@ -979,6 +1011,7 @@ Entry:
 
 Pre-entry cancellation:
     Entry_Open <= Structural_Stop
+    or active SAME_SYMBOL_LOCKOUT
 
 Structural stop:
     Shock_Day_Low - 0.25 × ATR14_signal

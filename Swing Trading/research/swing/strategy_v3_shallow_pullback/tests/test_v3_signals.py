@@ -300,6 +300,24 @@ def test_build_candidate_carries_original_atr_and_running_pullback():
     assert candidate["Pullback_Depth_ATR"] == 1.25
 
 
+def test_candidate_persists_numeric_seed_rs_evidence():
+    frame = make_state_frame()
+    state = new_state("AAA", frame.loc[220], 220)
+    state["Age"] = 3
+    state["Pullback_Low"] = 98.0
+
+    row = frame.loc[223].copy()
+    row["Date"] = pd.Timestamp("2024-01-10")
+    row["Close"] = 99.0
+    row["SMA20"] = 97.0
+    row["Composite_RS"] = 82.0
+
+    candidate = build_candidate("AAA", row, 98.5, state)
+
+    assert candidate["Seed_RS_Coverage"] == pytest.approx(1.0)
+    assert candidate["Seed_Composite_RS"] == pytest.approx(80.0)
+
+
 def valid_candidate() -> dict[str, object]:
     return {
         "Entry_ID": "AAA-2024-01-10",

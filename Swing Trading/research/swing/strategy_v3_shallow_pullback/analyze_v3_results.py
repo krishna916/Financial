@@ -271,6 +271,17 @@ def count_point_in_time_violations(
             _append_violation(violations, entry_id, symbol, "SIGNAL_INACTIVE_MEMBER")
         if "Seed_RS_Coverage_OK" in signal.index and not _truthy(signal["Seed_RS_Coverage_OK"]):
             _append_violation(violations, entry_id, symbol, "SEED_RS_COVERAGE_UNSAFE")
+        seed_coverage = pd.to_numeric(
+            pd.Series([signal.get("Seed_RS_Coverage", np.nan)]),
+            errors="coerce",
+        ).iloc[0]
+        if pd.isna(seed_coverage) or float(seed_coverage) < MIN_RS_COVERAGE:
+            _append_violation(
+                violations,
+                entry_id,
+                symbol,
+                "SEED_RS_COVERAGE_UNSAFE",
+            )
         if "Signal_RS_Coverage_OK" in signal.index and not _truthy(signal["Signal_RS_Coverage_OK"]):
             _append_violation(violations, entry_id, symbol, "SIGNAL_RS_COVERAGE_UNSAFE")
         if "RS_Coverage" in signal.index:
@@ -279,6 +290,17 @@ def count_point_in_time_violations(
                 _append_violation(violations, entry_id, symbol, "SIGNAL_RS_COVERAGE_UNSAFE")
         if "Seed_RS_OK" in signal.index and not _truthy(signal["Seed_RS_OK"]):
             _append_violation(violations, entry_id, symbol, "SEED_RS_BELOW_THRESHOLD")
+        seed_composite = pd.to_numeric(
+            pd.Series([signal.get("Seed_Composite_RS", np.nan)]),
+            errors="coerce",
+        ).iloc[0]
+        if pd.isna(seed_composite) or float(seed_composite) < MIN_COMPOSITE_RS:
+            _append_violation(
+                violations,
+                entry_id,
+                symbol,
+                "SEED_RS_BELOW_THRESHOLD",
+            )
         composite = pd.to_numeric(pd.Series([signal.get("Composite_RS", np.nan)]), errors="coerce").iloc[0]
         if pd.isna(composite) or float(composite) < MIN_COMPOSITE_RS:
             _append_violation(violations, entry_id, symbol, "SIGNAL_RS_BELOW_THRESHOLD")
@@ -320,7 +342,12 @@ def count_point_in_time_violations(
     for entry_id in sorted(setup_ids.symmetric_difference(practical_ids)):
         _append_violation(violations, entry_id, "", "LENS_ENTRY_ID_MISMATCH")
 
-    audit = pd.DataFrame(violations, columns=["Entry_ID", "Symbol", "Violation"])
+    audit = pd.DataFrame(
+        violations,
+        columns=["Entry_ID", "Symbol", "Violation"],
+    ).drop_duplicates(
+        subset=["Entry_ID", "Symbol", "Violation"]
+    ).reset_index(drop=True)
     return len(audit), audit
 
 

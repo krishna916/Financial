@@ -122,6 +122,8 @@ def _pit_fixture():
         "Signal_RS_Coverage_OK": True,
         "Composite_RS": 80.0,
         "RS_Coverage": 1.0,
+        "Seed_RS_Coverage": 1.0,
+        "Seed_Composite_RS": 80.0,
     }
     entry = {
         **signal,
@@ -218,6 +220,32 @@ def test_point_in_time_audit_detects_membership_rs_and_lens_mutations():
         signals, entries, setup, practical, membership, sessions
     )
     assert "LENS_ENTRY_ID_MISMATCH" in set(audit["Violation"])
+
+
+def test_pit_audit_checks_numeric_seed_rs_coverage_even_when_boolean_is_true():
+    signals, entries, setup, practical, membership, sessions = _pit_fixture()
+    signals.loc[0, "Seed_RS_Coverage_OK"] = True
+    signals.loc[0, "Seed_RS_Coverage"] = 0.79
+
+    count, audit = count_point_in_time_violations(
+        signals, entries, setup, practical, membership, sessions
+    )
+
+    assert count > 0
+    assert "SEED_RS_COVERAGE_UNSAFE" in set(audit["Violation"])
+
+
+def test_pit_audit_checks_numeric_seed_composite_rs_even_when_boolean_is_true():
+    signals, entries, setup, practical, membership, sessions = _pit_fixture()
+    signals.loc[0, "Seed_RS_OK"] = True
+    signals.loc[0, "Seed_Composite_RS"] = 69.9
+
+    count, audit = count_point_in_time_violations(
+        signals, entries, setup, practical, membership, sessions
+    )
+
+    assert count > 0
+    assert "SEED_RS_BELOW_THRESHOLD" in set(audit["Violation"])
 
 
 def test_validate_trade_integrity_rejects_lens_mismatch():

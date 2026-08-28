@@ -778,6 +778,54 @@ def _frame_text(frame: pd.DataFrame) -> str:
     return frame.to_string(index=False) if not frame.empty else "No rows."
 
 
+def prewindow_pit_support_summary(
+    membership: pd.DataFrame,
+    canonical_sessions: pd.DatetimeIndex,
+    states: pd.DataFrame,
+) -> dict[str, object]:
+    sessions = pd.DatetimeIndex(
+        pd.to_datetime(canonical_sessions, errors="coerce")
+    ).dropna().drop_duplicates().sort_values()
+    start = prewindow_seed_start(sessions)
+    window = sessions[(sessions >= start) & (sessions < SIGNAL_START)]
+    if len(window) != 10:
+        raise AssertionError(
+            f"expected 10 canonical pre-window sessions, got {len(window)}"
+        )
+
+    supported = sum(
+        not active_members_on(membership, pd.Timestamp(date)).empty
+        for date in window
+    )
+    if supported == 0:
+        status = "NONE"
+    elif supported == len(window):
+        status = "FULL"
+    else:
+        status = "PARTIAL"
+
+    if states.empty or "Date" not in states.columns or "Event" not in states.columns:
+        seed_events = 0
+    else:
+        state_dates = pd.to_datetime(states["Date"], errors="coerce")
+        seed_events = int(
+            (
+                states["Event"].astype(str).eq("SEEDED")
+                & state_dates.ge(start)
+                & state_dates.lt(SIGNAL_START)
+            ).sum()
+        )
+
+    return {
+        "Prewindow_Start": pd.Timestamp(window.min()),
+        "Prewindow_End": pd.Timestamp(window.max()),
+        "Prewindow_Canonical_Sessions": len(window),
+        "Sessions_With_PIT_Membership": int(supported),
+        "Support_Status": status,
+        "Actual_Prewindow_Seed_Events": seed_events,
+    }
+
+
 def write_evidence_report(
     output_dir: Path,
     *,
@@ -796,6 +844,7 @@ def write_evidence_report(
     diagnostics: pd.DataFrame,
     overlap: pd.DataFrame,
     gates: pd.DataFrame,
+    prewindow_support: dict[str, object],
     pit_count: int,
     incomplete: int,
 ) -> Path:
@@ -821,6 +870,10 @@ def write_evidence_report(
         "## 2. Data, timing, and pre-window PIT support",
         "Yahoo Finance adjusted OHLCV uses `auto_adjust=True`; the signal window is 2023-08-01 through 2026-08-25 inclusive.",
         "Canonical sessions use the long Nifty 500 index history; pre-window seeds are allowed only within the ten-session boundary and actual PIT membership manifest.",
+        f"Pre-window seed boundary: {pd.Timestamp(prewindow_support['Prewindow_Start']).date()} through {pd.Timestamp(prewindow_support['Prewindow_End']).date()} ({prewindow_support['Prewindow_Canonical_Sessions']} canonical sessions).",
+        f"PIT membership support in that boundary: {prewindow_support['Sessions_With_PIT_Membership']}/{prewindow_support['Prewindow_Canonical_Sessions']} sessions; status={prewindow_support['Support_Status']}.",
+        f"Actual pre-window SEEDED events in this run: {prewindow_support['Actual_Prewindow_Seed_Events']}.",
+        "Unsupported pre-window dates are never backfilled with 2023-08-01 membership.",
         "",
         "## 3. Audit counts",
         f"Usable symbols: {usable_count}/{len(validation)}; RS audit dates: {len(rs_audit)}; unsafe RS dates: {unsafe_count}.",
@@ -910,6 +963,7 @@ if __name__ == "__main__":
     validate_trade_integrity(setup, practical)
     extra_dates = _analysis_extra_dates(entries)
     sessions = load_canonical_market_sessions(root / "Swing Trading/nifty500_regime_daily.csv", extra_dates)
+    prewindow_support = prewindow_pit_support_summary(membership, sessions, states)
     pit_count, pit_audit = count_point_in_time_violations(
         signals, entries, setup, practical, membership, sessions
     )
@@ -955,6 +1009,7 @@ if __name__ == "__main__":
         diagnostics=diagnostics,
         overlap=overlap,
         gates=gates,
+        prewindow_support=prewindow_support,
         pit_count=pit_count,
         incomplete=incomplete,
     )

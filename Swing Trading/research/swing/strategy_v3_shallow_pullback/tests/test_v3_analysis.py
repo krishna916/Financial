@@ -1,4 +1,5 @@
 import sys
+import shutil
 from pathlib import Path
 
 import numpy as np
@@ -8,6 +9,7 @@ import pytest
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 from analyze_v3_results import (  # noqa: E402
+    SIGNAL_START,
     attach_prior_breadth,
     count_point_in_time_violations,
     evaluate_gates,
@@ -15,19 +17,135 @@ from analyze_v3_results import (  # noqa: E402
     leave_one_symbol_out,
     overlap_diagnostic,
     outlier_robustness,
+    prewindow_pit_support_summary,
     pullback_diagnostics,
     safe_profit_factor,
     simulate_practical_trade,
     simulate_setup_quality_trade,
     validate_trade_integrity,
+    write_evidence_report,
     year_summary,
 )
+from generate_v3_signals import prewindow_seed_start  # noqa: E402
 
 
 def test_analysis_extra_dates_is_empty_for_entries_without_2026_08_26():
     result = _analysis_extra_dates(pd.DataFrame({"Entry_Date": [pd.Timestamp("2024-01-11")]}))
     assert isinstance(result, pd.DatetimeIndex)
     assert result.empty
+
+
+def _prewindow_sessions() -> pd.DatetimeIndex:
+    return pd.DatetimeIndex(pd.bdate_range("2023-07-18", "2023-08-02"))
+
+
+def test_prewindow_support_summary_reports_none_when_manifest_starts_at_signal_window():
+    sessions = _prewindow_sessions()
+    membership = pd.DataFrame(
+        {
+            "Symbol": ["AAA"],
+            "Member_From": [pd.Timestamp("2023-08-01")],
+            "Member_To": [pd.Timestamp("2024-01-01")],
+            "Downloadable": [True],
+        }
+    )
+    states = pd.DataFrame(columns=["Date", "Event"])
+
+    result = prewindow_pit_support_summary(membership, sessions, states)
+
+    assert result["Prewindow_Canonical_Sessions"] == 10
+    assert result["Sessions_With_PIT_Membership"] == 0
+    assert result["Support_Status"] == "NONE"
+    assert result["Actual_Prewindow_Seed_Events"] == 0
+
+
+def test_prewindow_support_summary_reports_full_and_counts_seed_events():
+    sessions = _prewindow_sessions()
+    start = prewindow_seed_start(sessions)
+    membership = pd.DataFrame(
+        {
+            "Symbol": ["AAA"],
+            "Member_From": [start],
+            "Member_To": [pd.Timestamp("2024-01-01")],
+            "Downloadable": [True],
+        }
+    )
+    states = pd.DataFrame(
+        {
+            "Date": [start, pd.Timestamp("2023-08-01")],
+            "Event": ["SEEDED", "SEEDED"],
+        }
+    )
+
+    result = prewindow_pit_support_summary(membership, sessions, states)
+
+    assert result["Sessions_With_PIT_Membership"] == 10
+    assert result["Support_Status"] == "FULL"
+    assert result["Actual_Prewindow_Seed_Events"] == 1
+
+
+def test_prewindow_support_summary_reports_partial_support():
+    sessions = _prewindow_sessions()
+    start = prewindow_seed_start(sessions)
+    window = sessions[(sessions >= start) & (sessions < SIGNAL_START)]
+    membership = pd.DataFrame(
+        {
+            "Symbol": ["AAA"],
+            "Member_From": [pd.Timestamp(window[5])],
+            "Member_To": [pd.Timestamp("2024-01-01")],
+            "Downloadable": [True],
+        }
+    )
+    states = pd.DataFrame(columns=["Date", "Event"])
+
+    result = prewindow_pit_support_summary(membership, sessions, states)
+
+    assert result["Sessions_With_PIT_Membership"] == 5
+    assert result["Support_Status"] == "PARTIAL"
+
+
+def test_report_includes_actual_prewindow_support_evidence():
+    output = Path(__file__).resolve().parents[4] / ".v3-report-test-output"
+    if output.exists():
+        shutil.rmtree(output)
+    try:
+        report = write_evidence_report(
+            output,
+            validation=pd.DataFrame(columns=["Usable"]),
+            rs_audit=pd.DataFrame(columns=["RS_Research_Safe", "RS_Coverage"]),
+            states=pd.DataFrame(),
+            signals=pd.DataFrame(columns=["Signal_Qualified", "Signal_Rejection_Reason"]),
+            entries=pd.DataFrame(),
+            cancellations=pd.DataFrame(),
+            setup=pd.DataFrame(),
+            practical=pd.DataFrame(),
+            year=pd.DataFrame(),
+            outliers=pd.DataFrame(),
+            leave_out=pd.DataFrame(),
+            breadth=pd.DataFrame(),
+            diagnostics=pd.DataFrame(),
+            overlap=pd.DataFrame(),
+            gates=pd.DataFrame({"Gate": ["FINAL_STATUS"], "Status": ["FAIL"]}),
+            prewindow_support={
+                "Prewindow_Start": pd.Timestamp("2023-07-18"),
+                "Prewindow_End": pd.Timestamp("2023-07-31"),
+                "Prewindow_Canonical_Sessions": 10,
+                "Sessions_With_PIT_Membership": 0,
+                "Support_Status": "NONE",
+                "Actual_Prewindow_Seed_Events": 0,
+            },
+            pit_count=0,
+            incomplete=0,
+        )
+        text = report.read_text(encoding="utf-8")
+        assert "Pre-window seed boundary:" in text
+        assert "PIT membership support in that boundary:" in text
+        assert "status=NONE" in text
+        assert "Actual pre-window SEEDED events in this run:" in text
+        assert "never backfilled" in text
+    finally:
+        if output.exists():
+            shutil.rmtree(output)
 
 
 def setup_entry() -> pd.Series:

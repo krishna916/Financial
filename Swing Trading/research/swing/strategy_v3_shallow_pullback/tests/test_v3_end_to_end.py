@@ -39,6 +39,8 @@ def _signal(symbol: str) -> dict[str, object]:
         "Median_Traded_Value_20": 200_000_000.0,
         "Composite_RS": 80.0,
         "RS_Coverage": 1.0,
+        "Seed_RS_Coverage": 1.0,
+        "Seed_Composite_RS": 80.0,
         "Seed_RS_Coverage_OK": True,
         "Seed_RS_OK": True,
         "Signal_Membership_OK": True,
@@ -122,6 +124,14 @@ def test_strategy_v3_synthetic_flow_is_network_free_and_reconciles(monkeypatch):
         diagnostics=pd.DataFrame(),
         overlap=overlap_diagnostic(entries, practical),
         gates=gates,
+        prewindow_support={
+            "Prewindow_Start": pd.Timestamp("2023-07-18"),
+            "Prewindow_End": pd.Timestamp("2023-07-31"),
+            "Prewindow_Canonical_Sessions": 10,
+            "Sessions_With_PIT_Membership": 0,
+            "Support_Status": "NONE",
+            "Actual_Prewindow_Seed_Events": 0,
+        },
         pit_count=pit,
             incomplete=0,
         )

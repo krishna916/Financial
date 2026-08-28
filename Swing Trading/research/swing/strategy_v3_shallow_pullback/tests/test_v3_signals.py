@@ -139,6 +139,22 @@ def test_new_leader_closes_old_state_and_reseeds_same_bar():
     assert candidates.empty
 
 
+def test_new_leader_close_requires_strictly_greater_close():
+    frame = make_state_frame()
+    # Seed row 220 has Leader_Close == 100.0.
+    frame.loc[221, ["Close", "High", "Low", "SMA20"]] = [100.0, 100.5, 99.0, 97.0]
+
+    events, candidates = scan_symbol_pullbacks(
+        "AAA", frame, pd.DatetimeIndex(frame["Date"])
+    )
+
+    same_day = events.loc[
+        events["Date"].eq(frame.loc[221, "Date"]), "Event"
+    ].tolist()
+    assert "NEW_LEADER_CLOSE" not in same_day
+    assert candidates.empty
+
+
 def test_too_short_resumption_closes_at_age_two():
     frame = make_state_frame()
     frame.loc[221, "High"] = 99.0
@@ -202,7 +218,7 @@ def test_first_trigger_closes_state_even_when_signal_gate_fails():
 def test_same_bar_reseed_runs_after_compatible_closures():
     cases = {
         "DEPTH_INVALIDATED": {221: {"Low": 94.0, "Close": 100.0, "High": 100.5}},
-        "NEW_LEADER_CLOSE": {221: {"Close": 100.0, "High": 100.5, "Low": 99.0}},
+        "NEW_LEADER_CLOSE": {221: {"Close": 100.2, "High": 100.5, "Low": 99.0}},
         "TOO_SHORT_RESUMPTION": {
             221: {"High": 99.0},
             222: {"High": 98.5, "Close": 100.0, "SMA20": 97.0, "Low": 99.0},

@@ -2,6 +2,9 @@
 
 from __future__ import annotations
 
+import hashlib
+import pickle
+import tempfile
 from pathlib import Path
 from typing import Callable
 
@@ -16,6 +19,7 @@ DOWNLOAD_START = "2022-01-01"
 DOWNLOAD_END_EXCLUSIVE = "2026-08-27"
 LIQUIDITY_FLOOR = 100_000_000.0
 PRICE_COLUMNS = ["Date", "Open", "High", "Low", "Close", "Volume"]
+FEATURE_CACHE_VERSION = "r1-feature-cache-v1"
 
 
 def _naive_dates(values: object) -> pd.DatetimeIndex:
@@ -314,6 +318,53 @@ def build_feature_frames(
     return frames, pd.DataFrame(audit_rows)
 
 
+def _runtime_feature_cache_path(membership: pd.DataFrame) -> Path:
+    payload = membership.sort_index(axis=1).to_csv(index=False).encode("utf-8")
+    digest = hashlib.sha256(
+        f"{FEATURE_CACHE_VERSION}|{DOWNLOAD_START}|{DOWNLOAD_END_EXCLUSIVE}|".encode("utf-8")
+        + payload
+    ).hexdigest()[:16]
+    return Path(tempfile.gettempdir()) / f"financial-{digest}-r1-features.pkl"
+
+
+def save_runtime_feature_cache(
+    membership: pd.DataFrame,
+    frames: dict[str, pd.DataFrame],
+    validation: pd.DataFrame,
+) -> None:
+    """Cache one run's frames outside the repository for later pipeline stages."""
+
+    path = _runtime_feature_cache_path(membership)
+    with path.open("wb") as handle:
+        pickle.dump(
+            {
+                "version": FEATURE_CACHE_VERSION,
+                "frames": frames,
+                "validation": validation,
+            },
+            handle,
+            protocol=pickle.HIGHEST_PROTOCOL,
+        )
+
+
+def load_runtime_feature_cache(
+    membership: pd.DataFrame,
+) -> tuple[dict[str, pd.DataFrame], pd.DataFrame] | None:
+    """Load the exact feature frames from the current frozen input fingerprint."""
+
+    path = _runtime_feature_cache_path(membership)
+    if not path.exists():
+        return None
+    try:
+        with path.open("rb") as handle:
+            payload = pickle.load(handle)
+        if payload.get("version") != FEATURE_CACHE_VERSION:
+            return None
+        return payload["frames"], payload["validation"]
+    except (OSError, EOFError, pickle.PickleError, KeyError, TypeError, ValueError):
+        return None
+
+
 if __name__ == "__main__":
     root = Path(__file__).resolve().parents[4]
     membership_path = root / "Swing Trading/research/swing/market_breadth/config/nifty500_membership.csv"
@@ -321,6 +372,7 @@ if __name__ == "__main__":
     output_dir.mkdir(parents=True, exist_ok=True)
     membership = load_membership(membership_path)
     frames, validation = build_feature_frames(membership)
+    save_runtime_feature_cache(membership, frames, validation)
     validation.to_csv(output_dir / "r1_data_validation.csv", index=False)
     print(validation["Usable"].value_counts(dropna=False).to_string())
     failures = validation.loc[validation["Download_Error"].ne("")]

@@ -9,9 +9,12 @@ import pytest
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
+from build_r1_features import compute_r1_features  # noqa: E402
 from analyze_r1_results import (  # noqa: E402
     bootstrap_difference_ci,
     bootstrap_mean_ci,
+    count_integrity_violations,
+    overlap_diagnostics,
     safe_profit_factor,
     simulate_control_outcome,
     simulate_practical_trade,
@@ -181,3 +184,110 @@ def test_bootstrap_difference_is_deterministic():
     high = pd.Series([0.01, -0.01, 0.0])
 
     assert bootstrap_difference_ci(low, high) == bootstrap_difference_ci(low, high)
+
+
+def _audit_fixture():
+    dates = pd.bdate_range("2024-01-01", periods=30)
+    close = pd.Series([100.0 + index for index in range(21)] + [70.0] + [71.0] + [72.0] * 7)
+    frame = pd.DataFrame(
+        {
+            "Date": dates,
+            "Open": close,
+            "High": close + 1.0,
+            "Low": close - 1.0,
+            "Close": close,
+            "Volume": [1_000_000.0] * 21 + [500_000.0] + [1_000_000.0] * 8,
+        }
+    )
+    features = compute_r1_features(frame)
+    signal_date = dates[21]
+    signal = features.loc[features["Date"].eq(signal_date)].iloc[0].to_dict()
+    signal.update(
+        {
+            "Signal_ID": "AAA-2024-01-30",
+            "Symbol": "AAA",
+            "Signal_Date": signal_date,
+            "Point_In_Time_Member": True,
+            "Data_Eligible": True,
+            "Liquidity_OK": True,
+            "Cohort": "LOW_VOLUME",
+        }
+    )
+    entry_date = dates[22]
+    entry_bar = features.loc[features["Date"].eq(entry_date)].iloc[0]
+    structural_stop = float(signal["Low"]) - 0.25 * float(signal["ATR14"])
+    entry = pd.DataFrame(
+        [
+            {
+                **signal,
+                "Entry_ID": signal["Signal_ID"],
+                "Entry_Date": entry_date,
+                "Entry_Open": float(entry_bar["Open"]),
+                "Structural_Stop": structural_stop,
+                "Initial_Risk": float(entry_bar["Open"]) - structural_stop,
+                "Scheduled_Exit_Date": dates[27],
+            }
+        ]
+    )
+    setup = pd.DataFrame(
+        [{"Entry_ID": signal["Signal_ID"], "Symbol": "AAA", "Signal_Date": signal_date}]
+    )
+    practical = setup.copy()
+    membership = pd.DataFrame(
+        {
+            "Symbol": ["AAA"],
+            "Member_From": [dates[0]],
+            "Member_To": [dates[-1]],
+            "Downloadable": [True],
+            "Yahoo_Ticker": ["AAA.NS"],
+        }
+    )
+    return (
+        pd.DataFrame([signal]),
+        entry,
+        pd.DataFrame(columns=["Signal_ID", "Entry_ID", "Symbol", "Cancellation_Reason"]),
+        setup,
+        practical,
+        pd.DataFrame(),
+        {"AAA": features},
+        membership,
+        pd.DatetimeIndex(dates),
+    )
+
+
+def test_integrity_audit_recomputes_persisted_shock_score():
+    args = list(_audit_fixture())
+    args[0].loc[0, "Shock_Score"] = 0.0
+
+    count, audit = count_integrity_violations(*args)
+
+    assert count >= 1
+    assert "SHOCK_SCORE_MISMATCH" in audit["Violation"].tolist()
+
+
+def test_integrity_audit_recomputes_persisted_prior_volume():
+    args = list(_audit_fixture())
+    args[0].loc[0, "Prior20_Median_Volume"] = 1.0
+
+    count, audit = count_integrity_violations(*args)
+
+    assert count >= 1
+    assert "PRIOR_VOLUME_MISMATCH" in audit["Violation"].tolist()
+
+
+def test_overlap_diagnostics_reports_open_lifecycle_overlap():
+    dates = pd.bdate_range("2024-01-01", periods=10)
+    entries = pd.DataFrame(
+        [
+            {"Entry_ID": "AAA-1", "Symbol": "AAA", "Entry_Date": dates[1], "Scheduled_Exit_Date": dates[6]},
+            {"Entry_ID": "BBB-1", "Symbol": "BBB", "Entry_Date": dates[2], "Scheduled_Exit_Date": dates[7]},
+        ]
+    )
+
+    result = overlap_diagnostics(entries, pd.DatetimeIndex(dates))
+
+    row = result.iloc[0]
+    assert row["Accepted_Entries"] == 2
+    assert row["Max_Simultaneous_Trades"] == 2
+    assert row["Overlapping_Entries"] == 2
+    assert row["Max_Same_Day_Entries"] == 1

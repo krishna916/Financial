@@ -14,6 +14,8 @@ from build_r1_features import (
     active_members_on,
     build_feature_frames,
     load_membership,
+    load_runtime_feature_cache,
+    save_runtime_feature_cache,
 )
 
 
@@ -416,7 +418,12 @@ if __name__ == "__main__":
     membership = load_membership(
         root / "Swing Trading/research/swing/market_breadth/config/nifty500_membership.csv"
     )
-    feature_frames, validation = build_feature_frames(membership)
+    cached = load_runtime_feature_cache(membership)
+    if cached is None:
+        feature_frames, validation = build_feature_frames(membership)
+        save_runtime_feature_cache(membership, feature_frames, validation)
+    else:
+        feature_frames, validation = cached
     validation.to_csv(output_dir / "r1_data_validation.csv", index=False)
     candidates = _build_shock_candidates(feature_frames, membership)
     low_rows = []

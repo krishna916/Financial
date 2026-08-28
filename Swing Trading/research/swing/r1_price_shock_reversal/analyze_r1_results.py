@@ -2,13 +2,29 @@
 
 from __future__ import annotations
 
+import json
 from pathlib import Path
 
 import numpy as np
 import pandas as pd
 
-from build_r1_features import build_feature_frames, load_membership
-from generate_r1_signals import build_control_entries, load_canonical_market_sessions, next_session
+from build_r1_features import (
+    LIQUIDITY_FLOOR,
+    SIGNAL_END,
+    SIGNAL_START,
+    active_members_on,
+    build_feature_frames,
+    load_runtime_feature_cache,
+    load_membership,
+    save_runtime_feature_cache,
+)
+from generate_r1_signals import (
+    HIGH_VOLUME_MIN,
+    STOP_BUFFER_ATR,
+    build_control_entries,
+    load_canonical_market_sessions,
+    next_session,
+)
 
 
 BASE_FRICTION = 0.004
@@ -480,6 +496,271 @@ def bootstrap_summary(
     return pd.DataFrame(rows)
 
 
+def _audit_violation(
+    rows: list[dict[str, object]],
+    entry_id: object,
+    symbol: object,
+    violation: str,
+    observed: object = "",
+    expected: object = "",
+) -> None:
+    rows.append(
+        {
+            "Entry_ID": str(entry_id) if entry_id is not None else "",
+            "Symbol": str(symbol) if symbol is not None else "",
+            "Violation": violation,
+            "Observed": observed,
+            "Expected": expected,
+        }
+    )
+
+
+def _persisted_date(value: object) -> pd.Timestamp | None:
+    if value is None or pd.isna(value) or str(value).strip() in {"", "NaT", "nan"}:
+        return None
+    parsed = pd.to_datetime(value, errors="coerce")
+    if pd.isna(parsed):
+        return None
+    timestamp = pd.Timestamp(parsed)
+    return timestamp.tz_localize(None) if timestamp.tzinfo is not None else timestamp
+
+
+def _signal_lookup(signals: pd.DataFrame) -> dict[str, pd.Series]:
+    if signals.empty or "Signal_ID" not in signals.columns:
+        return {}
+    return {str(row["Signal_ID"]): row for _, row in signals.iterrows()}
+
+
+def _audit_low_entry(
+    entry: pd.Series,
+    signal: pd.Series | None,
+    feature_frames: dict[str, pd.DataFrame],
+    membership: pd.DataFrame,
+    sessions: pd.DatetimeIndex,
+    rows: list[dict[str, object]],
+) -> None:
+    entry_id = entry.get("Entry_ID", "")
+    symbol = str(entry.get("Symbol", signal.get("Symbol", "") if signal is not None else ""))
+    signal_date = _persisted_date(entry.get("Signal_Date"))
+    entry_date = _persisted_date(entry.get("Entry_Date"))
+    if signal_date is None or entry_date is None:
+        _audit_violation(rows, entry_id, symbol, "INVALID_ENTRY_DATES")
+        return
+    if not signal_date < entry_date:
+        _audit_violation(rows, entry_id, symbol, "SIGNAL_NOT_BEFORE_ENTRY", signal_date, "Signal_Date < Entry_Date")
+    if not SIGNAL_START <= signal_date <= SIGNAL_END:
+        _audit_violation(rows, entry_id, symbol, "SIGNAL_OUTSIDE_WINDOW", signal_date, f"{SIGNAL_START}..{SIGNAL_END}")
+    active_symbols = set(active_members_on(membership, signal_date)["Symbol"].astype(str))
+    if symbol not in active_symbols:
+        _audit_violation(rows, entry_id, symbol, "PIT_MEMBERSHIP_VIOLATION", False, True)
+    expected_entry_date = next_session(signal_date, sessions)
+    if expected_entry_date != entry_date:
+        _audit_violation(rows, entry_id, symbol, "IMMEDIATE_NEXT_SESSION_MISMATCH", entry_date, expected_entry_date)
+
+    frame = feature_frames.get(symbol)
+    if frame is None:
+        _audit_violation(rows, entry_id, symbol, "MISSING_FEATURE_FRAME")
+        return
+    try:
+        prices = _prices_for_trade(frame)
+    except ValueError as exc:
+        _audit_violation(rows, entry_id, symbol, "INVALID_FEATURE_FRAME", str(exc))
+        return
+    signal_rows = prices.loc[prices["Date"].eq(signal_date)]
+    if len(signal_rows) != 1:
+        _audit_violation(rows, entry_id, symbol, "MISSING_SIGNAL_BAR", len(signal_rows), 1)
+        return
+    source = signal_rows.iloc[0]
+    position = int(signal_rows.index[0])
+    close = pd.to_numeric(prices["Close"], errors="coerce")
+    returns = close.pct_change(fill_method=None)
+    prior_returns = returns.iloc[position - 20 : position]
+    if len(prior_returns) != 20 or not np.isfinite(prior_returns.to_numpy(dtype=float)).all():
+        _audit_violation(rows, entry_id, symbol, "PRIOR_RETURNS_INVALID", len(prior_returns), 20)
+    else:
+        sigma = float(prior_returns.std(ddof=1))
+        persisted_sigma = float(signal.get("Sigma20", np.nan)) if _finite(signal.get("Sigma20")) else np.nan
+        if not np.isclose(persisted_sigma, sigma, rtol=1e-9, atol=1e-12):
+            _audit_violation(rows, entry_id, symbol, "SIGMA20_MISMATCH", persisted_sigma, sigma)
+        signal_return = float(close.iloc[position] / close.iloc[position - 1] - 1.0)
+        persisted_return = float(signal.get("Return", np.nan)) if _finite(signal.get("Return")) else np.nan
+        if not np.isclose(persisted_return, signal_return, rtol=1e-9, atol=1e-12):
+            _audit_violation(rows, entry_id, symbol, "SIGNAL_RETURN_MISMATCH", persisted_return, signal_return)
+        expected_shock = signal_return / sigma if sigma > 0 else np.nan
+        persisted_shock = float(signal.get("Shock_Score", np.nan)) if _finite(signal.get("Shock_Score")) else np.nan
+        if not np.isclose(persisted_shock, expected_shock, rtol=1e-9, atol=1e-12):
+            _audit_violation(rows, entry_id, symbol, "SHOCK_SCORE_MISMATCH", persisted_shock, expected_shock)
+        if not np.isfinite(persisted_shock) or persisted_shock > -2.0:
+            _audit_violation(rows, entry_id, symbol, "SHOCK_THRESHOLD_VIOLATION", persisted_shock, "<= -2.0")
+
+    prior_volume = pd.to_numeric(prices["Volume"], errors="coerce").iloc[position - 20 : position]
+    if len(prior_volume) != 20 or not np.isfinite(prior_volume.to_numpy(dtype=float)).all():
+        _audit_violation(rows, entry_id, symbol, "PRIOR_VOLUME_INVALID", len(prior_volume), 20)
+    else:
+        expected_median_volume = float(prior_volume.median())
+        persisted_median_volume = float(signal.get("Prior20_Median_Volume", np.nan)) if _finite(signal.get("Prior20_Median_Volume")) else np.nan
+        if not np.isclose(persisted_median_volume, expected_median_volume, rtol=1e-9, atol=1e-12):
+            _audit_violation(rows, entry_id, symbol, "PRIOR_VOLUME_MISMATCH", persisted_median_volume, expected_median_volume)
+        expected_ratio = float(prices.iloc[position]["Volume"]) / expected_median_volume
+        persisted_ratio = float(signal.get("Volume_Ratio", np.nan)) if _finite(signal.get("Volume_Ratio")) else np.nan
+        if not np.isclose(persisted_ratio, expected_ratio, rtol=1e-9, atol=1e-12):
+            _audit_violation(rows, entry_id, symbol, "VOLUME_RATIO_MISMATCH", persisted_ratio, expected_ratio)
+        if not np.isfinite(persisted_ratio) or persisted_ratio > 1.0:
+            _audit_violation(rows, entry_id, symbol, "LOW_VOLUME_THRESHOLD_VIOLATION", persisted_ratio, "<= 1.0")
+
+    traded_value = close * pd.to_numeric(prices["Volume"], errors="coerce")
+    prior_traded_value = traded_value.iloc[position - 20 : position]
+    if len(prior_traded_value) != 20 or not np.isfinite(prior_traded_value.to_numpy(dtype=float)).all():
+        _audit_violation(rows, entry_id, symbol, "PRIOR_TRADED_VALUE_INVALID", len(prior_traded_value), 20)
+    else:
+        expected_value = float(prior_traded_value.median())
+        persisted_value = float(signal.get("Prior20_Median_Traded_Value", np.nan)) if _finite(signal.get("Prior20_Median_Traded_Value")) else np.nan
+        if not np.isclose(persisted_value, expected_value, rtol=1e-9, atol=1e-12):
+            _audit_violation(rows, entry_id, symbol, "PRIOR_TRADED_VALUE_MISMATCH", persisted_value, expected_value)
+        if not np.isfinite(persisted_value) or persisted_value < LIQUIDITY_FLOOR:
+            _audit_violation(rows, entry_id, symbol, "LIQUIDITY_FLOOR_VIOLATION", persisted_value, LIQUIDITY_FLOOR)
+
+    atr = source.get("ATR14", np.nan)
+    shock_low = source.get("Low", np.nan)
+    persisted_stop = float(entry.get("Structural_Stop", np.nan)) if _finite(entry.get("Structural_Stop")) else np.nan
+    expected_stop = float(shock_low) - STOP_BUFFER_ATR * float(atr) if _finite(shock_low) and _finite(atr) else np.nan
+    if not np.isclose(persisted_stop, expected_stop, rtol=1e-9, atol=1e-12):
+        _audit_violation(rows, entry_id, symbol, "STRUCTURAL_STOP_MISMATCH", persisted_stop, expected_stop)
+    if not _finite(entry.get("Entry_Open")) or float(entry["Entry_Open"]) <= persisted_stop:
+        _audit_violation(rows, entry_id, symbol, "ENTRY_NOT_ABOVE_STRUCTURAL_STOP", entry.get("Entry_Open"), persisted_stop)
+
+    expected_exit = next_session(signal_date, sessions, 6)
+    persisted_exit = _persisted_date(entry.get("Scheduled_Exit_Date"))
+    if expected_exit is not None and persisted_exit != expected_exit:
+        _audit_violation(rows, entry_id, symbol, "SCHEDULED_EXIT_MISMATCH", persisted_exit, expected_exit)
+
+
+def count_integrity_violations(
+    signals: pd.DataFrame,
+    entries: pd.DataFrame,
+    cancellations: pd.DataFrame,
+    setup: pd.DataFrame,
+    practical: pd.DataFrame,
+    controls: pd.DataFrame,
+    feature_frames: dict[str, pd.DataFrame],
+    membership: pd.DataFrame,
+    canonical_sessions: pd.DatetimeIndex,
+) -> tuple[int, pd.DataFrame]:
+    """Recompute persisted R1 evidence and return deduplicated violations."""
+
+    rows: list[dict[str, object]] = []
+    sessions = _clean_sessions(canonical_sessions)
+    low_signals = signals
+    if "Cohort" in signals.columns:
+        low_signals = signals.loc[signals["Cohort"].eq("LOW_VOLUME")]
+    signal_lookup = _signal_lookup(low_signals)
+    all_signal_lookup = _signal_lookup(signals)
+    for _, entry in entries.iterrows():
+        signal_id = str(entry.get("Signal_ID", entry.get("Entry_ID", "")))
+        signal = signal_lookup.get(signal_id)
+        if signal is None:
+            _audit_violation(rows, entry.get("Entry_ID", signal_id), entry.get("Symbol", ""), "ENTRY_WITHOUT_QUALIFIED_SIGNAL")
+        _audit_low_entry(entry, signal, feature_frames, membership, sessions, rows)
+
+    qualified_ids = set(signal_lookup)
+    accepted_ids = entries.get("Signal_ID", pd.Series(dtype=str)).astype(str).tolist()
+    cancelled_ids = cancellations.get("Signal_ID", pd.Series(dtype=str)).astype(str).tolist()
+    outcome_ids = accepted_ids + cancelled_ids
+    if len(outcome_ids) != len(set(outcome_ids)) or set(outcome_ids) != qualified_ids:
+        _audit_violation(rows, "", "", "ACCOUNTING_MISMATCH", len(outcome_ids), len(qualified_ids))
+    if len(set(setup.get("Entry_ID", pd.Series(dtype=str)).astype(str))) != len(
+        set(practical.get("Entry_ID", pd.Series(dtype=str)).astype(str))
+    ) or set(setup.get("Entry_ID", pd.Series(dtype=str)).astype(str)) != set(
+        practical.get("Entry_ID", pd.Series(dtype=str)).astype(str)
+    ):
+        _audit_violation(rows, "", "", "PAIRED_ENTRY_ID_MISMATCH")
+
+    accepted_sorted = entries.sort_values(["Symbol", "Signal_Date"]) if not entries.empty else entries
+    for symbol, group in accepted_sorted.groupby("Symbol", sort=False):
+        previous_exit: pd.Timestamp | None = None
+        for _, entry in group.iterrows():
+            signal_date = _persisted_date(entry.get("Signal_Date"))
+            if previous_exit is not None and signal_date is not None and signal_date < previous_exit:
+                _audit_violation(rows, entry.get("Entry_ID", ""), symbol, "LOW_VOLUME_LOCKOUT_VIOLATION")
+            previous_exit = _persisted_date(entry.get("Scheduled_Exit_Date")) or pd.Timestamp.max
+
+    control_rows = []
+    for _, control in controls.iterrows():
+        control_id = str(control.get("Entry_ID", ""))
+        source = all_signal_lookup.get(control_id)
+        symbol = str(control.get("Symbol", source.get("Symbol", "") if source is not None else ""))
+        if source is None:
+            _audit_violation(rows, control_id, symbol, "CONTROL_WITHOUT_SIGNAL")
+            continue
+        shock = source.get("Shock_Score", np.nan)
+        ratio = source.get("Volume_Ratio", np.nan)
+        if not _finite(shock) or float(shock) > -2.0:
+            _audit_violation(rows, control_id, symbol, "CONTROL_SHOCK_THRESHOLD_VIOLATION", shock, "<= -2.0")
+        if not _finite(ratio) or float(ratio) < HIGH_VOLUME_MIN:
+            _audit_violation(rows, control_id, symbol, "CONTROL_VOLUME_THRESHOLD_VIOLATION", ratio, ">= 1.5")
+        signal_date = _persisted_date(control.get("Signal_Date"))
+        entry_date = _persisted_date(control.get("Entry_Date"))
+        if signal_date is None or entry_date is None or next_session(signal_date, sessions) != entry_date:
+            _audit_violation(rows, control_id, symbol, "CONTROL_ENTRY_TIMING_MISMATCH")
+        expected_exit = next_session(signal_date, sessions, 6) if signal_date is not None else None
+        if expected_exit is not None and _persisted_date(control.get("Exit_Date")) != expected_exit:
+            _audit_violation(rows, control_id, symbol, "CONTROL_EXIT_TIMING_MISMATCH")
+        control_rows.append((symbol, signal_date, expected_exit, control_id))
+    for symbol in sorted({row[0] for row in control_rows}):
+        prior_exit: pd.Timestamp | None = None
+        for row_symbol, signal_date, expected_exit, control_id in sorted(
+            [row for row in control_rows if row[0] == symbol], key=lambda item: item[1] or pd.Timestamp.min
+        ):
+            if prior_exit is not None and signal_date is not None and signal_date < prior_exit:
+                _audit_violation(rows, control_id, symbol, "CONTROL_LOCKOUT_VIOLATION")
+            prior_exit = expected_exit or pd.Timestamp.max
+
+    audit = pd.DataFrame(rows, columns=["Entry_ID", "Symbol", "Violation", "Observed", "Expected"])
+    if not audit.empty:
+        audit = audit.drop_duplicates(["Entry_ID", "Symbol", "Violation"]).sort_values(
+            ["Entry_ID", "Symbol", "Violation"]
+        ).reset_index(drop=True)
+    return len(audit), audit
+
+
+def overlap_diagnostics(entries: pd.DataFrame, canonical_sessions: pd.DatetimeIndex) -> pd.DataFrame:
+    """Report signal-level lifecycle overlap and same-day capacity diagnostics."""
+
+    sessions = _clean_sessions(canonical_sessions)
+    intervals: list[tuple[str, int, int]] = []
+    for _, entry in entries.iterrows():
+        start = _session_position(_persisted_date(entry.get("Entry_Date")), sessions) if _persisted_date(entry.get("Entry_Date")) is not None else None
+        scheduled_exit = _persisted_date(entry.get("Scheduled_Exit_Date"))
+        end = _session_position(scheduled_exit, sessions) if scheduled_exit is not None else len(sessions)
+        if start is not None and end is not None and end > start:
+            intervals.append((str(entry.get("Entry_ID", "")), start, end))
+    counts = np.zeros(len(sessions), dtype=int)
+    for _, start, end in intervals:
+        counts[start:end] += 1
+    overlapping_ids: set[str] = set()
+    for index, (entry_id, start, end) in enumerate(intervals):
+        if any(
+            other_start < end and start < other_end
+            for other_index, (_, other_start, other_end) in enumerate(intervals)
+            if other_index != index
+        ):
+            overlapping_ids.add(entry_id)
+    same_day = entries.get("Entry_Date", pd.Series(dtype="datetime64[ns]")).map(_persisted_date).dropna().value_counts()
+    return pd.DataFrame(
+        [
+            {
+                "Accepted_Entries": len(entries),
+                "Max_Simultaneous_Trades": int(counts.max()) if len(counts) else 0,
+                "Average_Simultaneous_Trades": float(counts[counts > 0].mean()) if (counts > 0).any() else 0.0,
+                "Max_Same_Day_Entries": int(same_day.max()) if not same_day.empty else 0,
+                "Overlapping_Entries": len(overlapping_ids),
+                "Overlap_Percentage": len(overlapping_ids) / len(intervals) if intervals else 0.0,
+                "Same_Day_Entry_Counts": json.dumps({str(key.date()): int(value) for key, value in same_day.items()}),
+            }
+        ]
+    )
+
+
 def _read_csv_or_empty(path: Path, parse_dates: list[str] | None = None) -> pd.DataFrame:
     if not path.exists():
         return pd.DataFrame()
@@ -518,11 +799,20 @@ if __name__ == "__main__":
     membership = load_membership(
         root / "Swing Trading/research/swing/market_breadth/config/nifty500_membership.csv"
     )
-    feature_frames, validation = build_feature_frames(membership)
+    cached = load_runtime_feature_cache(membership)
+    if cached is None:
+        feature_frames, validation = build_feature_frames(membership)
+        save_runtime_feature_cache(membership, feature_frames, validation)
+    else:
+        feature_frames, validation = cached
     validation.to_csv(output_dir / "r1_data_validation.csv", index=False)
     entries = _read_csv_or_empty(
         output_dir / "r1_entries.csv", ["Signal_Date", "Entry_Date", "Scheduled_Exit_Date"]
     )
+    cancellations = _read_csv_or_empty(
+        output_dir / "r1_entry_cancellations.csv", ["Signal_Date", "Next_Session_Date"]
+    )
+    low_signals = _read_csv_or_empty(output_dir / "r1_low_volume_signals.csv", ["Signal_Date"])
     high_signals = _read_csv_or_empty(output_dir / "r1_high_volume_control_signals.csv", ["Signal_Date"])
     extra_dates = pd.DatetimeIndex(
         [
@@ -543,6 +833,17 @@ if __name__ == "__main__":
         if result is not None:
             control_rows.append(result)
     controls = pd.DataFrame(control_rows)
+    audit_count, pit_audit = count_integrity_violations(
+        pd.concat([low_signals, high_signals], ignore_index=True),
+        entries,
+        cancellations,
+        setup,
+        practical,
+        controls,
+        feature_frames,
+        membership,
+        sessions,
+    )
     forward_rows: list[dict[str, object]] = []
     for _, entry in entries.iterrows():
         prices = feature_frames.get(str(entry["Symbol"]))
@@ -585,7 +886,12 @@ if __name__ == "__main__":
     bootstrap_summary(setup, practical, controls).to_csv(
         output_dir / "r1_bootstrap_summary.csv", index=False
     )
+    pit_audit.to_csv(output_dir / "r1_pit_audit.csv", index=False)
+    overlap_diagnostics(entries, sessions).to_csv(
+        output_dir / "r1_overlap_diagnostic.csv", index=False
+    )
     print(
         f"paired_setup={len(setup)} paired_practical={len(practical)} "
-        f"control_outcomes={len(controls)} forward_rows={len(forward_rows)}"
+        f"control_outcomes={len(controls)} forward_rows={len(forward_rows)} "
+        f"integrity_violations={audit_count}"
     )

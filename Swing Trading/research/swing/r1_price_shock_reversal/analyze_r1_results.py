@@ -19,6 +19,7 @@ from build_r1_features import (
     save_runtime_feature_cache,
 )
 from generate_r1_signals import (
+    CANDIDATE_COLUMNS,
     HIGH_VOLUME_MIN,
     STOP_BUFFER_ATR,
     build_control_entries,
@@ -34,6 +35,59 @@ BOOTSTRAP_SEED = 20260828
 BOOTSTRAP_RESAMPLES = 10_000
 
 
+REQUIRED_PRE_ANALYSIS_ARTIFACTS = {
+    "r1_data_validation.csv": {
+        "columns": (
+            "Symbol",
+            "Yahoo_Ticker",
+            "Raw_Rows",
+            "Usable",
+            "Download_Error",
+        ),
+        "parse_dates": (),
+    },
+    "r1_shock_candidates.csv": {"columns": tuple(CANDIDATE_COLUMNS), "parse_dates": ("Signal_Date",)},
+    "r1_low_volume_signals.csv": {"columns": tuple(CANDIDATE_COLUMNS), "parse_dates": ("Signal_Date",)},
+    "r1_high_volume_control_signals.csv": {"columns": tuple(CANDIDATE_COLUMNS), "parse_dates": ("Signal_Date",)},
+    "r1_entries.csv": {
+        "columns": (
+            "Entry_ID",
+            "Signal_ID",
+            "Symbol",
+            "Signal_Date",
+            "Entry_Date",
+            "Entry_Open",
+            "Structural_Stop",
+            "Scheduled_Exit_Date",
+        ),
+        "parse_dates": ("Signal_Date", "Entry_Date", "Scheduled_Exit_Date"),
+    },
+    "r1_entry_cancellations.csv": {
+        "columns": ("Signal_ID", "Symbol", "Signal_Date", "Cancellation_Reason"),
+        "parse_dates": ("Signal_Date", "Next_Session_Date"),
+    },
+}
+
+FINAL_REQUIRED_EVIDENCE_ARTIFACTS = {
+    "r1_setup_quality_trades.csv": ("Entry_ID",),
+    "r1_practical_trades.csv": ("Entry_ID",),
+    "r1_control_outcomes.csv": ("Entry_ID",),
+    "r1_forward_diagnostics.csv": ("Entry_ID", "Holding_Sessions", "Forward_Return"),
+    "r1_validation_summary.csv": ("Lens",),
+    "r1_temporal_summary.csv": ("Period",),
+    "r1_outlier_robustness.csv": ("Analysis",),
+    "r1_leave_one_symbol_out.csv": ("Omitted_Symbol",),
+    "r1_control_comparison.csv": ("Low_Volume_Trades", "High_Volume_Trades"),
+    "r1_bootstrap_summary.csv": ("Metric",),
+    "r1_overlap_diagnostic.csv": ("Accepted_Entries",),
+    "r1_sector_diagnostic.csv": ("Metric",),
+    "r1_regime_diagnostic.csv": ("Regime",),
+    "r1_pit_audit.csv": ("Violation",),
+    "r1_validation_gates.csv": ("Gate", "Pass"),
+    "research_report.md": None,
+}
+
+
 def _finite(value: object) -> bool:
     try:
         return bool(pd.notna(value) and np.isfinite(float(value)))
@@ -42,6 +96,14 @@ def _finite(value: object) -> bool:
 
 
 def _clean_sessions(values: pd.DatetimeIndex | object) -> pd.DatetimeIndex:
+    if (
+        isinstance(values, pd.DatetimeIndex)
+        and values.tz is None
+        and values.is_monotonic_increasing
+        and values.is_unique
+        and not values.hasnans
+    ):
+        return values
     sessions = pd.DatetimeIndex(pd.to_datetime(values, errors="coerce"))
     if sessions.tz is not None:
         sessions = sessions.tz_localize(None)
@@ -531,6 +593,118 @@ def _signal_lookup(signals: pd.DataFrame) -> dict[str, pd.Series]:
     return {str(row["Signal_ID"]): row for _, row in signals.iterrows()}
 
 
+def load_required_artifacts(output_dir: Path) -> tuple[dict[str, pd.DataFrame], pd.DataFrame]:
+    """Load the pre-analysis evidence package and record any package defects."""
+
+    artifacts: dict[str, pd.DataFrame] = {}
+    rows: list[dict[str, object]] = []
+    for filename, specification in REQUIRED_PRE_ANALYSIS_ARTIFACTS.items():
+        path = output_dir / filename
+        columns = list(specification["columns"])
+        if not path.is_file():
+            _audit_violation(
+                rows,
+                filename,
+                "",
+                "MISSING_REQUIRED_ARTIFACT",
+                str(path.resolve()),
+                "required readable artifact",
+            )
+            artifacts[filename] = pd.DataFrame(columns=columns)
+            continue
+        try:
+            frame = pd.read_csv(path)
+            for date_column in specification.get("parse_dates", ()):
+                if date_column not in frame.columns:
+                    continue
+                parsed = pd.to_datetime(frame[date_column], errors="coerce")
+                invalid_dates = frame[date_column].notna() & parsed.isna()
+                if invalid_dates.any():
+                    raise ValueError(f"invalid dates in {date_column}")
+                frame[date_column] = parsed
+        except Exception as exc:  # noqa: BLE001 - classify unreadable evidence as invalid
+            _audit_violation(
+                rows,
+                filename,
+                "",
+                "INVALID_REQUIRED_ARTIFACT",
+                str(path.resolve()),
+                f"required readable artifact: {type(exc).__name__}: {exc}",
+            )
+            artifacts[filename] = pd.DataFrame(columns=columns)
+            continue
+        missing = sorted(set(columns).difference(frame.columns))
+        if missing:
+            _audit_violation(
+                rows,
+                filename,
+                "",
+                "INVALID_REQUIRED_ARTIFACT",
+                str(path.resolve()),
+                f"required columns: {missing}",
+            )
+            artifacts[filename] = pd.DataFrame(columns=columns)
+            continue
+        artifacts[filename] = frame
+    audit = pd.DataFrame(rows, columns=["Entry_ID", "Symbol", "Violation", "Observed", "Expected"])
+    return artifacts, audit
+
+
+def _verify_final_evidence_package(output_dir: Path) -> pd.DataFrame:
+    """Verify that the final evidence package is readable after generation."""
+
+    rows: list[dict[str, object]] = []
+    for filename, required_columns in FINAL_REQUIRED_EVIDENCE_ARTIFACTS.items():
+        path = output_dir / filename
+        if not path.is_file():
+            _audit_violation(
+                rows,
+                filename,
+                "",
+                "MISSING_FINAL_ARTIFACT",
+                str(path.resolve()),
+                "required final evidence artifact",
+            )
+            continue
+        if required_columns is None:
+            try:
+                if not path.read_text(encoding="utf-8").strip():
+                    raise ValueError("report is empty")
+            except Exception as exc:  # noqa: BLE001 - classify unreadable evidence as invalid
+                _audit_violation(
+                    rows,
+                    filename,
+                    "",
+                    "INVALID_FINAL_ARTIFACT",
+                    str(path.resolve()),
+                    f"non-empty readable report: {type(exc).__name__}: {exc}",
+                )
+            continue
+        try:
+            frame = pd.read_csv(path)
+        except Exception as exc:  # noqa: BLE001 - classify unreadable evidence as invalid
+            _audit_violation(
+                rows,
+                filename,
+                "",
+                "INVALID_FINAL_ARTIFACT",
+                str(path.resolve()),
+                f"readable CSV with columns {list(required_columns)}: {type(exc).__name__}: {exc}",
+            )
+            continue
+        missing = sorted(set(required_columns).difference(frame.columns))
+        if missing:
+            _audit_violation(
+                rows,
+                filename,
+                "",
+                "INVALID_FINAL_ARTIFACT",
+                str(path.resolve()),
+                f"required columns: {missing}",
+            )
+    return pd.DataFrame(rows, columns=["Entry_ID", "Symbol", "Violation", "Observed", "Expected"])
+
+
 def _audit_low_entry(
     entry: pd.Series,
     signal: pd.Series | None,
@@ -538,6 +712,8 @@ def _audit_low_entry(
     membership: pd.DataFrame,
     sessions: pd.DatetimeIndex,
     rows: list[dict[str, object]],
+    normalized_frames: dict[str, pd.DataFrame] | None = None,
+    active_status_by_symbol_date: dict[tuple[str, pd.Timestamp], bool] | None = None,
 ) -> None:
     entry_id = entry.get("Entry_ID", "")
     symbol = str(entry.get("Symbol", signal.get("Symbol", "") if signal is not None else ""))
@@ -550,8 +726,12 @@ def _audit_low_entry(
         _audit_violation(rows, entry_id, symbol, "SIGNAL_NOT_BEFORE_ENTRY", signal_date, "Signal_Date < Entry_Date")
     if not SIGNAL_START <= signal_date <= SIGNAL_END:
         _audit_violation(rows, entry_id, symbol, "SIGNAL_OUTSIDE_WINDOW", signal_date, f"{SIGNAL_START}..{SIGNAL_END}")
-    active_symbols = set(active_members_on(membership, signal_date)["Symbol"].astype(str))
-    if symbol not in active_symbols:
+    is_active = (
+        active_status_by_symbol_date.get((symbol, signal_date), False)
+        if active_status_by_symbol_date is not None
+        else symbol in set(active_members_on(membership, signal_date)["Symbol"].astype(str))
+    )
+    if not is_active:
         _audit_violation(rows, entry_id, symbol, "PIT_MEMBERSHIP_VIOLATION", False, True)
     expected_entry_date = next_session(signal_date, sessions)
     if expected_entry_date != entry_date:
@@ -561,11 +741,14 @@ def _audit_low_entry(
     if frame is None:
         _audit_violation(rows, entry_id, symbol, "MISSING_FEATURE_FRAME")
         return
-    try:
-        prices = _prices_for_trade(frame)
-    except ValueError as exc:
-        _audit_violation(rows, entry_id, symbol, "INVALID_FEATURE_FRAME", str(exc))
-        return
+    if normalized_frames is not None and symbol in normalized_frames:
+        prices = normalized_frames[symbol]
+    else:
+        try:
+            prices = _prices_for_trade(frame)
+        except ValueError as exc:
+            _audit_violation(rows, entry_id, symbol, "INVALID_FEATURE_FRAME", str(exc))
+            return
     signal_rows = prices.loc[prices["Date"].eq(signal_date)]
     if len(signal_rows) != 1:
         _audit_violation(rows, entry_id, symbol, "MISSING_SIGNAL_BAR", len(signal_rows), 1)
@@ -635,6 +818,130 @@ def _audit_low_entry(
         _audit_violation(rows, entry_id, symbol, "SCHEDULED_EXIT_MISMATCH", persisted_exit, expected_exit)
 
 
+def _audit_control_entry(
+    control: pd.Series,
+    signal: pd.Series | None,
+    feature_frames: dict[str, pd.DataFrame],
+    membership: pd.DataFrame,
+    sessions: pd.DatetimeIndex,
+    rows: list[dict[str, object]],
+    normalized_frames: dict[str, pd.DataFrame] | None = None,
+    active_status_by_symbol_date: dict[tuple[str, pd.Timestamp], bool] | None = None,
+) -> None:
+    """Independently audit one completed high-volume control outcome."""
+
+    entry_id = control.get("Entry_ID", "")
+    symbol = str(control.get("Symbol", signal.get("Symbol", "") if signal is not None else ""))
+    if signal is None:
+        _audit_violation(rows, entry_id, symbol, "CONTROL_WITHOUT_SIGNAL")
+        return
+    signal_date = _persisted_date(control.get("Signal_Date"))
+    entry_date = _persisted_date(control.get("Entry_Date"))
+    exit_date = _persisted_date(control.get("Exit_Date"))
+    if signal_date is None or entry_date is None or exit_date is None:
+        _audit_violation(rows, entry_id, symbol, "CONTROL_INVALID_DATES")
+        return
+    if not SIGNAL_START <= signal_date <= SIGNAL_END:
+        _audit_violation(rows, entry_id, symbol, "CONTROL_SIGNAL_OUTSIDE_WINDOW", signal_date, f"{SIGNAL_START}..{SIGNAL_END}")
+    is_active = (
+        active_status_by_symbol_date.get((symbol, signal_date), False)
+        if active_status_by_symbol_date is not None
+        else symbol in set(active_members_on(membership, signal_date)["Symbol"].astype(str))
+    )
+    if not is_active:
+        _audit_violation(rows, entry_id, symbol, "CONTROL_PIT_MEMBERSHIP_VIOLATION", False, True)
+
+    frame = feature_frames.get(symbol)
+    if frame is None:
+        _audit_violation(rows, entry_id, symbol, "CONTROL_MISSING_FEATURE_FRAME")
+        return
+    if normalized_frames is not None and symbol in normalized_frames:
+        prices = normalized_frames[symbol]
+    else:
+        try:
+            prices = _prices_for_trade(frame)
+        except ValueError as exc:
+            _audit_violation(rows, entry_id, symbol, "CONTROL_INVALID_FEATURE_FRAME", str(exc))
+            return
+    signal_rows = prices.loc[prices["Date"].eq(signal_date)]
+    if len(signal_rows) != 1:
+        _audit_violation(rows, entry_id, symbol, "CONTROL_MISSING_SIGNAL_BAR", len(signal_rows), 1)
+        return
+    source = signal_rows.iloc[0]
+    position = int(signal_rows.index[0])
+    close = pd.to_numeric(prices["Close"], errors="coerce")
+    returns = close.pct_change(fill_method=None)
+    prior_returns = returns.iloc[position - 20 : position]
+    if len(prior_returns) != 20 or not np.isfinite(prior_returns.to_numpy(dtype=float)).all():
+        _audit_violation(rows, entry_id, symbol, "CONTROL_PRIOR_RETURNS_INVALID", len(prior_returns), 20)
+    else:
+        sigma = float(prior_returns.std(ddof=1))
+        persisted_sigma = float(signal.get("Sigma20", np.nan)) if _finite(signal.get("Sigma20")) else np.nan
+        if not np.isclose(persisted_sigma, sigma, rtol=1e-9, atol=1e-12):
+            _audit_violation(rows, entry_id, symbol, "CONTROL_SIGMA20_MISMATCH", persisted_sigma, sigma)
+        signal_return = float(close.iloc[position] / close.iloc[position - 1] - 1.0)
+        persisted_return = float(signal.get("Return", np.nan)) if _finite(signal.get("Return")) else np.nan
+        if not np.isclose(persisted_return, signal_return, rtol=1e-9, atol=1e-12):
+            _audit_violation(rows, entry_id, symbol, "CONTROL_SIGNAL_RETURN_MISMATCH", persisted_return, signal_return)
+        shock = signal_return / sigma if sigma > 0 else np.nan
+        persisted_shock = float(signal.get("Shock_Score", np.nan)) if _finite(signal.get("Shock_Score")) else np.nan
+        if not np.isclose(persisted_shock, shock, rtol=1e-9, atol=1e-12):
+            _audit_violation(rows, entry_id, symbol, "CONTROL_SHOCK_SCORE_MISMATCH", persisted_shock, shock)
+        if not _finite(shock) or shock > -2.0:
+            _audit_violation(rows, entry_id, symbol, "CONTROL_SHOCK_THRESHOLD_VIOLATION", shock, "<= -2.0")
+
+    volume = pd.to_numeric(prices["Volume"], errors="coerce")
+    prior_volume = volume.iloc[position - 20 : position]
+    if len(prior_volume) != 20 or not np.isfinite(prior_volume.to_numpy(dtype=float)).all():
+        _audit_violation(rows, entry_id, symbol, "CONTROL_PRIOR_VOLUME_INVALID", len(prior_volume), 20)
+    else:
+        median_volume = float(prior_volume.median())
+        persisted_median = float(signal.get("Prior20_Median_Volume", np.nan)) if _finite(signal.get("Prior20_Median_Volume")) else np.nan
+        if not np.isclose(persisted_median, median_volume, rtol=1e-9, atol=1e-12):
+            _audit_violation(rows, entry_id, symbol, "CONTROL_PRIOR_VOLUME_MISMATCH", persisted_median, median_volume)
+        ratio = float(source["Volume"]) / median_volume if median_volume > 0 else np.nan
+        persisted_ratio = float(signal.get("Volume_Ratio", np.nan)) if _finite(signal.get("Volume_Ratio")) else np.nan
+        if not np.isclose(persisted_ratio, ratio, rtol=1e-9, atol=1e-12):
+            _audit_violation(rows, entry_id, symbol, "CONTROL_VOLUME_RATIO_MISMATCH", persisted_ratio, ratio)
+        if not _finite(ratio) or ratio < HIGH_VOLUME_MIN:
+            _audit_violation(rows, entry_id, symbol, "CONTROL_VOLUME_THRESHOLD_VIOLATION", ratio, ">= 1.5")
+
+    traded_value = close * volume
+    prior_traded_value = traded_value.iloc[position - 20 : position]
+    if len(prior_traded_value) != 20 or not np.isfinite(prior_traded_value.to_numpy(dtype=float)).all():
+        _audit_violation(rows, entry_id, symbol, "CONTROL_PRIOR_TRADED_VALUE_INVALID", len(prior_traded_value), 20)
+    else:
+        median_traded_value = float(prior_traded_value.median())
+        persisted_value = float(signal.get("Prior20_Median_Traded_Value", np.nan)) if _finite(signal.get("Prior20_Median_Traded_Value")) else np.nan
+        if not np.isclose(persisted_value, median_traded_value, rtol=1e-9, atol=1e-12):
+            _audit_violation(rows, entry_id, symbol, "CONTROL_PRIOR_TRADED_VALUE_MISMATCH", persisted_value, median_traded_value)
+        if not _finite(median_traded_value) or median_traded_value < LIQUIDITY_FLOOR:
+            _audit_violation(rows, entry_id, symbol, "CONTROL_LIQUIDITY_FLOOR_VIOLATION", median_traded_value, LIQUIDITY_FLOOR)
+
+    expected_entry = next_session(signal_date, sessions)
+    if expected_entry != entry_date:
+        _audit_violation(rows, entry_id, symbol, "CONTROL_ENTRY_TIMING_MISMATCH", entry_date, expected_entry)
+    if expected_entry is not None:
+        entry_bar = _row_on_date(prices, expected_entry)
+        if entry_bar is None or not _finite(entry_bar.get("Open", np.nan)):
+            _audit_violation(rows, entry_id, symbol, "CONTROL_MISSING_ENTRY_BAR", expected_entry, "one bar")
+        elif not np.isclose(float(control.get("Entry_Open", np.nan)), float(entry_bar["Open"]), rtol=1e-9, atol=1e-12):
+            _audit_violation(rows, entry_id, symbol, "CONTROL_ENTRY_OPEN_MISMATCH", control.get("Entry_Open"), entry_bar["Open"])
+
+    expected_exit = next_session(signal_date, sessions, 6)
+    if expected_exit != exit_date:
+        _audit_violation(rows, entry_id, symbol, "CONTROL_EXIT_TIMING_MISMATCH", exit_date, expected_exit)
+    if expected_exit is not None:
+        exit_bar = _row_on_date(prices, expected_exit)
+        if exit_bar is None or not _finite(exit_bar.get("Open", np.nan)):
+            _audit_violation(rows, entry_id, symbol, "CONTROL_MISSING_EXIT_BAR", expected_exit, "one bar")
+        elif not np.isclose(float(control.get("Exit_Price", np.nan)), float(exit_bar["Open"]), rtol=1e-9, atol=1e-12):
+            _audit_violation(rows, entry_id, symbol, "CONTROL_EXIT_PRICE_MISMATCH", control.get("Exit_Price"), exit_bar["Open"])
+    if control.get("Holding_Sessions") is not None and not pd.isna(control.get("Holding_Sessions")):
+        if int(control["Holding_Sessions"]) != 5:
+            _audit_violation(rows, entry_id, symbol, "CONTROL_HOLDING_SESSIONS_MISMATCH", control["Holding_Sessions"], 5)
+
+
 def count_integrity_violations(
     signals: pd.DataFrame,
     entries: pd.DataFrame,
@@ -650,6 +957,27 @@ def count_integrity_violations(
 
     rows: list[dict[str, object]] = []
     sessions = _clean_sessions(canonical_sessions)
+    normalized_frames: dict[str, pd.DataFrame] = {}
+    for symbol, frame in feature_frames.items():
+        try:
+            normalized_frames[str(symbol)] = _prices_for_trade(frame)
+        except ValueError:
+            continue
+    audit_keys: set[tuple[str, pd.Timestamp]] = set()
+    for frame in (signals, entries, controls):
+        for _, value in frame.iterrows():
+            symbol = str(value.get("Symbol", ""))
+            date = _persisted_date(value.get("Signal_Date"))
+            if symbol and date is not None:
+                audit_keys.add((symbol, date))
+    active_status_by_symbol_date = {}
+    for symbol, date in audit_keys:
+        symbol_rows = membership.loc[membership["Symbol"].astype(str).eq(symbol)]
+        active_status_by_symbol_date[(symbol, date)] = bool(
+            symbol_rows["Member_From"].le(date).fillna(False)
+            .mul(symbol_rows["Member_To"].ge(date).fillna(False))
+            .any()
+        )
     low_signals = signals
     if "Cohort" in signals.columns:
         low_signals = signals.loc[signals["Cohort"].eq("LOW_VOLUME")]
@@ -660,7 +988,16 @@ def count_integrity_violations(
         signal = signal_lookup.get(signal_id)
         if signal is None:
             _audit_violation(rows, entry.get("Entry_ID", signal_id), entry.get("Symbol", ""), "ENTRY_WITHOUT_QUALIFIED_SIGNAL")
-        _audit_low_entry(entry, signal, feature_frames, membership, sessions, rows)
+        _audit_low_entry(
+            entry,
+            signal,
+            feature_frames,
+            membership,
+            sessions,
+            rows,
+            normalized_frames,
+            active_status_by_symbol_date,
+        )
 
     qualified_ids = set(signal_lookup)
     accepted_ids = entries.get("Signal_ID", pd.Series(dtype=str)).astype(str).tolist()
@@ -676,35 +1013,32 @@ def count_integrity_violations(
         _audit_violation(rows, "", "", "PAIRED_ENTRY_ID_MISMATCH")
 
     accepted_sorted = entries.sort_values(["Symbol", "Signal_Date"]) if not entries.empty else entries
-    for symbol, group in accepted_sorted.groupby("Symbol", sort=False):
-        previous_exit: pd.Timestamp | None = None
-        for _, entry in group.iterrows():
-            signal_date = _persisted_date(entry.get("Signal_Date"))
-            if previous_exit is not None and signal_date is not None and signal_date < previous_exit:
-                _audit_violation(rows, entry.get("Entry_ID", ""), symbol, "LOW_VOLUME_LOCKOUT_VIOLATION")
-            previous_exit = _persisted_date(entry.get("Scheduled_Exit_Date")) or pd.Timestamp.max
+    if "Symbol" in accepted_sorted.columns:
+        for symbol, group in accepted_sorted.groupby("Symbol", sort=False):
+            previous_exit: pd.Timestamp | None = None
+            for _, entry in group.iterrows():
+                signal_date = _persisted_date(entry.get("Signal_Date"))
+                if previous_exit is not None and signal_date is not None and signal_date < previous_exit:
+                    _audit_violation(rows, entry.get("Entry_ID", ""), symbol, "LOW_VOLUME_LOCKOUT_VIOLATION")
+                previous_exit = _persisted_date(entry.get("Scheduled_Exit_Date")) or pd.Timestamp.max
 
     control_rows = []
     for _, control in controls.iterrows():
         control_id = str(control.get("Entry_ID", ""))
         source = all_signal_lookup.get(control_id)
         symbol = str(control.get("Symbol", source.get("Symbol", "") if source is not None else ""))
-        if source is None:
-            _audit_violation(rows, control_id, symbol, "CONTROL_WITHOUT_SIGNAL")
-            continue
-        shock = source.get("Shock_Score", np.nan)
-        ratio = source.get("Volume_Ratio", np.nan)
-        if not _finite(shock) or float(shock) > -2.0:
-            _audit_violation(rows, control_id, symbol, "CONTROL_SHOCK_THRESHOLD_VIOLATION", shock, "<= -2.0")
-        if not _finite(ratio) or float(ratio) < HIGH_VOLUME_MIN:
-            _audit_violation(rows, control_id, symbol, "CONTROL_VOLUME_THRESHOLD_VIOLATION", ratio, ">= 1.5")
+        _audit_control_entry(
+            control,
+            source,
+            feature_frames,
+            membership,
+            sessions,
+            rows,
+            normalized_frames,
+            active_status_by_symbol_date,
+        )
         signal_date = _persisted_date(control.get("Signal_Date"))
-        entry_date = _persisted_date(control.get("Entry_Date"))
-        if signal_date is None or entry_date is None or next_session(signal_date, sessions) != entry_date:
-            _audit_violation(rows, control_id, symbol, "CONTROL_ENTRY_TIMING_MISMATCH")
         expected_exit = next_session(signal_date, sessions, 6) if signal_date is not None else None
-        if expected_exit is not None and _persisted_date(control.get("Exit_Date")) != expected_exit:
-            _audit_violation(rows, control_id, symbol, "CONTROL_EXIT_TIMING_MISMATCH")
         control_rows.append((symbol, signal_date, expected_exit, control_id))
     for symbol in sorted({row[0] for row in control_rows}):
         prior_exit: pd.Timestamp | None = None
@@ -728,12 +1062,21 @@ def overlap_diagnostics(entries: pd.DataFrame, canonical_sessions: pd.DatetimeIn
 
     sessions = _clean_sessions(canonical_sessions)
     intervals: list[tuple[str, int, int]] = []
+    implied_weights: list[float] = []
+    capital_by_session = np.zeros(len(sessions), dtype=float)
     for _, entry in entries.iterrows():
         start = _session_position(_persisted_date(entry.get("Entry_Date")), sessions) if _persisted_date(entry.get("Entry_Date")) is not None else None
         scheduled_exit = _persisted_date(entry.get("Scheduled_Exit_Date"))
         end = _session_position(scheduled_exit, sessions) if scheduled_exit is not None else len(sessions)
         if start is not None and end is not None and end > start:
             intervals.append((str(entry.get("Entry_ID", "")), start, end))
+            entry_open = float(entry["Entry_Open"]) if _finite(entry.get("Entry_Open")) else np.nan
+            initial_risk = float(entry["Initial_Risk"]) if _finite(entry.get("Initial_Risk")) else np.nan
+            risk_fraction = initial_risk / entry_open if _finite(entry_open) and entry_open > 0 and _finite(initial_risk) and initial_risk > 0 else np.nan
+            weight = 0.01 / risk_fraction if _finite(risk_fraction) and risk_fraction > 0 else np.nan
+            if _finite(weight) and weight > 0:
+                implied_weights.append(float(weight))
+                capital_by_session[start:end] += float(weight)
     counts = np.zeros(len(sessions), dtype=int)
     for _, start, end in intervals:
         counts[start:end] += 1
@@ -756,9 +1099,76 @@ def overlap_diagnostics(entries: pd.DataFrame, canonical_sessions: pd.DatetimeIn
                 "Overlapping_Entries": len(overlapping_ids),
                 "Overlap_Percentage": len(overlapping_ids) / len(intervals) if intervals else 0.0,
                 "Same_Day_Entry_Counts": json.dumps({str(key.date()): int(value) for key, value in same_day.items()}),
+                "Median_Implied_Position_Weight": float(np.median(implied_weights)) if implied_weights else np.nan,
+                "Max_Implied_Position_Weight": float(max(implied_weights)) if implied_weights else np.nan,
+                "Max_Simultaneous_Implied_Gross_Capital": float(capital_by_session.max()) if len(capital_by_session) else 0.0,
             }
         ]
     )
+
+
+def sector_diagnostics(entries: pd.DataFrame, mapping: pd.DataFrame) -> pd.DataFrame:
+    """Report mapped sector concentration without assigning unknown sectors."""
+
+    mapping_by_stock: dict[str, str] = {}
+    if {"Stock", "Sector_Key"}.issubset(mapping.columns):
+        for stock, group in mapping.dropna(subset=["Stock", "Sector_Key"]).groupby("Stock", sort=True):
+            sectors = group["Sector_Key"].astype(str).str.strip().loc[lambda values: values.ne("")].unique()
+            if len(sectors) == 1:
+                mapping_by_stock[str(stock)] = str(sectors[0])
+    symbols = entries.get("Symbol", pd.Series(dtype=str)).astype(str)
+    assigned = symbols.map(mapping_by_stock).fillna("UNMAPPED")
+    mapped = assigned.ne("UNMAPPED")
+    rows: list[dict[str, object]] = [
+        {"Metric": "MAPPED_ACCEPTED_ENTRIES", "Sector_Key": "", "Value": int(mapped.sum())},
+        {"Metric": "UNMAPPED_ACCEPTED_ENTRIES", "Sector_Key": "", "Value": int((~mapped).sum())},
+        {
+            "Metric": "MAPPING_COVERAGE_PERCENT",
+            "Sector_Key": "",
+            "Value": float(mapped.mean() * 100.0) if len(assigned) else 0.0,
+        },
+    ]
+    counts = assigned.loc[mapped].value_counts().sort_index()
+    for sector, count in counts.items():
+        rows.append({"Metric": "MAPPED_ENTRY_COUNT", "Sector_Key": str(sector), "Value": int(count)})
+    rows.append(
+        {
+            "Metric": "UNMAPPED_ENTRY_COUNT",
+            "Sector_Key": "UNMAPPED",
+            "Value": int((~mapped).sum()),
+        }
+    )
+    return pd.DataFrame(rows, columns=["Metric", "Sector_Key", "Value"])
+
+
+def regime_diagnostics(setup: pd.DataFrame, regime_daily: pd.DataFrame) -> pd.DataFrame:
+    """Summarize completed low-volume trades by same-day regime label."""
+
+    labels = ("RISK_ON", "MIXED", "RISK_OFF")
+    lookup: dict[pd.Timestamp, str] = {}
+    if {"Date", "Regime"}.issubset(regime_daily.columns):
+        dates = pd.to_datetime(regime_daily["Date"], errors="coerce")
+        for date, regime in zip(dates, regime_daily["Regime"], strict=True):
+            if pd.notna(date) and pd.notna(regime):
+                lookup[pd.Timestamp(date)] = str(regime)
+    signal_dates = pd.to_datetime(setup.get("Signal_Date", pd.Series(dtype="datetime64[ns]")), errors="coerce")
+    joined = setup.copy()
+    joined["Regime"] = signal_dates.map(lookup)
+    rows: list[dict[str, object]] = []
+    for regime in labels:
+        subset = joined.loc[joined["Regime"].eq(regime)]
+        gross = _finite_values(subset.get("Gross_Return", pd.Series(dtype=float)))
+        base_net = _finite_values(subset.get("Base_Net_Return", pd.Series(dtype=float)))
+        rows.append(
+            {
+                "Regime": regime,
+                "Completed_Trades": len(gross),
+                "Gross_Mean_Return": float(gross.mean()) if len(gross) else np.nan,
+                "Base_Net_Mean_Return": float(base_net.mean()) if len(base_net) else np.nan,
+                "Base_Net_Return_PF": safe_profit_factor(pd.Series(base_net)),
+            }
+        )
+    return pd.DataFrame(rows)
 
 
 def _greater_than(value: object, threshold: float) -> bool:
@@ -949,6 +1359,8 @@ def write_evidence_report(
     control: pd.DataFrame,
     bootstrap: pd.DataFrame,
     overlap: pd.DataFrame,
+    sector: pd.DataFrame,
+    regime: pd.DataFrame,
     pit_audit: pd.DataFrame,
     gates: pd.DataFrame,
     status: str,
@@ -1035,6 +1447,18 @@ def write_evidence_report(
                 "",
                 _report_table(overlap),
                 "",
+                "## Sector mapping/concentration diagnostics",
+                "",
+                "Mapped-entry concentration only; unmapped symbols remain UNMAPPED and are excluded from mapped concentration.",
+                "",
+                _report_table(sector),
+                "",
+                "## Regime diagnostics",
+                "",
+                "Regime labels are joined on the exact Signal_Date; diagnostics do not affect eligibility or mandatory gates.",
+                "",
+                _report_table(regime),
+                "",
                 "## Point-in-time and integrity audit",
                 "",
                 f"Persisted audit violation rows: {len(pit_audit)}. Numeric comparisons use np.isclose(rtol=1e-9, atol=1e-12); dates and integers use exact equality.",
@@ -1045,18 +1469,12 @@ def write_evidence_report(
                 "",
                 "## Artifact inventory",
                 "",
-                "The accompanying CSV artifacts contain feature validation, shock cohorts, entries/cancellations, setup/practical/control outcomes, forward diagnostics, validation metrics, temporal/outlier/LOSO/control/bootstrap summaries, overlap diagnostics, PIT audit, and this report.",
+                "The accompanying CSV artifacts contain feature validation, shock cohorts, entries/cancellations, setup/practical/control outcomes, forward diagnostics, validation metrics, temporal/outlier/LOSO/control/bootstrap summaries, overlap/capacity, sector, regime, and PIT diagnostics, validation gates, and this report.",
                 "",
             ]
         ),
         encoding="utf-8",
     )
-
-
-def _read_csv_or_empty(path: Path, parse_dates: list[str] | None = None) -> pd.DataFrame:
-    if not path.exists():
-        return pd.DataFrame()
-    return pd.read_csv(path, parse_dates=parse_dates or [])
 
 
 def _paired_lenses(
@@ -1084,48 +1502,104 @@ def _paired_lenses(
     return setup, practical
 
 
-if __name__ == "__main__":
-    root = Path(__file__).resolve().parents[4]
-    module_dir = Path(__file__).resolve().parent
-    output_dir = module_dir / "output"
-    membership = load_membership(
-        root / "Swing Trading/research/swing/market_breadth/config/nifty500_membership.csv"
+def _merge_audits(*audits: pd.DataFrame) -> pd.DataFrame:
+    """Combine and deduplicate integrity rows from all validation stages."""
+
+    columns = ["Entry_ID", "Symbol", "Violation", "Observed", "Expected"]
+    frames = [audit.loc[:, columns] for audit in audits if audit is not None and not audit.empty]
+    if not frames:
+        return pd.DataFrame(columns=columns)
+    return (
+        pd.concat(frames, ignore_index=True)
+        .drop_duplicates(columns[:3])
+        .sort_values(columns[:3])
+        .reset_index(drop=True)
     )
-    cached = load_runtime_feature_cache(membership)
-    if cached is None:
-        feature_frames, validation = build_feature_frames(membership)
-        save_runtime_feature_cache(membership, feature_frames, validation)
-    else:
-        feature_frames, validation = cached
-    validation.to_csv(output_dir / "r1_data_validation.csv", index=False)
-    candidates = _read_csv_or_empty(output_dir / "r1_shock_candidates.csv", ["Signal_Date"])
-    entries = _read_csv_or_empty(
-        output_dir / "r1_entries.csv", ["Signal_Date", "Entry_Date", "Scheduled_Exit_Date"]
+
+
+def _write_csv_output(
+    frame: pd.DataFrame,
+    path: Path,
+    date_format: str | None = None,
+) -> pd.DataFrame:
+    """Write one output and return a classified write failure, if any."""
+
+    try:
+        frame.to_csv(path, index=False, date_format=date_format)
+    except Exception as exc:  # noqa: BLE001 - final package verification must classify write failures
+        return pd.DataFrame(
+            [
+                {
+                    "Entry_ID": path.name,
+                    "Symbol": "",
+                    "Violation": "OUTPUT_WRITE_FAILURE",
+                    "Observed": str(path.resolve()),
+                    "Expected": f"writable output: {type(exc).__name__}: {exc}",
+                }
+            ]
+        )
+    return pd.DataFrame(columns=["Entry_ID", "Symbol", "Violation", "Observed", "Expected"])
+
+
+def run_analysis(
+    output_dir: Path,
+    feature_frames: dict[str, pd.DataFrame],
+    membership: pd.DataFrame,
+    canonical_sessions: pd.DatetimeIndex,
+    feature_validation: pd.DataFrame | None = None,
+    regime_daily: pd.DataFrame | None = None,
+    sector_mapping: pd.DataFrame | None = None,
+) -> tuple[str, pd.DataFrame]:
+    """Run analysis from persisted evidence and return the final formal status."""
+
+    output_dir.mkdir(parents=True, exist_ok=True)
+    artifacts, artifact_audit = load_required_artifacts(output_dir)
+    validation_artifact = artifacts["r1_data_validation.csv"]
+    validation = validation_artifact if not validation_artifact.empty else (
+        feature_validation if feature_validation is not None else pd.DataFrame()
     )
-    cancellations = _read_csv_or_empty(
-        output_dir / "r1_entry_cancellations.csv", ["Signal_Date", "Next_Session_Date"]
-    )
-    low_signals = _read_csv_or_empty(output_dir / "r1_low_volume_signals.csv", ["Signal_Date"])
-    high_signals = _read_csv_or_empty(output_dir / "r1_high_volume_control_signals.csv", ["Signal_Date"])
-    extra_dates = pd.DatetimeIndex(
-        [
-            max(
-                (pd.Timestamp(frame["Date"].max()) for frame in feature_frames.values() if not frame.empty),
-                default=pd.Timestamp("2026-08-25"),
-            )
+    candidates = artifacts["r1_shock_candidates.csv"]
+    low_signals = artifacts["r1_low_volume_signals.csv"]
+    high_signals = artifacts["r1_high_volume_control_signals.csv"]
+    entries = artifacts["r1_entries.csv"]
+    cancellations = artifacts["r1_entry_cancellations.csv"]
+    sessions = _clean_sessions(canonical_sessions)
+    regime_daily = regime_daily if regime_daily is not None else pd.DataFrame(columns=["Date", "Regime"])
+    sector_mapping = sector_mapping if sector_mapping is not None else pd.DataFrame(columns=["Stock", "Sector_Key"])
+
+    setup, practical = _paired_lenses(entries, feature_frames, sessions)
+    setup = setup if not setup.empty else pd.DataFrame(
+        columns=[
+            "Entry_ID", "Symbol", "Signal_Date", "Entry_Date", "Entry_Open", "Scheduled_Exit_Date",
+            "Exit_Date", "Exit_Price", "Exit_Reason", "Holding_Sessions", "Gross_Return", "Gross_R",
+            "Base_Net_Return", "Stress_Net_Return", "Severe_Net_Return",
         ]
     )
-    sessions = load_canonical_market_sessions(
-        root / "Swing Trading/nifty500_regime_daily.csv", extra_dates
+    practical = practical if not practical.empty else pd.DataFrame(
+        columns=[
+            "Entry_ID", "Symbol", "Signal_Date", "Entry_Date", "Entry_Open", "Structural_Stop",
+            "Initial_Risk", "Scheduled_Exit_Date", "Exit_Date", "Exit_Price", "Exit_Reason",
+            "Holding_Sessions", "Gross_Return", "Gross_R", "Base_Net_Return", "Stress_Net_Return",
+            "Severe_Net_Return", "Base_Net_R", "Stress_Net_R", "Severe_Net_R",
+        ]
     )
-    setup, practical = _paired_lenses(entries, feature_frames, sessions)
     control_entries = build_control_entries(high_signals, feature_frames, sessions)
-    control_rows = []
-    for _, control in control_entries.iterrows():
-        result = simulate_control_outcome(control, feature_frames[str(control["Symbol"])], sessions)
+    control_rows: list[dict[str, object]] = []
+    for _, control_entry in control_entries.iterrows():
+        prices = feature_frames.get(str(control_entry["Symbol"]))
+        if prices is None:
+            continue
+        result = simulate_control_outcome(control_entry, prices, sessions)
         if result is not None:
             control_rows.append(result)
-    controls = pd.DataFrame(control_rows)
+    controls = pd.DataFrame(
+        control_rows,
+        columns=[
+            "Entry_ID", "Symbol", "Signal_Date", "Entry_Date", "Entry_Open", "Exit_Date", "Exit_Price",
+            "Holding_Sessions", "Gross_Return", "Exit_Reason",
+        ],
+    )
+
     audit_count, pit_audit = count_integrity_violations(
         pd.concat([low_signals, high_signals], ignore_index=True),
         entries,
@@ -1137,6 +1611,9 @@ if __name__ == "__main__":
         membership,
         sessions,
     )
+    pit_audit = _merge_audits(pit_audit, artifact_audit)
+    audit_count = len(pit_audit)
+
     forward_rows: list[dict[str, object]] = []
     for _, entry in entries.iterrows():
         prices = feature_frames.get(str(entry["Symbol"]))
@@ -1161,16 +1638,42 @@ if __name__ == "__main__":
                         "Forward_Return": value,
                     }
                 )
-    forward = pd.DataFrame(forward_rows)
+    forward = pd.DataFrame(
+        forward_rows,
+        columns=["Entry_ID", "Symbol", "Signal_Date", "Entry_Date", "Holding_Sessions", "Forward_Return"],
+    )
     setup_metrics = summarize_lens(setup, "setup")
     practical_metrics = summarize_lens(practical, "practical")
     summary = pd.DataFrame([setup_metrics, practical_metrics])
     temporal = temporal_summary(setup)
     outlier = outlier_robustness(setup)
     loso = leave_one_symbol_out(setup)
+    if loso.empty:
+        loso = pd.DataFrame(columns=["Omitted_Symbol", "Remaining_Trades", "Base_Net_Mean_Return", "Base_Net_Return_PF"])
     control = control_comparison(setup, controls)
     bootstrap = bootstrap_summary(setup, practical, controls)
     overlap = overlap_diagnostics(entries, sessions)
+    sector = sector_diagnostics(entries, sector_mapping)
+    regime = regime_diagnostics(setup, regime_daily)
+
+    output_errors = _merge_audits(
+        _write_csv_output(validation, output_dir / "r1_data_validation.csv"),
+        _write_csv_output(setup, output_dir / "r1_setup_quality_trades.csv", "%Y-%m-%d"),
+        _write_csv_output(practical, output_dir / "r1_practical_trades.csv", "%Y-%m-%d"),
+        _write_csv_output(controls, output_dir / "r1_control_outcomes.csv", "%Y-%m-%d"),
+        _write_csv_output(forward, output_dir / "r1_forward_diagnostics.csv", "%Y-%m-%d"),
+        _write_csv_output(summary, output_dir / "r1_validation_summary.csv"),
+        _write_csv_output(temporal, output_dir / "r1_temporal_summary.csv", "%Y-%m-%d"),
+        _write_csv_output(outlier, output_dir / "r1_outlier_robustness.csv"),
+        _write_csv_output(loso, output_dir / "r1_leave_one_symbol_out.csv"),
+        _write_csv_output(control, output_dir / "r1_control_comparison.csv"),
+        _write_csv_output(bootstrap, output_dir / "r1_bootstrap_summary.csv"),
+        _write_csv_output(overlap, output_dir / "r1_overlap_diagnostic.csv"),
+        _write_csv_output(sector, output_dir / "r1_sector_diagnostic.csv"),
+        _write_csv_output(regime, output_dir / "r1_regime_diagnostic.csv"),
+    )
+    pit_audit = _merge_audits(pit_audit, output_errors)
+    audit_count = len(pit_audit)
     status, gates = evaluate_gates(
         {**setup_metrics, **practical_metrics},
         temporal,
@@ -1180,50 +1683,121 @@ if __name__ == "__main__":
         len(setup),
         audit_count,
     )
-    setup.to_csv(output_dir / "r1_setup_quality_trades.csv", index=False, date_format="%Y-%m-%d")
-    practical.to_csv(output_dir / "r1_practical_trades.csv", index=False, date_format="%Y-%m-%d")
-    controls.to_csv(output_dir / "r1_control_outcomes.csv", index=False, date_format="%Y-%m-%d")
-    forward.to_csv(
-        output_dir / "r1_forward_diagnostics.csv", index=False, date_format="%Y-%m-%d"
+
+    def write_report() -> pd.DataFrame:
+        try:
+            write_evidence_report(
+                output_dir / "research_report.md",
+                validation,
+                candidates,
+                low_signals,
+                high_signals,
+                entries,
+                cancellations,
+                setup,
+                practical,
+                controls,
+                forward,
+                summary,
+                temporal,
+                outlier,
+                loso,
+                control,
+                bootstrap,
+                overlap,
+                sector,
+                regime,
+                pit_audit,
+                gates,
+                status,
+            )
+        except Exception as exc:  # noqa: BLE001 - classify missing final report as invalid
+            return pd.DataFrame(
+                [
+                    {
+                        "Entry_ID": "research_report.md",
+                        "Symbol": "",
+                        "Violation": "OUTPUT_WRITE_FAILURE",
+                        "Observed": str((output_dir / "research_report.md").resolve()),
+                        "Expected": f"writable report: {type(exc).__name__}: {exc}",
+                    }
+                ]
+            )
+        return pd.DataFrame(columns=["Entry_ID", "Symbol", "Violation", "Observed", "Expected"])
+
+    output_errors = _merge_audits(
+        _write_csv_output(pit_audit, output_dir / "r1_pit_audit.csv"),
+        _write_csv_output(gates, output_dir / "r1_validation_gates.csv"),
+        write_report(),
     )
-    summary.to_csv(
-        output_dir / "r1_validation_summary.csv", index=False
+    if not output_errors.empty:
+        pit_audit = _merge_audits(pit_audit, output_errors)
+        audit_count = len(pit_audit)
+        status, gates = evaluate_gates(
+            {**setup_metrics, **practical_metrics},
+            temporal,
+            outlier,
+            loso,
+            control,
+            len(setup),
+            audit_count,
+        )
+        _write_csv_output(pit_audit, output_dir / "r1_pit_audit.csv")
+        _write_csv_output(gates, output_dir / "r1_validation_gates.csv")
+        write_report()
+
+    final_audit = _verify_final_evidence_package(output_dir)
+    if not final_audit.empty:
+        pit_audit = _merge_audits(pit_audit, final_audit)
+        audit_count = len(pit_audit)
+        status, gates = evaluate_gates(
+            {**setup_metrics, **practical_metrics},
+            temporal,
+            outlier,
+            loso,
+            control,
+            len(setup),
+            audit_count,
+        )
+        _write_csv_output(pit_audit, output_dir / "r1_pit_audit.csv")
+        _write_csv_output(gates, output_dir / "r1_validation_gates.csv")
+        write_report()
+    return status, gates
+
+
+if __name__ == "__main__":
+    root = Path(__file__).resolve().parents[4]
+    module_dir = Path(__file__).resolve().parent
+    output_dir = module_dir / "output"
+    membership = load_membership(
+        root / "Swing Trading/research/swing/market_breadth/config/nifty500_membership.csv"
     )
-    temporal.to_csv(
-        output_dir / "r1_temporal_summary.csv", index=False, date_format="%Y-%m-%d"
+    cached = load_runtime_feature_cache(membership)
+    if cached is None:
+        feature_frames, validation = build_feature_frames(membership)
+        save_runtime_feature_cache(membership, feature_frames, validation)
+    else:
+        feature_frames, validation = cached
+    regime_path = root / "Swing Trading/nifty500_regime_daily.csv"
+    regime_daily = pd.read_csv(regime_path)
+    extra_dates = pd.DatetimeIndex(
+        [
+            max(
+                (pd.Timestamp(frame["Date"].max()) for frame in feature_frames.values() if not frame.empty),
+                default=pd.Timestamp("2026-08-25"),
+            )
+        ]
     )
-    outlier.to_csv(output_dir / "r1_outlier_robustness.csv", index=False)
-    loso.to_csv(output_dir / "r1_leave_one_symbol_out.csv", index=False)
-    control.to_csv(output_dir / "r1_control_comparison.csv", index=False)
-    bootstrap.to_csv(output_dir / "r1_bootstrap_summary.csv", index=False)
-    pit_audit.to_csv(output_dir / "r1_pit_audit.csv", index=False)
-    overlap.to_csv(output_dir / "r1_overlap_diagnostic.csv", index=False)
-    gates.to_csv(output_dir / "r1_validation_gates.csv", index=False)
-    write_evidence_report(
-        output_dir / "research_report.md",
-        validation,
-        candidates,
-        low_signals,
-        high_signals,
-        entries,
-        cancellations,
-        setup,
-        practical,
-        controls,
-        forward,
-        summary,
-        temporal,
-        outlier,
-        loso,
-        control,
-        bootstrap,
-        overlap,
-        pit_audit,
-        gates,
-        status,
+    sessions = load_canonical_market_sessions(regime_path, extra_dates)
+    sector_path = root / "Swing Trading/research/swing/sector_leadership/stock_sector_map.csv"
+    sector_mapping = pd.read_csv(sector_path) if sector_path.is_file() else pd.DataFrame()
+    status, gates = run_analysis(
+        output_dir,
+        feature_frames,
+        membership,
+        sessions,
+        feature_validation=validation,
+        regime_daily=regime_daily,
+        sector_mapping=sector_mapping,
     )
-    print(
-        f"paired_setup={len(setup)} paired_practical={len(practical)} "
-        f"control_outcomes={len(controls)} forward_rows={len(forward_rows)} "
-        f"integrity_violations={audit_count} status={status}"
-    )
+    print(f"status={status} gate_rows={len(gates)}")

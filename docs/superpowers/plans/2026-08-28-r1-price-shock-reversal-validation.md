@@ -2,9 +2,9 @@
 
 > **For agentic workers:** REQUIRED SUB-SKILL: Use `superpowers:executing-plans` to implement this plan task-by-task. **Inline execution only. Never use or suggest `superpowers:subagent-driven-development`.** Steps use checkbox (`- [ ]`) syntax for tracking.
 
-**Goal:** Implement and historically validate the frozen R1 short-term low-volume price-shock reversal hypothesis with point-in-time Nifty 500 membership, realistic next-open execution, fixed five-session outcomes, a structural-stop practical lens, a high-volume falsification cohort, friction/robustness gates, and artifact-derived research integrity checks.
+**Goal:** Implement and historically validate the frozen R1 low-volume price-shock reversal hypothesis with point-in-time Nifty 500 membership, realistic next-open execution, fixed five-session outcomes, a structural-stop practical lens, a high-volume falsification cohort, friction/robustness gates, and artifact-derived integrity checks.
 
-**Architecture:** Add a self-contained `r1_price_shock_reversal` research module following the repository's established three-stage pattern: feature construction -> signal/entry construction -> outcome/validation analysis. Reuse the committed Nifty 500 membership manifest and adjusted Yahoo OHLCV conventions, but keep R1 logic independent from failed V3 strategy internals so a future change to V3 cannot alter R1 semantics. Generated artifacts are evidence-only; no R1 threshold or filter may be modified after outcomes are observed.
+**Architecture:** Add a self-contained `r1_price_shock_reversal` research module using the repository's established three-stage pattern: feature construction, signal/entry construction, then outcome/validation analysis. Reuse the committed point-in-time membership manifest and adjusted Yahoo OHLCV convention, but keep R1 logic independent from V3 implementation code so future changes to failed momentum research cannot alter R1 semantics. Generated outputs are evidence only; no threshold/filter may change after outcomes are observed.
 
 **Tech Stack:** Python 3, pandas, numpy, yfinance, pytest.
 
@@ -14,34 +14,33 @@
 
 ## Global Constraints
 
-- Signal window is exactly `2023-08-01` through `2026-08-25` inclusive.
-- Use point-in-time Nifty 500 membership from `Swing Trading/research/swing/market_breadth/config/nifty500_membership.csv`.
-- Use Yahoo adjusted OHLCV consistently with `auto_adjust=True`; never mix adjusted/unadjusted fields.
-- Primary liquidity gate is prior-20-session median traded value `>= 100_000_000` rupees; the signal day is excluded from the baseline.
+- Signal window: `2023-08-01` through `2026-08-25` inclusive.
+- PIT membership source: `Swing Trading/research/swing/market_breadth/config/nifty500_membership.csv`.
+- Adjusted daily OHLCV only: Yahoo `auto_adjust=True`.
+- Prior-20 median traded value must be at least `100_000_000` rupees, excluding the signal day.
 - `Return[T] = Close[T] / Close[T-1] - 1`.
-- `Sigma20[T]` is the **sample** standard deviation (`ddof=1`) of the 20 prior daily returns `T-20 ... T-1`; the shock-day return is excluded.
-- `Shock_Score[T] = Return[T] / Sigma20[T]` and primary large-shock threshold is exactly `<= -2.0`.
-- Low-volume R1 cohort requires `Volume_Ratio <= 1.0`, where the denominator is prior-20 median volume excluding the signal day.
-- High-volume control cohort requires `Volume_Ratio >= 1.5`; it is not a practical-stop trade cohort.
-- Middle-volume shocks `1.0 < Volume_Ratio < 1.5` are diagnostic only.
-- Structural stop is exactly `Shock_Day_Low - 0.25 * ATR14_signal`, with Wilder ATR14.
-- Each qualified low-volume signal gets one immediate-next-canonical-session Open opportunity. Cancel if next session/bar is unavailable, if same-symbol lifecycle lockout applies, or if `Entry_Open <= Structural_Stop`.
-- No upside-gap cancellation/chase rule.
-- Primary setup-quality horizon is `T+1 Open` to `T+6 Open` (five complete holding sessions).
-- Practical lens uses the same accepted Entry_ID set and the fixed structural stop; no profit target, trailing stop, breakeven move, or SMA exit.
-- Same-symbol low-volume lockout lasts until the original signal's scheduled `T+6 Open`, even if the practical trade stops early. The high-volume control has its own independent same-symbol five-session lockout.
-- Do not suppress cross-stock overlap; portfolio-capacity/ranking is out of scope.
-- Friction rates are frozen at 0.004 base, 0.006 stress, 0.008 severe of entry value.
-- Market regime, RS, moving-average state, sector, and other context are diagnostic only and may not gate R1.
-- Bootstrap reporting uses 10,000 resamples, RNG seed `20260828`, 95% confidence intervals.
-- Any PIT/integrity violation makes the run `INVALID_RESEARCH_RUN`; do not interpret profitability from an invalid run.
-- No outcome-driven tuning or rescue. A failed gate means R1 fails as specified.
-- Do not modify T1, V2, V3 logic or historical outputs.
-- Do not add notebooks, dashboards, CI infrastructure, live trading code, broker integration, or unrelated refactors.
+- `Sigma20[T]` is the sample standard deviation (`ddof=1`) of exactly the 20 returns before `T`.
+- `Shock_Score[T] = Return[T] / Sigma20[T]` and must be `<= -2.0`.
+- Low-volume R1 cohort: `Volume_Ratio <= 1.0`, using prior-20 median volume excluding `T`.
+- High-volume control: `Volume_Ratio >= 1.5` with the same shock/PIT/liquidity rules.
+- Middle-volume shocks are diagnostic only.
+- Wilder ATR14 is frozen; structural stop is `Shock_Day_Low - 0.25 * ATR14_signal`.
+- Entry is the immediate next canonical-session Open.
+- Low-volume cancellation reasons are `SAME_SYMBOL_LOCKOUT`, `MISSING_NEXT_SESSION`, `MISSING_NEXT_SESSION_BAR`, and `OPEN_BELOW_STRUCTURAL_STOP`.
+- No positive-gap/chase cancellation.
+- Setup-quality horizon is `T+1 Open` to `T+6 Open`, five complete holding sessions.
+- Practical lens uses the same accepted Entry_ID set and the fixed structural stop. No profit target, SMA exit, breakeven move, or trailing stop.
+- Same-symbol low-volume lockout remains active until scheduled `T+6 Open` even if the practical trade stops early.
+- High-volume controls have a separate same-symbol five-session lockout and no structural-stop cancellation/exit.
+- Cross-stock overlaps are retained; portfolio-capacity/ranking is out of scope.
+- Friction rates: base `0.004`, stress `0.006`, severe `0.008` of entry value.
+- Bootstrap: 10,000 resamples, RNG seed `20260828`, 95% percentile CI.
+- Diagnostics cannot become R1 filters.
+- Any mandatory integrity failure produces `INVALID_RESEARCH_RUN` and blocks profitability interpretation.
+- Do not modify T1/V2/V3 code or outputs.
+- Do not add notebooks, dashboards, CI, broker integration, live trading, or unrelated refactors.
 
 ## Locked File Structure
-
-Create exactly this module shape unless an existing filename collision requires an equivalent name:
 
 ```text
 Swing Trading/research/swing/r1_price_shock_reversal/
@@ -80,7 +79,7 @@ Do not commit raw Yahoo downloads or all-symbol feature caches.
 
 ---
 
-### Task 1: Build adjusted price features and point-in-time membership
+### Task 1: Build adjusted R1 features and PIT membership
 
 **Files:**
 - Create: `Swing Trading/research/swing/r1_price_shock_reversal/build_r1_features.py`
@@ -90,65 +89,54 @@ Do not commit raw Yahoo downloads or all-symbol feature caches.
 - Reference only: `Swing Trading/research/swing/strategy_v3_shallow_pullback/build_v3_features.py`
 
 **Interfaces:**
-- Produces `load_membership(path: Path) -> pd.DataFrame`.
-- Produces `active_members_on(membership: pd.DataFrame, date: pd.Timestamp) -> pd.DataFrame`.
-- Produces `download_adjusted_ohlcv(ticker: str, start: str, end_exclusive: str) -> pd.DataFrame`.
-- Produces `wilder_atr(true_range: pd.Series, period: int = 14) -> pd.Series`.
-- Produces `compute_r1_features(frame: pd.DataFrame) -> pd.DataFrame`.
-- Produces `build_feature_frames(membership: pd.DataFrame) -> tuple[dict[str, pd.DataFrame], pd.DataFrame]` where the second value is the per-symbol data audit.
+- `load_membership(path: Path) -> pd.DataFrame`
+- `active_members_on(membership: pd.DataFrame, date: pd.Timestamp) -> pd.DataFrame`
+- `download_adjusted_ohlcv(ticker: str, start: str, end_exclusive: str) -> pd.DataFrame`
+- `wilder_atr(true_range: pd.Series, period: int = 14) -> pd.Series`
+- `compute_r1_features(frame: pd.DataFrame) -> pd.DataFrame`
+- `build_feature_frames(membership: pd.DataFrame) -> tuple[dict[str, pd.DataFrame], pd.DataFrame]`
 
-- [ ] **Step 1: Write failing tests for the frozen prior-window semantics**
+- [ ] **Step 1: Write failing prior-window tests**
 
-Add deterministic tests that prove the signal day is excluded from all three prior-20 baselines and that `Sigma20` uses sample standard deviation:
+Add this deterministic test skeleton and define all imports in the test file:
 
 ```python
-def test_compute_r1_features_excludes_signal_day_from_prior_windows():
-    close = pd.Series([100.0 + i for i in range(30)])
+def test_prior_20_windows_exclude_signal_day():
+    dates = pd.bdate_range("2024-01-01", periods=30)
+    close = pd.Series([100, 102, 101, 103, 102, 104, 103, 105, 104, 106,
+                       105, 107, 106, 108, 107, 109, 108, 110, 109, 111,
+                       110, 112, 111, 113, 112, 114, 113, 115, 114, 90], dtype=float)
+    volume = pd.Series([100.0] * 29 + [10_000.0])
     frame = pd.DataFrame({
-        "Date": pd.bdate_range("2024-01-01", periods=30),
+        "Date": dates,
         "Open": close,
         "High": close + 1.0,
         "Low": close - 1.0,
         "Close": close,
-        "Volume": [100.0] * 29 + [10_000.0],
+        "Volume": volume,
     })
+
     result = compute_r1_features(frame)
     row = result.iloc[-1]
-
     returns = close.pct_change()
-    expected_sigma = returns.iloc[-21:-1].std(ddof=1)
-    expected_volume = pd.Series([100.0] * 20).median()
-    traded_value = close * pd.Series([100.0] * 29 + [10_000.0])
-    expected_traded = traded_value.iloc[-21:-1].median()
 
-    assert row["Sigma20"] == pytest.approx(expected_sigma)
-    assert row["Prior20_Median_Volume"] == pytest.approx(expected_volume)
-    assert row["Prior20_Median_Traded_Value"] == pytest.approx(expected_traded)
+    assert row["Sigma20"] == pytest.approx(returns.iloc[-21:-1].std(ddof=1))
+    assert row["Prior20_Median_Volume"] == pytest.approx(volume.iloc[-21:-1].median())
+    traded = close * volume
+    assert row["Prior20_Median_Traded_Value"] == pytest.approx(traded.iloc[-21:-1].median())
+    assert row["Return"] == pytest.approx(close.iloc[-1] / close.iloc[-2] - 1.0)
+    assert row["Shock_Score"] == pytest.approx(row["Return"] / row["Sigma20"])
 ```
 
-Also add a shock-score test:
-
-```python
-def test_shock_score_uses_current_return_over_prior_sigma():
-    frame = make_feature_frame_with_nonzero_prior_return_variance()
-    result = compute_r1_features(frame)
-    row = result.iloc[-1]
-    expected_return = row["Close"] / result.iloc[-2]["Close"] - 1.0
-    assert row["Return"] == pytest.approx(expected_return)
-    assert row["Shock_Score"] == pytest.approx(expected_return / row["Sigma20"])
-```
-
-- [ ] **Step 2: Run focused tests and verify they fail before implementation**
+- [ ] **Step 2: Run the test and verify RED**
 
 ```bash
-python -m pytest -q "Swing Trading/research/swing/r1_price_shock_reversal/tests/test_r1_features.py" -k "prior_windows or shock_score"
+python -m pytest -q "Swing Trading/research/swing/r1_price_shock_reversal/tests/test_r1_features.py::test_prior_20_windows_exclude_signal_day"
 ```
 
-Expected: FAIL because `compute_r1_features` does not yet exist.
+Expected: FAIL before `compute_r1_features` exists.
 
-- [ ] **Step 3: Implement the frozen feature calculations**
-
-`compute_r1_features()` must implement these expressions exactly:
+- [ ] **Step 3: Implement the frozen feature formulas**
 
 ```python
 result["Return"] = result["Close"].pct_change()
@@ -162,27 +150,26 @@ result["Volume_Ratio"] = result["Volume"] / result["Prior20_Median_Volume"]
 result["Shock_Score"] = result["Return"] / result["Sigma20"]
 ```
 
-Compute Wilder ATR14 from adjusted High/Low/Close exactly as the spec requires. Add diagnostic-only fields in the same function so later analysis does not need to mutate primary eligibility logic:
+Compute True Range and Wilder ATR14 using:
 
 ```python
-result["SMA20"] = result["Close"].rolling(20, min_periods=20).mean()
-result["SMA50"] = result["Close"].rolling(50, min_periods=50).mean()
-result["SMA200"] = result["Close"].rolling(200, min_periods=200).mean()
-result["Return21"] = result["Close"] / result["Close"].shift(21) - 1.0
-result["Return63"] = result["Close"] / result["Close"].shift(63) - 1.0
-result["Return126"] = result["Close"] / result["Close"].shift(126) - 1.0
-result["Prior252_High"] = result["Close"].shift(1).rolling(252, min_periods=252).max()
-result["Distance_From_Prior252_High"] = result["Close"] / result["Prior252_High"] - 1.0
+previous_close = result["Close"].shift(1)
+true_range = pd.concat([
+    result["High"] - result["Low"],
+    (result["High"] - previous_close).abs(),
+    (result["Low"] - previous_close).abs(),
+], axis=1).max(axis=1)
+result["ATR14"] = wilder_atr(true_range, 14)
 ```
 
-Do **not** use any diagnostic field in primary qualification.
+Add diagnostic-only `SMA20`, `SMA50`, `SMA200`, `Return21`, `Return63`, `Return126`, and prior-252-session high/distance fields. Never read those fields in primary qualification.
 
-- [ ] **Step 4: Add PIT-membership and adjusted-download tests**
+- [ ] **Step 4: Add membership/download tests**
 
-Copy/adapt the already-proven manifest validation/download conventions, but keep the code local to R1. Tests must cover inclusive membership boundaries and reject duplicate/invalid dates:
+Use an inclusive interval test:
 
 ```python
-def test_active_members_on_uses_inclusive_manifest_intervals():
+def test_active_members_on_uses_inclusive_boundaries():
     membership = pd.DataFrame({
         "Symbol": ["AAA"],
         "Member_From": [pd.Timestamp("2024-01-02")],
@@ -194,68 +181,49 @@ def test_active_members_on_uses_inclusive_manifest_intervals():
     assert active_members_on(membership, pd.Timestamp("2024-01-05"))["Symbol"].tolist() == ["AAA"]
 ```
 
-- [ ] **Step 5: Run all feature tests**
+Also test rejection of invalid/duplicate Yahoo dates.
 
-```bash
-python -m pytest -q "Swing Trading/research/swing/r1_price_shock_reversal/tests/test_r1_features.py"
-```
+- [ ] **Step 5: Implement feature-frame build and audit**
 
-Expected: zero failures.
-
-- [ ] **Step 6: Implement `build_feature_frames()` and data-quality artifact**
-
-Download every distinct `Downloadable=True` Yahoo ticker represented in the PIT manifest using at least:
+Use:
 
 ```text
 DOWNLOAD_START = 2022-01-01
 DOWNLOAD_END_EXCLUSIVE = 2026-08-27
 ```
 
-This gives enough warmup for ATR, 20-session baselines, SMA200 and diagnostic 252-session context while preserving the frozen signal window.
-
-For each symbol, add `Point_In_Time_Member` by testing each row date against its manifest interval(s). Write `r1_data_validation.csv` with at minimum:
+For each downloadable PIT symbol, download adjusted OHLCV, compute features, and persist `Point_In_Time_Member` for each date. Write `r1_data_validation.csv` with:
 
 ```text
-Symbol
-Yahoo_Ticker
-Raw_Rows
-Earliest_Date
-Latest_Date
-Duplicate_Dates
-Missing_Open
-Missing_High
-Missing_Low
-Missing_Close
-Missing_Volume
-First_Valid_Sigma20_Date
-First_Valid_ATR14_Date
-Usable
-Download_Error
+Symbol, Yahoo_Ticker, Raw_Rows, Earliest_Date, Latest_Date,
+Duplicate_Dates, Missing_Open, Missing_High, Missing_Low,
+Missing_Close, Missing_Volume, First_Valid_Sigma20_Date,
+First_Valid_ATR14_Date, Usable, Download_Error
 ```
 
-A failed ticker remains in the audit; do not silently remove it.
+Download failures remain visible in the audit.
 
-- [ ] **Step 7: Run the feature stage once from the repository root**
+- [ ] **Step 6: Run Task 1 verification**
 
 ```bash
+python -m pytest -q "Swing Trading/research/swing/r1_price_shock_reversal/tests/test_r1_features.py"
 python "Swing Trading/research/swing/r1_price_shock_reversal/build_r1_features.py"
 ```
 
-Expected: script exits 0 and writes `output/r1_data_validation.csv`.
+Expected: zero test failures; feature stage exits 0.
 
-- [ ] **Step 8: Commit Task 1**
+- [ ] **Step 7: Commit Task 1**
 
 ```bash
-git add \
-  "Swing Trading/research/swing/r1_price_shock_reversal/build_r1_features.py" \
-  "Swing Trading/research/swing/r1_price_shock_reversal/tests/test_r1_features.py" \
-  "Swing Trading/research/swing/r1_price_shock_reversal/output/r1_data_validation.csv"
+git add "Swing Trading/research/swing/r1_price_shock_reversal/build_r1_features.py" \
+        "Swing Trading/research/swing/r1_price_shock_reversal/tests/test_r1_features.py" \
+        "Swing Trading/research/swing/r1_price_shock_reversal/output/r1_data_validation.csv"
 git commit -m "research: build R1 price-shock features"
 ```
 
 ---
 
-### Task 2: Generate shock cohorts, qualified signals, entries, and lockouts
+### Task 2: Generate low/middle/high shock cohorts and one-shot entries
 
 **Files:**
 - Create: `Swing Trading/research/swing/r1_price_shock_reversal/generate_r1_signals.py`
@@ -267,190 +235,142 @@ git commit -m "research: build R1 price-shock features"
 - Generate: `output/r1_entry_cancellations.csv`
 
 **Interfaces:**
-- Consumes feature frames from `build_feature_frames()`.
-- Produces `classify_shock_row(row: pd.Series) -> str` returning exactly `LOW_VOLUME`, `MIDDLE_VOLUME`, `HIGH_VOLUME`, or `NOT_ELIGIBLE_SHOCK`.
-- Produces `qualified_low_volume_signal(row: pd.Series) -> tuple[bool, str]`.
-- Produces `next_session(date: pd.Timestamp, sessions: pd.DatetimeIndex, steps: int = 1) -> pd.Timestamp | None`.
-- Produces `build_low_volume_entries(signals, feature_frames, canonical_sessions) -> tuple[pd.DataFrame, pd.DataFrame]`.
-- Produces `build_control_signals_and_entries(...) -> tuple[pd.DataFrame, pd.DataFrame]` for the raw high-volume control.
+- `classify_shock_row(row: pd.Series) -> str`
+- `qualify_low_volume_signal(row: pd.Series) -> tuple[bool, str]`
+- `next_session(date: pd.Timestamp, sessions: pd.DatetimeIndex, steps: int = 1) -> pd.Timestamp | None`
+- `build_low_volume_entries(signals: pd.DataFrame, feature_frames: dict[str, pd.DataFrame], canonical_sessions: pd.DatetimeIndex) -> tuple[pd.DataFrame, pd.DataFrame]`
+- `build_control_entries(signals: pd.DataFrame, feature_frames: dict[str, pd.DataFrame], canonical_sessions: pd.DatetimeIndex) -> pd.DataFrame`
 
-- [ ] **Step 1: Write threshold-boundary tests before implementation**
+- [ ] **Step 1: Write threshold-boundary tests**
 
 ```python
-def test_volume_boundaries_are_frozen():
-    low = pd.Series({"Shock_Score": -2.0, "Volume_Ratio": 1.0})
-    middle = pd.Series({"Shock_Score": -2.0, "Volume_Ratio": 1.0001})
-    high = pd.Series({"Shock_Score": -2.0, "Volume_Ratio": 1.5})
-    assert classify_shock_row(low) == "LOW_VOLUME"
-    assert classify_shock_row(middle) == "MIDDLE_VOLUME"
-    assert classify_shock_row(high) == "HIGH_VOLUME"
+def test_shock_and_volume_boundaries_are_exact():
+    assert classify_shock_row(pd.Series({"Shock_Score": -2.0, "Volume_Ratio": 1.0})) == "LOW_VOLUME"
+    assert classify_shock_row(pd.Series({"Shock_Score": -2.0, "Volume_Ratio": 1.0001})) == "MIDDLE_VOLUME"
+    assert classify_shock_row(pd.Series({"Shock_Score": -2.0, "Volume_Ratio": 1.5})) == "HIGH_VOLUME"
+    assert classify_shock_row(pd.Series({"Shock_Score": -1.9999, "Volume_Ratio": 1.0})) == "NOT_ELIGIBLE_SHOCK"
 ```
 
-Add an exact shock threshold test (`-2.0` qualifies, `-1.9999` does not).
-
-- [ ] **Step 2: Run the boundary tests and verify RED**
+- [ ] **Step 2: Run RED boundary test**
 
 ```bash
-python -m pytest -q "Swing Trading/research/swing/r1_price_shock_reversal/tests/test_r1_signals.py" -k "boundary or threshold"
+python -m pytest -q "Swing Trading/research/swing/r1_price_shock_reversal/tests/test_r1_signals.py::test_shock_and_volume_boundaries_are_exact"
 ```
 
 Expected: FAIL before implementation.
 
-- [ ] **Step 3: Implement candidate and low-volume qualification rules**
+- [ ] **Step 3: Implement candidate schema and low-volume qualification**
 
-`r1_shock_candidates.csv` must retain all finite `Shock_Score <= -2.0` sessions in the signal window and include numeric evidence:
+Retain every finite shock `Shock_Score <= -2.0` in `r1_shock_candidates.csv` with:
 
 ```text
-Signal_ID
-Symbol
-Signal_Date
-Open
-High
-Low
-Close
-Volume
-Return
-Sigma20
-Shock_Score
-Prior20_Median_Volume
-Volume_Ratio
-Prior20_Median_Traded_Value
-ATR14_Signal
-Point_In_Time_Member
-Cohort
-Data_Eligible
-Liquidity_OK
+Signal_ID, Symbol, Signal_Date, Open, High, Low, Close, Volume,
+Return, Sigma20, Shock_Score, Prior20_Median_Volume, Volume_Ratio,
+Prior20_Median_Traded_Value, ATR14_Signal, Point_In_Time_Member,
+Cohort, Data_Eligible, Liquidity_OK
 ```
 
-Low-volume qualification must require only:
+Low-volume qualification requires only the frozen signal window, active PIT membership, valid `Sigma20 > 0`, `Shock_Score <= -2.0`, valid prior-volume denominator, `Volume_Ratio <= 1.0`, prior median traded value at least ₹10 crore, and valid `ATR14_Signal > 0` so the approved structural stop can be calculated.
+
+- [ ] **Step 4: Write concrete cancellation/lockout tests**
+
+Use this full lockout test structure:
 
 ```python
-SIGNAL_START <= Signal_Date <= SIGNAL_END
-Point_In_Time_Member is True
-Sigma20 is finite and > 0
-Shock_Score <= -2.0
-Prior20_Median_Volume is finite and > 0
-Volume_Ratio <= 1.0
-Prior20_Median_Traded_Value >= 100_000_000.0
-ATR14_Signal is finite and > 0
+def test_second_signal_before_unlock_is_cancelled_as_lockout():
+    sessions = pd.bdate_range("2024-01-01", periods=12)
+    signals = pd.DataFrame([
+        {"Signal_ID": "AAA-1", "Symbol": "AAA", "Signal_Date": sessions[0],
+         "Low": 95.0, "ATR14_Signal": 4.0},
+        {"Signal_ID": "AAA-2", "Symbol": "AAA", "Signal_Date": sessions[3],
+         "Low": 96.0, "ATR14_Signal": 4.0},
+    ])
+    prices = pd.DataFrame({"Date": sessions, "Open": [100.0] * 12})
+    entries, cancellations = build_low_volume_entries(
+        signals,
+        {"AAA": prices},
+        pd.DatetimeIndex(sessions),
+    )
+    assert entries["Signal_ID"].tolist() == ["AAA-1"]
+    row = cancellations.loc[cancellations["Signal_ID"].eq("AAA-2")].iloc[0]
+    assert row["Cancellation_Reason"] == "SAME_SYMBOL_LOCKOUT"
 ```
 
-`ATR14` is required because the approved practical stop cannot be constructed without it; do not replace a missing ATR with another stop.
+Use this structural boundary test:
 
-- [ ] **Step 4: Add immediate-next-session and cancellation-order tests**
+```python
+def test_entry_open_equal_to_structural_stop_is_cancelled():
+    sessions = pd.bdate_range("2024-01-01", periods=8)
+    signals = pd.DataFrame([
+        {"Signal_ID": "AAA-1", "Symbol": "AAA", "Signal_Date": sessions[0],
+         "Low": 95.0, "ATR14_Signal": 4.0},
+    ])
+    prices = pd.DataFrame({"Date": sessions, "Open": [100.0, 94.0] + [100.0] * 6})
+    entries, cancellations = build_low_volume_entries(
+        signals,
+        {"AAA": prices},
+        pd.DatetimeIndex(sessions),
+    )
+    assert entries.empty
+    assert cancellations.iloc[0]["Cancellation_Reason"] == "OPEN_BELOW_STRUCTURAL_STOP"
+```
 
-Freeze low-volume entry cancellation precedence as:
+- [ ] **Step 5: Implement cancellation precedence and lockout**
+
+For low-volume signals evaluate exactly:
 
 ```text
 1. SAME_SYMBOL_LOCKOUT
 2. MISSING_NEXT_SESSION
 3. MISSING_NEXT_SESSION_BAR
 4. OPEN_BELOW_STRUCTURAL_STOP
-5. otherwise ACCEPT
+5. ACCEPT
 ```
 
-This ordering makes every qualified signal map to exactly one outcome and ensures lockout is observable even when a later price bar is unavailable.
+For accepted `T`, store `locked_until[symbol] = next_session(T, sessions, 6)`. A later signal is locked only when `signal_date < locked_until[symbol]`. A signal on the scheduled exit date is allowed because the old lifecycle exited at that day's Open before the new Close signal exists.
 
-Tests:
+- [ ] **Step 6: Implement independent high-volume control entries**
 
-```python
-def test_lockout_is_entry_cancellation_not_signal_rejection():
-    # First signal is accepted and schedules unlock at T+6 Open.
-    # Second same-symbol signal before that date is still qualified,
-    # but appears once in cancellations as SAME_SYMBOL_LOCKOUT.
-    ...
+Use the same shock/PIT/liquidity/data rules and immediate-next-open timing, but no structural-stop cancellation. Maintain a separate `control_locked_until`. Control observations do not suppress low-volume R1 signals and vice versa.
 
+- [ ] **Step 7: Generate and reconcile artifacts**
 
-def test_open_equal_to_structural_stop_is_cancelled():
-    signal = make_signal(low=95.0, atr14=4.0)
-    # stop = 94.0
-    prices = frame_with_next_open(94.0)
-    entries, cancellations = build_low_volume_entries(...)
-    assert entries.empty
-    assert cancellations.iloc[0]["Cancellation_Reason"] == "OPEN_BELOW_STRUCTURAL_STOP"
-```
-
-Implement the actual fixture helpers in the test file; do not leave ellipses in committed tests.
-
-- [ ] **Step 5: Implement same-symbol lockout exactly**
-
-For an accepted signal on `T`, compute:
-
-```python
-entry_date = next_session(T, canonical_sessions, 1)
-scheduled_exit_date = next_session(T, canonical_sessions, 6)
-```
-
-Maintain `locked_until[symbol] = scheduled_exit_date`. A later signal is locked only when:
-
-```python
-signal_date < locked_until[symbol]
-```
-
-A signal occurring on the scheduled exit date itself is allowed because the prior lifecycle exited at that day's Open before the new signal is known at the Close.
-
-A practical early stop must **not** release this lockout.
-
-- [ ] **Step 6: Implement the independent high-volume control lifecycle**
-
-High-volume controls use:
+Before writing outputs assert:
 
 ```text
-Shock_Score <= -2.0
-Volume_Ratio >= 1.5
-same PIT/liquidity/data requirements
-same immediate-next-open timing
-same five-session same-symbol lockout
+Qualified_R1_Signals = Accepted_Entries + Entry_Cancellations
 ```
 
-They do **not** use structural-stop cancellation or a practical-stop exit. Their output must retain enough information to calculate `T+1 Open -> T+6 Open` gross return later.
+Every qualified low-volume Signal_ID must appear exactly once in accepted or cancelled outcomes.
 
-Use a separate `control_locked_until` dictionary so a low-volume R1 trade does not suppress a high-volume control observation and vice versa.
-
-- [ ] **Step 7: Run all signal tests**
+- [ ] **Step 8: Run Task 2 verification**
 
 ```bash
 python -m pytest -q "Swing Trading/research/swing/r1_price_shock_reversal/tests/test_r1_signals.py"
-```
-
-Expected: zero failures.
-
-- [ ] **Step 8: Generate signal/entry artifacts and verify accounting**
-
-Run:
-
-```bash
 python "Swing Trading/research/swing/r1_price_shock_reversal/generate_r1_signals.py"
 ```
 
-Programmatically assert before writing final artifacts:
-
-```text
-Qualified_Low_Volume_Signals = Accepted_Entries + Entry_Cancellations
-```
-
-and every `Signal_ID` appears at most once in accepted/cancelled entry outcomes.
+Expected: zero test failures; signal stage exits 0.
 
 - [ ] **Step 9: Commit Task 2**
 
 ```bash
-git add \
-  "Swing Trading/research/swing/r1_price_shock_reversal/generate_r1_signals.py" \
-  "Swing Trading/research/swing/r1_price_shock_reversal/tests/test_r1_signals.py" \
-  "Swing Trading/research/swing/r1_price_shock_reversal/output/r1_shock_candidates.csv" \
-  "Swing Trading/research/swing/r1_price_shock_reversal/output/r1_low_volume_signals.csv" \
-  "Swing Trading/research/swing/r1_price_shock_reversal/output/r1_high_volume_control_signals.csv" \
-  "Swing Trading/research/swing/r1_price_shock_reversal/output/r1_entries.csv" \
-  "Swing Trading/research/swing/r1_price_shock_reversal/output/r1_entry_cancellations.csv"
+git add "Swing Trading/research/swing/r1_price_shock_reversal/generate_r1_signals.py" \
+        "Swing Trading/research/swing/r1_price_shock_reversal/tests/test_r1_signals.py" \
+        "Swing Trading/research/swing/r1_price_shock_reversal/output/r1_shock_candidates.csv" \
+        "Swing Trading/research/swing/r1_price_shock_reversal/output/r1_low_volume_signals.csv" \
+        "Swing Trading/research/swing/r1_price_shock_reversal/output/r1_high_volume_control_signals.csv" \
+        "Swing Trading/research/swing/r1_price_shock_reversal/output/r1_entries.csv" \
+        "Swing Trading/research/swing/r1_price_shock_reversal/output/r1_entry_cancellations.csv"
 git commit -m "research: generate R1 reversal entries"
 ```
 
 ---
 
-### Task 3: Implement fixed-horizon and practical-stop outcomes
+### Task 3: Simulate fixed-horizon, practical, control, and forward outcomes
 
 **Files:**
-- Create/modify: `Swing Trading/research/swing/r1_price_shock_reversal/analyze_r1_results.py`
+- Create: `Swing Trading/research/swing/r1_price_shock_reversal/analyze_r1_results.py`
 - Create: `Swing Trading/research/swing/r1_price_shock_reversal/tests/test_r1_analysis.py`
 - Generate: `output/r1_setup_quality_trades.csv`
 - Generate: `output/r1_practical_trades.csv`
@@ -458,66 +378,63 @@ git commit -m "research: generate R1 reversal entries"
 - Generate: `output/r1_forward_diagnostics.csv`
 
 **Interfaces:**
-- Produces `simulate_setup_quality_trade(entry_row: pd.Series, prices: pd.DataFrame, canonical_sessions: pd.DatetimeIndex) -> dict[str, object] | None`.
-- Produces `simulate_practical_trade(...) -> dict[str, object] | None`.
-- Produces `simulate_control_outcome(control_row: pd.Series, prices: pd.DataFrame, canonical_sessions: pd.DatetimeIndex) -> dict[str, object] | None`.
-- Produces `forward_open_return(entry_open: float, signal_date: pd.Timestamp, sessions: ..., prices: ..., holding_sessions: int) -> float | np.nan`.
+- `simulate_setup_quality_trade(entry_row: pd.Series, prices: pd.DataFrame, canonical_sessions: pd.DatetimeIndex) -> dict[str, object] | None`
+- `simulate_practical_trade(entry_row: pd.Series, prices: pd.DataFrame, canonical_sessions: pd.DatetimeIndex) -> dict[str, object] | None`
+- `simulate_control_outcome(control_row: pd.Series, prices: pd.DataFrame, canonical_sessions: pd.DatetimeIndex) -> dict[str, object] | None`
+- `forward_open_return(entry_open: float, signal_date: pd.Timestamp, canonical_sessions: pd.DatetimeIndex, prices: pd.DataFrame, holding_sessions: int) -> float`
 
-- [ ] **Step 1: Write exact session-count tests**
-
-Use a seven-session deterministic fixture where signal is `T`, entry is `T+1`, and fixed exit is `T+6`:
+- [ ] **Step 1: Write exact five-session test**
 
 ```python
-def test_setup_quality_holds_five_complete_sessions():
-    prices = make_linear_prices(start="2024-01-02", sessions=7)
+def test_setup_exit_is_t_plus_6_open():
+    dates = pd.bdate_range("2024-01-01", periods=7)
+    prices = pd.DataFrame({
+        "Date": dates,
+        "Open": [100.0, 101.0, 102.0, 103.0, 104.0, 105.0, 106.0],
+        "High": [101.0, 102.0, 103.0, 104.0, 105.0, 106.0, 107.0],
+        "Low": [99.0, 100.0, 101.0, 102.0, 103.0, 104.0, 105.0],
+    })
     entry = pd.Series({
-        "Entry_ID": "AAA-2024-01-02",
-        "Signal_Date": prices.loc[0, "Date"],
-        "Entry_Date": prices.loc[1, "Date"],
+        "Entry_ID": "AAA-2024-01-01",
+        "Signal_Date": dates[0],
+        "Entry_Date": dates[1],
         "Entry_Open": 101.0,
         "Structural_Stop": 90.0,
     })
-    trade = simulate_setup_quality_trade(entry, prices, pd.DatetimeIndex(prices["Date"]))
-    assert trade["Exit_Date"] == prices.loc[6, "Date"]
+    trade = simulate_setup_quality_trade(entry, prices, pd.DatetimeIndex(dates))
+    assert trade["Exit_Date"] == dates[6]
+    assert trade["Exit_Price"] == pytest.approx(106.0)
     assert trade["Holding_Sessions"] == 5
 ```
 
-- [ ] **Step 2: Add practical precedence tests**
+- [ ] **Step 2: Write practical precedence tests**
 
-Cover all frozen cases:
-
-1. Entry-session `Low <= stop` after valid `Entry_Open > stop` exits at stop.
-2. Later-session `Open <= stop` exits at actual Open and may be worse than `-1R`.
-3. Later-session `Open > stop` but `Low <= stop` exits at stop.
-4. No stop through T+5 exits at T+6 Open.
-
-Example:
+At minimum cover entry-session intraday stop, later gap below stop, later intraday stop, and fixed T+6 exit. Example gap test:
 
 ```python
-def test_practical_gap_below_stop_exits_at_gap_open():
-    prices = make_trade_prices()
-    prices.loc[3, "Open"] = 88.0
-    prices.loc[3, "Low"] = 87.0
-    entry = make_entry(entry_open=100.0, stop=90.0)
-    trade = simulate_practical_trade(entry, prices, pd.DatetimeIndex(prices["Date"]))
+def test_practical_gap_below_stop_exits_at_actual_open():
+    dates = pd.bdate_range("2024-01-01", periods=7)
+    prices = pd.DataFrame({
+        "Date": dates,
+        "Open": [100.0, 100.0, 100.0, 88.0, 100.0, 100.0, 100.0],
+        "High": [101.0] * 7,
+        "Low": [99.0, 95.0, 95.0, 87.0, 95.0, 95.0, 95.0],
+    })
+    entry = pd.Series({
+        "Entry_ID": "AAA-1", "Signal_Date": dates[0], "Entry_Date": dates[1],
+        "Entry_Open": 100.0, "Structural_Stop": 90.0,
+    })
+    trade = simulate_practical_trade(entry, prices, pd.DatetimeIndex(dates))
     assert trade["Exit_Reason"] == "STOP_GAP"
     assert trade["Exit_Price"] == pytest.approx(88.0)
     assert trade["Gross_R"] == pytest.approx(-1.2)
 ```
 
-- [ ] **Step 3: Verify RED, then implement both lenses minimally**
+- [ ] **Step 3: Implement fixed-session lookup and both low-volume lenses**
 
-```bash
-python -m pytest -q "Swing Trading/research/swing/r1_price_shock_reversal/tests/test_r1_analysis.py" -k "setup_quality or practical"
-```
+Use canonical session positions, never calendar-day arithmetic. Entry session is `T+1`; fixed exit is `T+6`. On entry day, after a valid `Entry_Open > Structural_Stop`, an intraday `Low <= Structural_Stop` exits at the stop. On later sessions apply Open-before-Low precedence.
 
-Expected before implementation: FAIL.
-
-Implement fixed-horizon lookup via canonical session positions, not calendar-day arithmetic.
-
-- [ ] **Step 4: Implement friction fields exactly**
-
-For every completed setup/practical outcome persist:
+- [ ] **Step 4: Add frozen friction fields**
 
 ```python
 BASE_FRICTION = 0.004
@@ -529,68 +446,39 @@ trade["Stress_Net_Return"] = trade["Gross_Return"] - STRESS_FRICTION
 trade["Severe_Net_Return"] = trade["Gross_Return"] - SEVERE_FRICTION
 ```
 
-For practical R:
+Practical R fields:
 
 ```python
-for name, c in [("Base", 0.004), ("Stress", 0.006), ("Severe", 0.008)]:
-    trade[f"{name}_Net_R"] = (
-        (trade["Exit_Price"] - trade["Entry_Open"]) - c * trade["Entry_Open"]
+for label, friction in (("Base", 0.004), ("Stress", 0.006), ("Severe", 0.008)):
+    trade[f"{label}_Net_R"] = (
+        (trade["Exit_Price"] - trade["Entry_Open"]) - friction * trade["Entry_Open"]
     ) / trade["Initial_Risk"]
 ```
 
-- [ ] **Step 5: Enforce the paired-completed sample rule**
+- [ ] **Step 5: Enforce paired completion**
 
-Generate setup and practical simulations for all accepted entries, but retain an Entry_ID in the **primary completed sample only when the fixed T+6 setup exit can be evaluated**. A practical early stop with missing T+6 setup data stays incomplete and must not enter practical primary metrics.
+Only entries with evaluable T+6 setup exits enter the primary completed sample. A practical trade that stops early but lacks T+6 setup data remains incomplete. Assert exact Entry_ID equality between completed setup and practical files.
 
-After filtering, assert:
+- [ ] **Step 6: Implement raw high-volume control outcomes**
 
-```python
-set(setup_completed["Entry_ID"]) == set(practical_completed["Entry_ID"])
-```
+Control output uses only `T+1 Open` to `T+6 Open` gross return. No structural stop, no practical exit, and no friction gate.
 
-- [ ] **Step 6: Implement high-volume raw control outcomes**
+- [ ] **Step 7: Freeze diagnostic forward returns**
 
-For each accepted control observation, calculate only:
+For holding horizon `N`, use Entry `T+1 Open` and diagnostic exit `T+(N+1) Open`. Persist N = 1, 3, 5, 10, 20 when data exists.
 
-```text
-Entry = T+1 Open
-Exit = T+6 Open
-Gross_Return
-```
-
-No stop, no structural cancellation, and no friction gate is applied to the mechanism comparison.
-
-- [ ] **Step 7: Freeze forward diagnostics as open-to-open horizons**
-
-Diagnostic horizon `N` means:
-
-```text
-Entry = T+1 Open
-Diagnostic exit = T+(N+1) Open
-```
-
-Persist `Forward_1`, `Forward_3`, `Forward_5`, `Forward_10`, `Forward_20` when those future Opens exist. These fields are diagnostics only.
-
-- [ ] **Step 8: Run complete analysis unit tests**
+- [ ] **Step 8: Run Task 3 verification and commit**
 
 ```bash
-python -m pytest -q "Swing Trading/research/swing/r1_price_shock_reversal/tests/test_r1_analysis.py"
-```
-
-Expected: zero failures.
-
-- [ ] **Step 9: Commit Task 3 code/tests**
-
-```bash
-git add \
-  "Swing Trading/research/swing/r1_price_shock_reversal/analyze_r1_results.py" \
-  "Swing Trading/research/swing/r1_price_shock_reversal/tests/test_r1_analysis.py"
+python -m pytest -q "Swing Trading/research/swing/r1_price_shock_reversal/tests/test_r1_analysis.py" -k "setup or practical or control or forward"
+git add "Swing Trading/research/swing/r1_price_shock_reversal/analyze_r1_results.py" \
+        "Swing Trading/research/swing/r1_price_shock_reversal/tests/test_r1_analysis.py"
 git commit -m "research: simulate R1 reversal outcomes"
 ```
 
 ---
 
-### Task 4: Add metrics, temporal/outlier/LOSO robustness, and control falsification
+### Task 4: Add metrics, falsification, bootstrap, temporal, outlier, and LOSO robustness
 
 **Files:**
 - Modify: `Swing Trading/research/swing/r1_price_shock_reversal/analyze_r1_results.py`
@@ -603,122 +491,61 @@ git commit -m "research: simulate R1 reversal outcomes"
 - Generate: `output/r1_bootstrap_summary.csv`
 
 **Interfaces:**
-- Produces `safe_profit_factor(values: pd.Series) -> float`.
-- Produces `summary_metrics(trades: pd.DataFrame) -> dict[str, float]`.
-- Produces `bootstrap_mean_ci(values: pd.Series, seed: int = 20260828, resamples: int = 10_000) -> tuple[float, float]`.
-- Produces `bootstrap_difference_ci(low: pd.Series, high: pd.Series, ...) -> tuple[float, float]`.
+- `safe_profit_factor(values: pd.Series) -> float`
+- `bootstrap_mean_ci(values: pd.Series, seed: int = 20260828, resamples: int = 10_000) -> tuple[float, float]`
+- `bootstrap_difference_ci(low: pd.Series, high: pd.Series, seed: int = 20260828, resamples: int = 10_000) -> tuple[float, float]`
 
-- [ ] **Step 1: Add deterministic profit-factor and bootstrap tests**
+- [ ] **Step 1: Add metric/bootstrap tests**
 
 ```python
-def test_safe_profit_factor():
+def test_safe_profit_factor_boundaries():
     assert safe_profit_factor(pd.Series([2.0, -1.0])) == pytest.approx(2.0)
     assert safe_profit_factor(pd.Series([2.0, 1.0])) == np.inf
     assert safe_profit_factor(pd.Series([-2.0, -1.0])) == 0.0
 
 
-def test_bootstrap_is_reproducible_with_frozen_seed():
+def test_bootstrap_is_deterministic():
     values = pd.Series([0.01, 0.02, -0.01, 0.03])
     assert bootstrap_mean_ci(values) == bootstrap_mean_ci(values)
 ```
 
-- [ ] **Step 2: Implement primary summary metrics**
+- [ ] **Step 2: Implement primary metrics**
 
-At minimum report for setup and practical samples:
+Report completed count, winners/losers, win rate, gross mean/median/PF, base/stress/severe net mean/PF, practical gross mean R/PF, and practical base/stress/severe net mean R/PF.
 
-```text
-Completed_Trades
-Winners
-Losers
-Win_Rate
-Gross_Mean_Return
-Gross_Median_Return
-Gross_Return_PF
-Base_Net_Mean_Return
-Base_Net_Return_PF
-Stress_Net_Mean_Return
-Stress_Net_Return_PF
-Severe_Net_Mean_Return
-Severe_Net_Return_PF
-Practical_Gross_Mean_R
-Practical_Gross_R_PF
-Practical_Base_Mean_R
-Practical_Base_R_PF
-Practical_Stress_Mean_R
-Practical_Stress_R_PF
-```
-
-- [ ] **Step 3: Implement the frozen temporal split**
-
-Use exactly:
+- [ ] **Step 3: Implement exact temporal split**
 
 ```text
-FIRST_HALF  = 2023-08-01 through 2025-02-11 inclusive
-SECOND_HALF = 2025-02-12 through 2026-08-25 inclusive
+First half:  2023-08-01 through 2025-02-11 inclusive
+Second half: 2025-02-12 through 2026-08-25 inclusive
 ```
 
-For each half report completed trades, base-net mean, and base-net PF. Do not move the split.
+Each half reports base-net mean and base-net PF.
 
-- [ ] **Step 4: Implement top-five winner removal**
+- [ ] **Step 4: Implement top-five winner removal and LOSO**
 
-Rank low-volume completed setup trades by **gross return**, remove exactly the top five individual winners, then recompute base-net mean and base-net PF. Persist removed Entry_IDs/Symbols in the artifact.
+Remove the five largest **gross-return** setup winners, then recompute base-net mean/PF. For LOSO, remove every represented symbol one at a time and recompute base-net mean/PF. Persist omitted symbol and remaining trade count.
 
-- [ ] **Step 5: Implement leave-one-symbol-out**
+- [ ] **Step 5: Implement high-volume falsification comparison**
 
-For every symbol represented in the completed low-volume sample, remove all of that symbol's trades and recompute base-net mean and base-net PF. Never use this table to remove a symbol from R1.
+Compare gross five-session means and PFs. The mechanism gate requires low-volume mean > high-volume mean **and** low-volume PF > high-volume PF.
 
-- [ ] **Step 6: Implement the high-volume mechanism comparison**
+- [ ] **Step 6: Implement bootstrap reporting exactly**
 
-Compare gross five-session setup-quality outcomes only:
+Use `np.random.default_rng(20260828)`, 10,000 resamples, percentile 2.5%/97.5% bounds for gross setup mean, base-net setup mean, practical base-net mean R, and low-minus-high gross mean difference. No p-value gate.
 
-```text
-Low_Volume_Mean_Return
-High_Volume_Mean_Return
-Low_Volume_Return_PF
-High_Volume_Return_PF
-Mean_Difference = Low - High
-```
-
-The control gate passes only when both:
-
-```python
-low_mean > high_mean
-low_pf > high_pf
-```
-
-- [ ] **Step 7: Implement frozen bootstrap reporting**
-
-Use `np.random.default_rng(20260828)` and 10,000 resamples. Report percentile 2.5%/97.5% intervals for:
-
-```text
-Gross low-volume five-session mean
-Base-net low-volume five-session mean
-Practical base-net mean R
-Low-volume minus high-volume gross mean difference
-```
-
-Bootstrap intervals are evidence only; do not invent a p-value gate.
-
-- [ ] **Step 8: Run robustness tests**
+- [ ] **Step 7: Run Task 4 verification and commit**
 
 ```bash
-python -m pytest -q "Swing Trading/research/swing/r1_price_shock_reversal/tests/test_r1_analysis.py" -k "profit_factor or bootstrap or temporal or outlier or leave_one or control"
-```
-
-Expected: zero failures.
-
-- [ ] **Step 9: Commit Task 4**
-
-```bash
-git add \
-  "Swing Trading/research/swing/r1_price_shock_reversal/analyze_r1_results.py" \
-  "Swing Trading/research/swing/r1_price_shock_reversal/tests/test_r1_analysis.py"
+python -m pytest -q "Swing Trading/research/swing/r1_price_shock_reversal/tests/test_r1_analysis.py" -k "profit_factor or bootstrap or temporal or outlier or leave_one or falsification"
+git add "Swing Trading/research/swing/r1_price_shock_reversal/analyze_r1_results.py" \
+        "Swing Trading/research/swing/r1_price_shock_reversal/tests/test_r1_analysis.py"
 git commit -m "research: add R1 robustness analysis"
 ```
 
 ---
 
-### Task 5: Add artifact-derived PIT/integrity audit and overlap diagnostics
+### Task 5: Add artifact-derived integrity audit and overlap diagnostics
 
 **Files:**
 - Modify: `Swing Trading/research/swing/r1_price_shock_reversal/analyze_r1_results.py`
@@ -727,189 +554,104 @@ git commit -m "research: add R1 robustness analysis"
 - Generate: `output/r1_overlap_diagnostic.csv`
 
 **Interfaces:**
-- Produces `count_integrity_violations(signals, entries, cancellations, setup, practical, controls, feature_frames, membership, canonical_sessions) -> tuple[int, pd.DataFrame]`.
-- Produces `overlap_diagnostics(entries: pd.DataFrame, canonical_sessions: pd.DatetimeIndex) -> pd.DataFrame`.
+- `count_integrity_violations(signals: pd.DataFrame, entries: pd.DataFrame, cancellations: pd.DataFrame, setup: pd.DataFrame, practical: pd.DataFrame, controls: pd.DataFrame, feature_frames: dict[str, pd.DataFrame], membership: pd.DataFrame, canonical_sessions: pd.DatetimeIndex) -> tuple[int, pd.DataFrame]`
+- `overlap_diagnostics(entries: pd.DataFrame, canonical_sessions: pd.DatetimeIndex) -> pd.DataFrame`
 
-- [ ] **Step 1: Write red tests proving the audit recomputes numeric evidence**
+- [ ] **Step 1: Add numeric-recomputation audit tests**
 
-Do not trust convenience booleans. Create fixtures where persisted booleans remain true but numeric values are corrupted:
+Use a fixture with 21 pre-signal rows plus one signal row and one next-session row. Corrupt persisted `Shock_Score` after building the fixture and assert the audit emits `SHOCK_SCORE_MISMATCH`. Repeat for `Prior20_Median_Volume` and assert `PRIOR_VOLUME_MISMATCH`.
 
-```python
-def test_integrity_audit_recomputes_shock_score():
-    fixture = make_integrity_fixture()
-    fixture.signals.loc[0, "Shock_Score"] = -9.0
-    count, audit = count_integrity_violations(...)
-    assert count > 0
-    assert "SHOCK_SCORE_MISMATCH" in set(audit["Violation"])
+The test calls must use the full signature shown above; do not bypass feature frames or membership.
 
-
-def test_integrity_audit_recomputes_prior_volume_baseline():
-    fixture = make_integrity_fixture()
-    fixture.signals.loc[0, "Prior20_Median_Volume"] *= 2.0
-    count, audit = count_integrity_violations(...)
-    assert "PRIOR_VOLUME_MISMATCH" in set(audit["Violation"])
-```
-
-- [ ] **Step 2: Implement deterministic numeric tolerance**
-
-Use:
+- [ ] **Step 2: Implement frozen numeric tolerance**
 
 ```python
 np.isclose(observed, recomputed, rtol=1e-9, atol=1e-12)
 ```
 
-for numeric audit comparisons.
+Use exact equality for dates/integers.
 
-- [ ] **Step 3: Independently audit every accepted low-volume entry**
+- [ ] **Step 3: Independently audit accepted low-volume entries**
 
-Verify at minimum:
+Recompute and verify: signal window, PIT membership, 20 prior returns, `Sigma20`, signal return, `Shock_Score`, 20 prior volumes, prior median volume, `Volume_Ratio`, 20 prior traded values, prior median traded value, liquidity floor, ATR14 signal timing, structural stop, immediate-next-session entry, `Entry_Open > stop`, lockout, T+6 scheduled exit, qualified/accepted/cancelled accounting, and identical completed setup/practical Entry_ID sets.
 
-```text
-Signal_Date inside frozen window
-Signal_Date < Entry_Date
-PIT membership active on Signal_Date
-exactly 20 valid prior returns precede Signal_Date
-Sigma20 recomputes from prior returns only
-Shock_Score recomputes and <= -2.0
-exactly 20 valid prior volume observations precede Signal_Date
-prior median volume and Volume_Ratio recompute
-Volume_Ratio <= 1.0
-exactly 20 valid prior traded-value observations precede Signal_Date
-prior median traded value recomputes and >= ₹10cr
-ATR14_signal and Shock_Day_Low are signal-date known
-Structural_Stop recomputes exactly
-Entry_Date is immediate next canonical session
-Entry_Open > Structural_Stop
-same-symbol lockout is respected
-scheduled fixed exit is T+6 canonical Open
-setup/practical completed Entry_ID sets are identical
-qualified = accepted + cancelled accounting reconciles
-```
+Deduplicate identical `(Entry_ID, Symbol, Violation)` rows before counting.
 
-Use explicit violation codes; deduplicate identical `(Entry_ID, Symbol, Violation)` rows before counting.
+- [ ] **Step 4: Independently audit high-volume controls**
 
-- [ ] **Step 4: Audit the high-volume control independently**
+Verify PIT/liquidity, `Shock_Score <= -2.0`, `Volume_Ratio >= 1.5`, immediate-next-open entry, independent control lockout, and T+6 fixed exit. Do not require structural-stop fields.
 
-At minimum verify PIT membership, liquidity, `Shock_Score <= -2`, `Volume_Ratio >= 1.5`, same-symbol control lockout, immediate-next-open entry, and T+6 fixed exit timing. Do not require R1 structural-stop fields in the control.
+- [ ] **Step 5: Implement overlap diagnostics without suppressing entries**
 
-- [ ] **Step 5: Implement overlap diagnostics without suppressing signals**
+Using scheduled T+6 lifecycles, report total accepted entries, maximum/average simultaneous trades, maximum same-day entries, overlapping-entry count, overlap percentage, and same-day entry-count distribution.
 
-From all accepted low-volume entries, calculate:
-
-```text
-Total_Accepted_Entries
-Max_Simultaneous_Trades
-Average_Simultaneous_Trades
-Max_Same_Day_Entries
-Entries_Overlapping_Another
-Pct_Entries_Overlapping
-```
-
-Also export same-day entry-count distribution rows. Use each entry's scheduled T+6 lifecycle for overlap, not its practical early-stop date, because the signal-level experiment reserves the lifecycle for comparison/lockout consistency.
-
-- [ ] **Step 6: Run integrity/overlap tests**
+- [ ] **Step 6: Run Task 5 verification and commit**
 
 ```bash
-python -m pytest -q "Swing Trading/research/swing/r1_price_shock_reversal/tests/test_r1_analysis.py" -k "integrity or overlap or pit"
-```
-
-Expected: zero failures.
-
-- [ ] **Step 7: Commit Task 5**
-
-```bash
-git add \
-  "Swing Trading/research/swing/r1_price_shock_reversal/analyze_r1_results.py" \
-  "Swing Trading/research/swing/r1_price_shock_reversal/tests/test_r1_analysis.py"
+python -m pytest -q "Swing Trading/research/swing/r1_price_shock_reversal/tests/test_r1_analysis.py" -k "integrity or pit or overlap"
+git add "Swing Trading/research/swing/r1_price_shock_reversal/analyze_r1_results.py" \
+        "Swing Trading/research/swing/r1_price_shock_reversal/tests/test_r1_analysis.py"
 git commit -m "research: audit R1 point-in-time integrity"
 ```
 
 ---
 
-### Task 6: Implement frozen validation gates and evidence-only report
+### Task 6: Add frozen validation gates, evidence report, README, and fresh historical run
 
 **Files:**
 - Modify: `Swing Trading/research/swing/r1_price_shock_reversal/analyze_r1_results.py`
 - Modify: `Swing Trading/research/swing/r1_price_shock_reversal/tests/test_r1_analysis.py`
 - Create: `Swing Trading/research/swing/r1_price_shock_reversal/README.md`
-- Generate: `output/r1_validation_gates.csv`
-- Generate: `output/research_report.md`
+- Generate all remaining output artifacts, especially `r1_validation_gates.csv` and `research_report.md`.
 
-**Interfaces:**
-- Produces `evaluate_validation_gates(...) -> pd.DataFrame`.
-- Produces exactly one final formal status: `PASS`, `FAIL`, `INSUFFICIENT_EVIDENCE`, or `INVALID_RESEARCH_RUN`.
+- [ ] **Step 1: Add exact gate-boundary tests**
 
-- [ ] **Step 1: Add gate-boundary tests**
-
-Create compact synthetic summary fixtures that prove exact threshold semantics. At minimum test:
+Synthetic summaries must prove:
 
 ```text
-Completed paired outcomes < 300 -> INSUFFICIENT_EVIDENCE (unless invalid)
-PIT/integrity violations > 0 -> INVALID_RESEARCH_RUN
-Base net mean exactly 0.002 -> passes +0.20% gate
-Base net PF exactly 1.20 -> passes
-Stress net mean exactly 0.0 -> fails because requirement is > 0
-Practical base mean R exactly 0.15 -> passes
-Practical base R-PF exactly 1.20 -> passes
+Integrity violation count > 0 -> INVALID_RESEARCH_RUN
+Completed paired outcomes 299 -> INSUFFICIENT_EVIDENCE
+Base net mean exactly 0.002 -> setup mean gate passes
+Base net PF exactly 1.20 -> setup PF gate passes
+Stress net mean exactly 0 -> stress mean gate fails
+Practical base mean R exactly 0.15 -> practical mean gate passes
+Practical base R-PF exactly 1.20 -> practical PF gate passes
 ```
 
-- [ ] **Step 2: Implement mandatory gates exactly**
+- [ ] **Step 2: Implement all mandatory gates exactly**
 
-When the research run is valid and completed paired outcomes are at least 300, R1 passes only if all are true:
+For a valid run with at least 300 completed paired outcomes, `PASS` requires all:
 
 ```text
-Gross setup mean return > 0
-Base-net setup mean return >= +0.002
-Base-net setup Return PF >= 1.20
-Stress-net setup mean return > 0
-Stress-net setup Return PF > 1.00
-Practical base-net mean R >= +0.15R
+Gross setup mean > 0
+Base-net setup mean >= 0.002
+Base-net setup PF >= 1.20
+Stress-net setup mean > 0
+Stress-net setup PF > 1.00
+Practical base-net mean R >= 0.15
 Practical base-net R-PF >= 1.20
 Low-volume gross mean > high-volume gross mean
 Low-volume gross PF > high-volume gross PF
-Both fixed temporal halves: base-net mean > 0 AND base-net PF > 1.0
-After removing top five gross winners: base-net mean > 0 AND base-net PF > 1.0
-Every leave-one-symbol-out row: base-net mean > 0 AND base-net PF > 1.0
-Zero PIT/integrity violations
+Both frozen halves: base-net mean > 0 and base-net PF > 1.0
+Top-five-removed sample: base-net mean > 0 and base-net PF > 1.0
+Every LOSO sample: base-net mean > 0 and base-net PF > 1.0
+Zero mandatory integrity violations
 ```
 
-Status precedence must be:
+Final status precedence:
 
 ```text
 1. INVALID_RESEARCH_RUN
 2. INSUFFICIENT_EVIDENCE
-3. PASS if every mandatory gate passes
-4. otherwise FAIL
+3. PASS when every mandatory gate passes
+4. FAIL otherwise
 ```
 
-- [ ] **Step 3: Generate an evidence-only Markdown report**
+- [ ] **Step 3: Generate evidence-only report and README**
 
-`research_report.md` must include factual sections only:
+Report factual data-quality counts, cohort/accounting funnel, setup/practical metrics, friction sensitivity, control comparison, temporal/outlier/LOSO robustness, bootstrap intervals, overlap diagnostics, integrity result, gate table, and formal status. Do not recommend filters or a next strategy in generated code/report.
 
-```text
-1. Frozen hypothesis/spec reference
-2. Data convention/window/PIT universe
-3. Data-quality counts
-4. Shock/cohort/accounting funnel
-5. Low-volume setup-quality metrics
-6. Practical-stop metrics
-7. Friction sensitivity
-8. High-volume control comparison
-9. Temporal robustness
-10. Top-five winner robustness
-11. Leave-one-symbol-out robustness
-12. Bootstrap intervals
-13. Overlap/capacity diagnostics
-14. PIT/integrity audit result
-15. Validation gates and formal status
-16. Diagnostic-only context summary
-```
-
-Do not recommend new thresholds, filters, regime exclusions, or follow-up strategy changes in code/report. Portfolio Advisor will interpret the evidence later.
-
-- [ ] **Step 4: Write README with exact rebuild/test commands**
-
-README commands:
+README must contain exactly these run commands:
 
 ```bash
 python "Swing Trading/research/swing/r1_price_shock_reversal/build_r1_features.py"
@@ -918,9 +660,7 @@ python "Swing Trading/research/swing/r1_price_shock_reversal/analyze_r1_results.
 python -m pytest -q "Swing Trading/research/swing/r1_price_shock_reversal/tests"
 ```
 
-Explicitly state that raw downloads/full feature caches are not committed and that the report is evidence only.
-
-- [ ] **Step 5: Run the complete deterministic test suite**
+- [ ] **Step 4: Run the full R1 test suite**
 
 ```bash
 python -m pytest -q "Swing Trading/research/swing/r1_price_shock_reversal/tests"
@@ -928,146 +668,75 @@ python -m pytest -q "Swing Trading/research/swing/r1_price_shock_reversal/tests"
 
 Expected: zero failures.
 
-- [ ] **Step 6: Commit Task 6**
+- [ ] **Step 5: Regenerate all R1 outputs from scratch**
 
-```bash
-git add \
-  "Swing Trading/research/swing/r1_price_shock_reversal/analyze_r1_results.py" \
-  "Swing Trading/research/swing/r1_price_shock_reversal/tests/test_r1_analysis.py" \
-  "Swing Trading/research/swing/r1_price_shock_reversal/README.md"
-git commit -m "research: finalize R1 validation gates"
-```
-
----
-
-### Task 7: Regenerate all historical evidence and verify the final branch
-
-**Files:**
-- Regenerate every `Swing Trading/research/swing/r1_price_shock_reversal/output/*` artifact listed in the locked file structure.
-- Do not hand-edit generated CSV/report outputs.
-
-- [ ] **Step 1: Remove stale R1 outputs only**
-
-From repository root, remove generated files under:
-
-```text
-Swing Trading/research/swing/r1_price_shock_reversal/output/
-```
-
-Do not remove V1/V2/V3 or shared membership/breadth evidence.
-
-- [ ] **Step 2: Rebuild features from scratch**
+Remove only files under the R1 `output/` directory, then run in order:
 
 ```bash
 python "Swing Trading/research/swing/r1_price_shock_reversal/build_r1_features.py"
-```
-
-Expected: exit 0.
-
-- [ ] **Step 3: Rebuild signals/entries from scratch**
-
-```bash
 python "Swing Trading/research/swing/r1_price_shock_reversal/generate_r1_signals.py"
-```
-
-Expected: exit 0 and accounting identity holds.
-
-- [ ] **Step 4: Rebuild analysis/gates/report from scratch**
-
-```bash
 python "Swing Trading/research/swing/r1_price_shock_reversal/analyze_r1_results.py"
 ```
 
-Expected: exit 0 for a valid research run even when formal strategy status is `FAIL` or `INSUFFICIENT_EVIDENCE`. Exit non-zero only for implementation/data-integrity failures that prevent trustworthy analysis.
+A valid run may end with formal strategy status `FAIL` or `INSUFFICIENT_EVIDENCE`; those are research results, not script failures. Exit non-zero only for implementation/data-integrity failures that prevent trustworthy analysis.
 
-- [ ] **Step 5: Run R1 tests after the fresh historical run**
-
-```bash
-python -m pytest -q "Swing Trading/research/swing/r1_price_shock_reversal/tests"
-```
-
-Expected: zero failures.
-
-- [ ] **Step 6: Run existing V3 tests as a regression guard**
+- [ ] **Step 6: Run existing V3 tests as regression guard**
 
 ```bash
 python -m pytest -q "Swing Trading/research/swing/strategy_v3_shallow_pullback/tests"
 ```
 
-Expected: zero failures. R1 implementation must not break the existing merged research module.
+Expected: zero failures.
 
-- [ ] **Step 7: Mechanically reconcile final artifacts**
+- [ ] **Step 7: Mechanically reconcile fresh artifacts**
 
-Verify from generated CSVs/report, not memory:
+Verify from generated files:
 
 ```text
-Qualified low-volume signals = accepted entries + cancellations
+Qualified = Accepted + Cancelled
 Completed setup Entry_IDs = completed practical Entry_IDs
-PIT/integrity violation count = value reported in gate table
-Control sample satisfies only control rules, not practical-stop rules
-Temporal split dates are exact
-Bootstrap seed/resample count are reported exactly
-Every mandatory gate in r1_validation_gates.csv matches the corresponding generated metric
-Formal status precedence is correct
+All required PIT/integrity values match r1_pit_audit.csv
+Temporal split boundary is exact
+Bootstrap seed/resample count is exact
+Control cohort never uses structural-stop rules
+Every gate row matches its source metric
+Formal status follows the required precedence
 ```
 
-If any reconciliation fails, stop and fix correctness only. Do not change strategy thresholds.
+Fix correctness defects only. Never change R1 thresholds because of results.
 
-- [ ] **Step 8: Commit all fresh generated evidence**
+- [ ] **Step 8: Commit fresh implementation and evidence**
 
 ```bash
 git add "Swing Trading/research/swing/r1_price_shock_reversal"
 git commit -m "research: validate R1 price-shock reversal"
 ```
 
-- [ ] **Step 9: Record final handoff evidence for Issue #19 / PR**
+- [ ] **Step 9: Final execution handoff for Issue #19 / PR**
 
-The execution handoff comment should include only mechanically derived facts:
+Report only mechanically derived facts: final SHA, exact run/test commands, usable/download-failed symbols, cohort counts, qualified/accepted/cancelled/incomplete/completed counts, setup gross/base/stress metrics, practical base/stress R metrics, control comparison, both temporal halves, top-five result, worst LOSO row, bootstrap intervals, integrity violation count, formal status, and report/gate paths. Do not add a strategy recommendation; Portfolio Advisor interprets the evidence.
 
-```text
-final commit SHA
-exact three run commands
-test command + pass count
-usable/download-failed symbol counts
-all-shock / low / middle / high cohort counts
-qualified / accepted / cancelled / incomplete / completed paired counts
-setup gross/base/stress metrics
-practical base/stress R metrics
-control comparison metrics
-fixed-half temporal metrics
-top-five removal metrics
-LOSO worst row
-bootstrap intervals
-PIT/integrity violation count
-formal PASS/FAIL/INSUFFICIENT_EVIDENCE/INVALID_RESEARCH_RUN status
-paths to report and gate artifacts
-```
+## Plan Self-Review
 
-Do not add a strategy recommendation. Portfolio Advisor owns interpretation after reviewing the evidence.
+Before execution confirm:
 
----
-
-## Plan Self-Review Checklist
-
-Before execution, verify mechanically that the plan still matches the approved spec:
-
-- [ ] No RSI/trend/RS/sector/regime filter entered primary eligibility.
-- [ ] Prior 20 return/volume/liquidity windows exclude the shock day.
+- [ ] No momentum/trend/RS/sector/regime filter is primary.
+- [ ] All prior-20 baselines exclude the shock day.
 - [ ] `Sigma20` uses `ddof=1`.
 - [ ] Shock threshold remains `-2.0`.
-- [ ] Volume thresholds remain `<=1.0` and `>=1.5`.
-- [ ] Structural stop remains shock low minus `0.25 ATR14`.
+- [ ] Volume thresholds remain `<= 1.0` and `>= 1.5`.
+- [ ] Stop remains shock low minus `0.25 ATR14`.
 - [ ] Entry remains immediate next Open with no positive-gap cancellation.
-- [ ] Fixed setup horizon remains T+6 Open.
-- [ ] Same-symbol lockout remains active through scheduled T+6 Open despite early practical stops.
-- [ ] Control cohort does not inherit practical-stop cancellation/exit rules.
+- [ ] Setup exit remains T+6 Open.
+- [ ] Same-symbol lockout remains through scheduled T+6 Open despite early practical stops.
+- [ ] Control cohort does not inherit practical-stop mechanics.
 - [ ] Friction remains 0.40% / 0.60% / 0.80%.
-- [ ] Sample threshold remains 300 completed paired trades.
-- [ ] Temporal split remains 2025-02-11 / 2025-02-12 boundary.
-- [ ] Bootstrap remains 10,000 resamples / seed 20260828 / 95% CI.
-- [ ] Invalid research runs abort profitability interpretation.
+- [ ] Sample threshold remains 300.
+- [ ] Temporal boundary remains 2025-02-11 / 2025-02-12.
+- [ ] Bootstrap remains 10,000 / seed 20260828 / 95% CI.
+- [ ] Any invalid research run blocks profitability interpretation.
 - [ ] No outcome-based rescue path exists.
 
 ## Execution Handoff
 
-Plan execution is **inline only** using `superpowers:executing-plans`. Execute task-by-task with tests and commits at each checkpoint. If historical evidence fails a precommitted strategy gate, preserve the failure and continue only with evidence/report generation; do not tune R1.
+Execute this plan **inline only** with `superpowers:executing-plans`, task-by-task with tests and commits at each checkpoint. Preserve a failing strategy result exactly as generated; do not optimize R1.

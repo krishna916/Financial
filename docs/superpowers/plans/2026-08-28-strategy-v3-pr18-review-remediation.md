@@ -2,29 +2,29 @@
 
 > **For agentic workers:** REQUIRED SUB-SKILL: Use `superpowers:executing-plans` to implement this plan task-by-task. **Inline execution only. Never use or suggest `superpowers:subagent-driven-development`.** Steps use checkbox (`- [ ]`) syntax for tracking.
 
-**Goal:** Resolve the three Portfolio Advisor review findings on PR #18, regenerate the Strategy V3 evidence from the corrected head, and replace unverifiable PR claims with fresh mechanically derived evidence.
+**Goal:** Resolve the three Portfolio Advisor review findings on PR #18, regenerate Strategy V3 evidence from the corrected head, and replace the current verification claims with fresh mechanically derived evidence.
 
-**Architecture:** Keep the frozen Strategy V3 trading hypothesis and historical methodology unchanged. Fix only the regression-fixture defect, strengthen the existing artifact-derived PIT audit so seed-side numeric RS evidence is independently auditable, and make the generated report explicitly state actual pre-window PIT support. Then regenerate every affected historical artifact, rerun the complete V3 and swing-research suites, reconcile the outputs, and update PR #18 from those fresh results.
+**Architecture:** Keep the frozen Strategy V3 trading hypothesis unchanged. Repair the impossible regression fixture, strengthen the existing artifact-derived PIT audit so seed-side numeric RS evidence is independently checked, and make the generated report state actual pre-window PIT support. After those correctness fixes pass focused tests, regenerate all historical artifacts, rerun the complete V3 and swing-research suites, reconcile outputs, and update PR #18 mechanically from those fresh files.
 
-**Tech Stack:** Python 3, pandas, numpy, pytest, yfinance, GitHub CLI for PR metadata only.
+**Tech Stack:** Python 3, pandas, numpy, pytest, yfinance, GitHub CLI only for PR metadata/comment updates.
 
 **Spec:** `Swing Trading/docs/superpowers/specs/2026-08-27-strategy-v3-shallow-pullback-resumption-design.md`
 
 **Original validation plan:** `docs/superpowers/plans/2026-08-27-strategy-v3-shallow-pullback-validation.md`
 
-**Review target:** PR #18 — `https://github.com/krishna916/Financial/pull/18`
+**Review target:** `https://github.com/krishna916/Financial/pull/18`
 
 ## Global Constraints
 
-- Do **not** change any frozen Strategy V3 trading threshold, filter, lookback, entry rule, exit rule, stop rule, breadth rule, RS cutoff, signal window, or validation gate.
-- Do **not** use the current historical outcomes to select a subgroup, regime, rank band, pullback age/depth, volume bucket, or entry-extension bucket.
+- Do not change any frozen Strategy V3 threshold, filter, lookback, entry rule, exit rule, stop rule, breadth rule, RS cutoff, signal window, or validation gate.
+- Do not use historical outcomes to select a regime, RS band, pullback age/depth, volume bucket, extension bucket, or any other subgroup.
 - T1 remains retired and V2 remains closed evidence. Do not modify T1/V2 code or outputs.
-- The existing production rule `Close > Leader_Close` for `NEW_LEADER_CLOSE` is correct and must remain strict. The review defect is in a regression fixture, not the trading rule.
-- The seed-side PIT audit must independently inspect persisted numeric seed evidence; it must not trust only derived `*_OK` booleans.
-- The pre-window reporting fix is evidence/reporting only. It must not broaden historical PIT membership or synthesize pre-2023-08-01 constituents.
-- Historical outputs must be regenerated after code changes. Do not hand-edit CSV metrics or `research_report.md`.
-- PR test/result counts must come from fresh commands/artifacts on the final remediation head.
-- No GitHub Actions workflow currently verifies this PR, so local fresh test output is mandatory evidence.
+- Production `NEW_LEADER_CLOSE` semantics remain strict `Close > Leader_Close`. Equality must not be treated as a new leader.
+- Seed-side PIT auditing must independently inspect persisted numeric seed RS coverage and seed Composite_RS; it must not trust only `Seed_RS_Coverage_OK` / `Seed_RS_OK`.
+- Pre-window reporting must describe the committed PIT manifest as it exists. Never synthesize or backfill pre-2023-08-01 membership.
+- Historical CSV/report files are code-owned and must be regenerated, never hand-edited.
+- PR verification claims must come from fresh commands run on the final remediation head.
+- No GitHub Actions workflow currently verifies PR #18, so local fresh test output is mandatory evidence.
 - Execution mode is inline only.
 
 ---
@@ -40,6 +40,9 @@ Swing Trading/research/swing/strategy_v3_shallow_pullback/
 │   └── test_v3_analysis.py
 └── output/
     ├── research_report.md
+    ├── v3_data_validation.csv
+    ├── v3_universe_rs_audit.csv
+    ├── v3_pullback_state_audit.csv
     ├── v3_signal_candidates.csv
     ├── v3_entries.csv
     ├── v3_entry_cancellations.csv
@@ -55,34 +58,30 @@ Swing Trading/research/swing/strategy_v3_shallow_pullback/
     └── v3_validation_gates.csv
 ```
 
-`v3_data_validation.csv`, `v3_universe_rs_audit.csv`, and `v3_pullback_state_audit.csv` must also be regenerated by the normal pipeline even if their values are unchanged.
-
-Do not add new strategy filters or new outcome-selection artifacts.
+Do not add any new strategy-filter artifact.
 
 ---
 
-### Task 1: Repair the impossible same-bar reseed regression and prove the strict new-leader boundary
+### Task 1: Repair the impossible same-bar reseed fixture and lock the strict boundary
 
 **Files:**
 - Modify: `Swing Trading/research/swing/strategy_v3_shallow_pullback/tests/test_v3_signals.py`
-- Production file inspected but normally unchanged: `Swing Trading/research/swing/strategy_v3_shallow_pullback/generate_v3_signals.py`
+- Inspect only: `Swing Trading/research/swing/strategy_v3_shallow_pullback/generate_v3_signals.py`
 
-**Requirement:** Production semantics remain:
+**Production requirement:**
 
 ```python
 float(row["Close"]) > float(active["Leader_Close"])
 ```
 
-Equality is **not** a new-leader close.
+- [ ] **Step 1: Add a focused equality-boundary regression**
 
-- [ ] **Step 1: Add a focused boundary regression before changing the bad matrix fixture**
-
-Add this test next to the existing new-leader tests:
+Add:
 
 ```python
 def test_new_leader_close_requires_strictly_greater_close():
     frame = make_state_frame()
-    # Leader_Close at seed 220 is exactly 100.0.
+    # Seed row 220 has Leader_Close == 100.0.
     frame.loc[221, ["Close", "High", "Low", "SMA20"]] = [100.0, 100.5, 99.0, 97.0]
 
     events, candidates = scan_symbol_pullbacks(
@@ -96,19 +95,17 @@ def test_new_leader_close_requires_strictly_greater_close():
     assert candidates.empty
 ```
 
-This test locks the strict `>` boundary independently of the matrix.
-
-- [ ] **Step 2: Run the new test and confirm current production behavior**
+- [ ] **Step 2: Run the equality-boundary test**
 
 ```bash
 python -m pytest -q "Swing Trading/research/swing/strategy_v3_shallow_pullback/tests/test_v3_signals.py::test_new_leader_close_requires_strictly_greater_close"
 ```
 
-Expected: PASS. If it fails, stop; the production logic has diverged from the frozen V3 spec and must be reviewed before proceeding.
+Expected: PASS. If it fails, stop because production semantics no longer match the frozen spec.
 
-- [ ] **Step 3: Fix the impossible `NEW_LEADER_CLOSE` fixture in the same-bar reseed matrix**
+- [ ] **Step 3: Fix only the bad matrix fixture**
 
-In `test_same_bar_reseed_runs_after_compatible_closures()`, replace only this case:
+In `test_same_bar_reseed_runs_after_compatible_closures()`, replace:
 
 ```python
 "NEW_LEADER_CLOSE": {
@@ -124,9 +121,9 @@ with:
 },
 ```
 
-Do not weaken the production comparison to `>=`.
+Do not modify production `>` to `>=`.
 
-- [ ] **Step 4: Run the exact regression matrix**
+- [ ] **Step 4: Run the same-bar reseed matrix**
 
 ```bash
 python -m pytest -q "Swing Trading/research/swing/strategy_v3_shallow_pullback/tests/test_v3_signals.py::test_same_bar_reseed_runs_after_compatible_closures"
@@ -134,7 +131,7 @@ python -m pytest -q "Swing Trading/research/swing/strategy_v3_shallow_pullback/t
 
 Expected: PASS.
 
-- [ ] **Step 5: Run the complete signal-test file**
+- [ ] **Step 5: Run the complete signal test file**
 
 ```bash
 python -m pytest -q "Swing Trading/research/swing/strategy_v3_shallow_pullback/tests/test_v3_signals.py"
@@ -142,7 +139,7 @@ python -m pytest -q "Swing Trading/research/swing/strategy_v3_shallow_pullback/t
 
 Expected: zero failures.
 
-- [ ] **Step 6: Commit this isolated regression repair**
+- [ ] **Step 6: Commit**
 
 ```bash
 git add "Swing Trading/research/swing/strategy_v3_shallow_pullback/tests/test_v3_signals.py"
@@ -151,15 +148,13 @@ git commit -m "test: fix Strategy V3 new-leader reseed fixture"
 
 ---
 
-### Task 2: Persist numeric seed RS evidence and make the PIT audit independently verify it
+### Task 2: Persist numeric seed RS evidence and independently audit it
 
 **Files:**
 - Modify: `Swing Trading/research/swing/strategy_v3_shallow_pullback/generate_v3_signals.py`
 - Modify: `Swing Trading/research/swing/strategy_v3_shallow_pullback/analyze_v3_results.py`
 - Modify: `Swing Trading/research/swing/strategy_v3_shallow_pullback/tests/test_v3_signals.py`
 - Modify: `Swing Trading/research/swing/strategy_v3_shallow_pullback/tests/test_v3_analysis.py`
-
-**Interfaces:**
 
 The active state already stores:
 
@@ -168,11 +163,11 @@ Seed_RS_Coverage
 Seed_Composite_RS
 ```
 
-The signal artifact must now preserve both values, and `count_point_in_time_violations()` must independently compare them with the frozen numeric thresholds.
+The signal artifact must carry those values forward.
 
-- [ ] **Step 1: Write a signal-artifact regression that fails on the current head**
+- [ ] **Step 1: Add a failing candidate-schema regression**
 
-In `test_v3_signals.py`, add:
+In `test_v3_signals.py` add:
 
 ```python
 def test_candidate_persists_numeric_seed_rs_evidence():
@@ -186,44 +181,40 @@ def test_candidate_persists_numeric_seed_rs_evidence():
     row["Close"] = 99.0
     row["SMA20"] = 97.0
     row["Composite_RS"] = 82.0
+
     candidate = build_candidate("AAA", row, 98.5, state)
 
     assert candidate["Seed_RS_Coverage"] == pytest.approx(1.0)
     assert candidate["Seed_Composite_RS"] == pytest.approx(80.0)
 ```
 
-- [ ] **Step 2: Run the new test and verify red**
+- [ ] **Step 2: Verify the new test is red on the current implementation**
 
 ```bash
 python -m pytest -q "Swing Trading/research/swing/strategy_v3_shallow_pullback/tests/test_v3_signals.py::test_candidate_persists_numeric_seed_rs_evidence"
 ```
 
-Expected on the pre-fix code: FAIL with missing `Seed_RS_Coverage` and/or `Seed_Composite_RS`.
+Expected before implementation: FAIL because the candidate omits one or both fields.
 
-- [ ] **Step 3: Add the numeric seed fields to the signal schema and candidate**
+- [ ] **Step 3: Extend `SIGNAL_COLUMNS` and `build_candidate()`**
 
-In `SIGNAL_COLUMNS`, place the numeric values with the seed fields:
+Add these fields before the seed boolean fields:
 
 ```python
 "Seed_RS_Coverage",
 "Seed_Composite_RS",
-"Seed_Membership_OK",
-"Seed_RS_Coverage_OK",
-"Seed_Liquidity_OK",
-"Seed_Trend_OK",
-"Seed_RS_OK",
 ```
 
-In `build_candidate()` add:
+Add to the candidate dictionary:
 
 ```python
 "Seed_RS_Coverage": active.get("Seed_RS_Coverage", np.nan),
 "Seed_Composite_RS": active.get("Seed_Composite_RS", np.nan),
 ```
 
-Do not recompute these from signal-day values.
+Do not derive them from signal-day RS values.
 
-- [ ] **Step 4: Run the candidate persistence test and verify green**
+- [ ] **Step 4: Verify candidate persistence is green**
 
 ```bash
 python -m pytest -q "Swing Trading/research/swing/strategy_v3_shallow_pullback/tests/test_v3_signals.py::test_candidate_persists_numeric_seed_rs_evidence"
@@ -231,16 +222,16 @@ python -m pytest -q "Swing Trading/research/swing/strategy_v3_shallow_pullback/t
 
 Expected: PASS.
 
-- [ ] **Step 5: Write two PIT regressions that deliberately keep the booleans true while corrupting the numeric seed evidence**
+- [ ] **Step 5: Extend `_pit_fixture()` with valid numeric seed evidence**
 
-In `test_v3_analysis.py`, first extend `_pit_fixture()` signal data with:
+In `test_v3_analysis.py`, add to the signal dictionary:
 
 ```python
 "Seed_RS_Coverage": 1.0,
 "Seed_Composite_RS": 80.0,
 ```
 
-Then add:
+- [ ] **Step 6: Add two red tests that keep booleans true while corrupting numeric seed evidence**
 
 ```python
 def test_pit_audit_checks_numeric_seed_rs_coverage_even_when_boolean_is_true():
@@ -269,7 +260,7 @@ def test_pit_audit_checks_numeric_seed_composite_rs_even_when_boolean_is_true():
     assert "SEED_RS_BELOW_THRESHOLD" in set(audit["Violation"])
 ```
 
-- [ ] **Step 6: Run those two tests and verify red**
+- [ ] **Step 7: Verify both numeric-audit tests are red**
 
 ```bash
 python -m pytest -q \
@@ -277,11 +268,11 @@ python -m pytest -q \
   "Swing Trading/research/swing/strategy_v3_shallow_pullback/tests/test_v3_analysis.py::test_pit_audit_checks_numeric_seed_composite_rs_even_when_boolean_is_true"
 ```
 
-Expected on the pre-fix PIT audit: FAIL because it trusts only the seed booleans.
+Expected before audit implementation: FAIL.
 
-- [ ] **Step 7: Add independent numeric seed checks to `count_point_in_time_violations()`**
+- [ ] **Step 8: Add independent numeric checks inside `count_point_in_time_violations()`**
 
-Keep the existing boolean checks as corruption signals, then add numeric checks immediately after them:
+Immediately after the existing seed boolean checks add:
 
 ```python
 seed_coverage = pd.to_numeric(
@@ -309,7 +300,7 @@ if pd.isna(seed_composite) or float(seed_composite) < MIN_COMPOSITE_RS:
     )
 ```
 
-The audit is allowed to derive a violation from either an invalid boolean or an invalid numeric value. To prevent a corrupted row from producing duplicate identical audit rows, normalize before returning:
+Before returning the audit, deduplicate identical violations:
 
 ```python
 audit = pd.DataFrame(
@@ -321,7 +312,7 @@ audit = pd.DataFrame(
 return len(audit), audit
 ```
 
-- [ ] **Step 8: Run both numeric PIT tests and the existing PIT mutation suite**
+- [ ] **Step 9: Run the complete PIT-focused analysis tests**
 
 ```bash
 python -m pytest -q "Swing Trading/research/swing/strategy_v3_shallow_pullback/tests/test_v3_analysis.py" -k "point_in_time or pit_audit"
@@ -329,7 +320,7 @@ python -m pytest -q "Swing Trading/research/swing/strategy_v3_shallow_pullback/t
 
 Expected: zero failures.
 
-- [ ] **Step 9: Run the complete signal and analysis test files**
+- [ ] **Step 10: Run complete signal + analysis test files**
 
 ```bash
 python -m pytest -q \
@@ -339,7 +330,7 @@ python -m pytest -q \
 
 Expected: zero failures.
 
-- [ ] **Step 10: Commit the PIT-audit strengthening separately**
+- [ ] **Step 11: Commit**
 
 ```bash
 git add \
@@ -352,17 +343,13 @@ git commit -m "research: strengthen Strategy V3 seed PIT audit"
 
 ---
 
-### Task 3: Make the evidence report state actual pre-window PIT support and actual pre-window seeds
+### Task 3: Report actual pre-window PIT support and actual pre-window seeds
 
 **Files:**
 - Modify: `Swing Trading/research/swing/strategy_v3_shallow_pullback/analyze_v3_results.py`
 - Modify: `Swing Trading/research/swing/strategy_v3_shallow_pullback/tests/test_v3_analysis.py`
 
-**Requirement:** The report must no longer merely repeat the rule. It must state what the committed membership manifest actually supports in the ten canonical sessions before `2023-08-01`, plus how many actual `SEEDED` state events occurred before the primary signal window.
-
-**Interfaces:**
-
-Add:
+**New interface:**
 
 ```python
 def prewindow_pit_support_summary(
@@ -384,20 +371,17 @@ Support_Status
 Actual_Prewindow_Seed_Events
 ```
 
-`Support_Status` is exactly one of `NONE`, `PARTIAL`, `FULL`.
+`Support_Status` must be `NONE`, `PARTIAL`, or `FULL`.
 
-- [ ] **Step 1: Write deterministic `NONE`, `PARTIAL`, and `FULL` support tests**
+- [ ] **Step 1: Add deterministic support-summary tests**
 
-Add a compact canonical window fixture:
+Add:
 
 ```python
 def _prewindow_sessions() -> pd.DatetimeIndex:
     return pd.DatetimeIndex(pd.bdate_range("2023-07-18", "2023-08-02"))
-```
 
-Then add:
 
-```python
 def test_prewindow_support_summary_reports_none_when_manifest_starts_at_signal_window():
     sessions = _prewindow_sessions()
     membership = pd.DataFrame({
@@ -416,7 +400,7 @@ def test_prewindow_support_summary_reports_none_when_manifest_starts_at_signal_w
     assert result["Actual_Prewindow_Seed_Events"] == 0
 
 
-def test_prewindow_support_summary_reports_full_and_counts_actual_seed_events():
+def test_prewindow_support_summary_reports_full_and_counts_seed_events():
     sessions = _prewindow_sessions()
     start = prewindow_seed_start(sessions)
     membership = pd.DataFrame({
@@ -435,21 +419,35 @@ def test_prewindow_support_summary_reports_full_and_counts_actual_seed_events():
     assert result["Sessions_With_PIT_Membership"] == 10
     assert result["Support_Status"] == "FULL"
     assert result["Actual_Prewindow_Seed_Events"] == 1
+
+
+def test_prewindow_support_summary_reports_partial_support():
+    sessions = _prewindow_sessions()
+    start = prewindow_seed_start(sessions)
+    window = sessions[(sessions >= start) & (sessions < SIGNAL_START)]
+    membership = pd.DataFrame({
+        "Symbol": ["AAA"],
+        "Member_From": [pd.Timestamp(window[5])],
+        "Member_To": [pd.Timestamp("2024-01-01")],
+        "Downloadable": [True],
+    })
+    states = pd.DataFrame(columns=["Date", "Event"])
+
+    result = prewindow_pit_support_summary(membership, sessions, states)
+
+    assert result["Sessions_With_PIT_Membership"] == 5
+    assert result["Support_Status"] == "PARTIAL"
 ```
 
-Add one partial case where membership begins on the sixth of the ten pre-window canonical sessions and assert `Support_Status == "PARTIAL"` with `Sessions_With_PIT_Membership == 5`.
-
-- [ ] **Step 2: Run the new support-summary tests and verify red**
+- [ ] **Step 2: Verify the support-summary tests are red**
 
 ```bash
 python -m pytest -q "Swing Trading/research/swing/strategy_v3_shallow_pullback/tests/test_v3_analysis.py" -k "prewindow_support_summary"
 ```
 
-Expected: FAIL because the helper does not exist yet.
+Expected before implementation: FAIL because the helper does not exist.
 
-- [ ] **Step 3: Implement `prewindow_pit_support_summary()` mechanically**
-
-Use:
+- [ ] **Step 3: Implement the helper exactly**
 
 ```python
 def prewindow_pit_support_summary(
@@ -467,11 +465,10 @@ def prewindow_pit_support_summary(
             f"expected 10 canonical pre-window sessions, got {len(window)}"
         )
 
-    supported = 0
-    for date in window:
-        if not active_members_on(membership, pd.Timestamp(date)).empty:
-            supported += 1
-
+    supported = sum(
+        not active_members_on(membership, pd.Timestamp(date)).empty
+        for date in window
+    )
     if supported == 0:
         status = "NONE"
     elif supported == len(window):
@@ -495,15 +492,15 @@ def prewindow_pit_support_summary(
         "Prewindow_Start": pd.Timestamp(window.min()),
         "Prewindow_End": pd.Timestamp(window.max()),
         "Prewindow_Canonical_Sessions": len(window),
-        "Sessions_With_PIT_Membership": supported,
+        "Sessions_With_PIT_Membership": int(supported),
         "Support_Status": status,
         "Actual_Prewindow_Seed_Events": seed_events,
     }
 ```
 
-This helper measures manifest support only; it does not create or alter membership.
+This function measures support only; it never creates membership.
 
-- [ ] **Step 4: Run the support-summary tests**
+- [ ] **Step 4: Run support-summary tests**
 
 ```bash
 python -m pytest -q "Swing Trading/research/swing/strategy_v3_shallow_pullback/tests/test_v3_analysis.py" -k "prewindow_support_summary"
@@ -511,7 +508,7 @@ python -m pytest -q "Swing Trading/research/swing/strategy_v3_shallow_pullback/t
 
 Expected: PASS.
 
-- [ ] **Step 5: Make `write_evidence_report()` consume a precomputed support summary**
+- [ ] **Step 5: Make `write_evidence_report()` accept the summary**
 
 Add keyword-only parameter:
 
@@ -519,7 +516,7 @@ Add keyword-only parameter:
 prewindow_support: dict[str, object],
 ```
 
-Replace the generic pre-window sentence in section 2 with generated evidence:
+In report section 2 emit these lines:
 
 ```python
 f"Pre-window seed boundary: {pd.Timestamp(prewindow_support['Prewindow_Start']).date()} "
@@ -533,13 +530,13 @@ f"status={prewindow_support['Support_Status']}.",
 
 f"Actual pre-window SEEDED events in this run: "
 f"{prewindow_support['Actual_Prewindow_Seed_Events']}.",
+
+"Unsupported pre-window dates are never backfilled with 2023-08-01 membership.",
 ```
 
-The report must still state that unsupported dates are never backfilled.
+- [ ] **Step 6: Wire the summary into historical analysis**
 
-- [ ] **Step 6: Wire the helper into historical analysis before report generation**
-
-After canonical sessions are built and before `write_evidence_report()`:
+After canonical sessions are built:
 
 ```python
 prewindow_support = prewindow_pit_support_summary(
@@ -549,21 +546,21 @@ prewindow_support = prewindow_pit_support_summary(
 )
 ```
 
-Pass `prewindow_support=prewindow_support` to the report writer.
+Pass it to `write_evidence_report()`.
 
 - [ ] **Step 7: Add a report-text regression**
 
-Use a temporary output directory and a small valid report fixture, then assert generated text contains all three evidence lines:
+Create a tiny report fixture using a temporary output directory and a supplied support summary with `Support_Status="NONE"`. Assert the generated text contains:
 
-```text
-Pre-window seed boundary:
-PIT membership support in that boundary:
-Actual pre-window SEEDED events in this run:
+```python
+assert "Pre-window seed boundary:" in text
+assert "PIT membership support in that boundary:" in text
+assert "status=NONE" in text
+assert "Actual pre-window SEEDED events in this run:" in text
+assert "never backfilled" in text
 ```
 
-Also assert the support status value from the supplied summary appears literally, e.g. `status=NONE`.
-
-- [ ] **Step 8: Run the complete analysis tests**
+- [ ] **Step 8: Run complete analysis tests**
 
 ```bash
 python -m pytest -q "Swing Trading/research/swing/strategy_v3_shallow_pullback/tests/test_v3_analysis.py"
@@ -571,7 +568,7 @@ python -m pytest -q "Swing Trading/research/swing/strategy_v3_shallow_pullback/t
 
 Expected: zero failures.
 
-- [ ] **Step 9: Commit the reporting fix**
+- [ ] **Step 9: Commit**
 
 ```bash
 git add \
@@ -582,49 +579,58 @@ git commit -m "research: report Strategy V3 prewindow PIT support"
 
 ---
 
-### Task 4: Regenerate historical Strategy V3 evidence with the strengthened audit
+### Task 4: Regenerate all historical V3 evidence after correctness fixes
 
 **Files:**
-- Regenerate all code-owned files under `Swing Trading/research/swing/strategy_v3_shallow_pullback/output/`
+- Regenerate every code-owned artifact under `Swing Trading/research/swing/strategy_v3_shallow_pullback/output/`.
 
-- [ ] **Step 1: Confirm no unrelated working-tree changes**
+- [ ] **Step 1: Confirm no unrelated changes**
 
 ```bash
 git status --short
 ```
 
-Only expected remediation files may be modified before generation.
+Only remediation files should be modified before generation.
 
-- [ ] **Step 2: Rebuild feature/data audits**
+- [ ] **Step 2: Rebuild feature/RS audits**
 
 ```bash
 python "Swing Trading/research/swing/strategy_v3_shallow_pullback/build_v3_features.py"
 ```
 
-Do not alter parameters in response to the output.
+Do not alter parameters after inspecting output.
 
-- [ ] **Step 3: Regenerate state/signals/entries**
+- [ ] **Step 3: Regenerate state, candidates, entries and cancellations**
 
 ```bash
 python "Swing Trading/research/swing/strategy_v3_shallow_pullback/generate_v3_signals.py"
 ```
 
-The regenerated `v3_signal_candidates.csv` must now contain both columns:
-
-```text
-Seed_RS_Coverage
-Seed_Composite_RS
-```
-
-- [ ] **Step 4: Run the strengthened analysis/PIT audit and regenerate all results**
+- [ ] **Step 4: Regenerate completed outcomes, PIT audit, diagnostics, gates and report**
 
 ```bash
 python "Swing Trading/research/swing/strategy_v3_shallow_pullback/analyze_v3_results.py"
 ```
 
-If numeric seed evidence produces a nonzero PIT count, stop. Do **not** change thresholds or overwrite the failure by editing artifacts.
+If the strengthened numeric seed audit reports a nonzero PIT count, stop. Do not change thresholds to force zero.
 
-- [ ] **Step 5: Verify the report now states actual pre-window support**
+- [ ] **Step 5: Verify numeric seed evidence exists for every candidate row**
+
+```bash
+python - <<'PY'
+from pathlib import Path
+import pandas as pd
+
+path = Path("Swing Trading/research/swing/strategy_v3_shallow_pullback/output/v3_signal_candidates.csv")
+signals = pd.read_csv(path)
+for column in ("Seed_RS_Coverage", "Seed_Composite_RS"):
+    assert column in signals.columns, column
+    assert signals[column].notna().all(), f"missing {column}"
+print("numeric seed evidence complete")
+PY
+```
+
+- [ ] **Step 6: Verify the generated report contains actual pre-window evidence**
 
 ```bash
 python - <<'PY'
@@ -634,13 +640,14 @@ for phrase in (
     "Pre-window seed boundary:",
     "PIT membership support in that boundary:",
     "Actual pre-window SEEDED events in this run:",
+    "never backfilled",
 ):
     assert phrase in text, phrase
-print("prewindow report evidence present")
+print("prewindow evidence present")
 PY
 ```
 
-- [ ] **Step 6: Reconcile signal/entry/outcome accounting and numeric seed columns**
+- [ ] **Step 7: Reconcile all accounting and PIT gates**
 
 ```bash
 python - <<'PY'
@@ -653,11 +660,8 @@ entries = pd.read_csv(out / "v3_entries.csv")
 cancels = pd.read_csv(out / "v3_entry_cancellations.csv")
 setup = pd.read_csv(out / "v3_setup_quality_trades.csv")
 practical = pd.read_csv(out / "v3_practical_trades.csv")
+overlap = pd.read_csv(out / "v3_overlap_diagnostic.csv")
 gates = pd.read_csv(out / "v3_validation_gates.csv")
-
-for column in ("Seed_RS_Coverage", "Seed_Composite_RS"):
-    assert column in signals.columns, column
-    assert signals[column].notna().all(), f"missing {column} in candidate artifact"
 
 qmask = signals["Signal_Qualified"].astype(str).str.lower().isin(["true", "1"])
 qualified = signals.loc[qmask]
@@ -665,7 +669,7 @@ assert set(qualified["Entry_ID"]) == set(entries["Entry_ID"]) | set(cancels["Ent
 assert set(entries["Entry_ID"]).isdisjoint(set(cancels["Entry_ID"]))
 assert set(setup["Entry_ID"]) == set(practical["Entry_ID"])
 assert set(setup["Entry_ID"]).issubset(set(entries["Entry_ID"]))
-
+assert int(overlap.loc[0, "Total_Accepted_Entries"]) == len(entries)
 pit = float(gates.loc[gates["Gate"].eq("POINT_IN_TIME_INTEGRITY"), "Value"].iloc[0])
 assert pit == 0.0, pit
 status = gates.loc[gates["Gate"].eq("FINAL_STATUS"), "Status"].iloc[0]
@@ -676,7 +680,7 @@ print(
 PY
 ```
 
-- [ ] **Step 7: Audit the historical diff**
+- [ ] **Step 8: Inspect the generated diff without interpreting/tuning it**
 
 ```bash
 git diff --stat
@@ -684,9 +688,9 @@ git diff -- "Swing Trading/research/swing/strategy_v3_shallow_pullback/output/v3
 git diff -- "Swing Trading/research/swing/strategy_v3_shallow_pullback/output/research_report.md"
 ```
 
-Expected: schema/report changes and any mechanically regenerated values only. There must be no post-result threshold/filter changes.
+Only mechanically generated schema/evidence/report differences are acceptable.
 
-- [ ] **Step 8: Commit regenerated evidence**
+- [ ] **Step 9: Commit regenerated evidence**
 
 ```bash
 git add "Swing Trading/research/swing/strategy_v3_shallow_pullback/output"
@@ -695,30 +699,32 @@ git commit -m "research: regenerate Strategy V3 evidence after review fixes"
 
 ---
 
-### Task 5: Fresh verification on the final remediation head
+### Task 5: Run fresh verification on the final remediation head
 
 **Files:**
-- No code changes expected unless verification exposes a real defect.
+- No repository changes expected.
 
-- [ ] **Step 1: Run the complete V3 suite and capture fresh output**
+Use repo-root log files so the same metadata script works on Bash and PowerShell. Remove the logs before finishing; never commit them.
 
-On a shell with `pipefail` support:
+- [ ] **Step 1: Run complete V3 tests and capture output**
+
+Bash:
 
 ```bash
 set -o pipefail
-python -m pytest -q "Swing Trading/research/swing/strategy_v3_shallow_pullback/tests" | tee /tmp/pr18-v3-tests.txt
+python -m pytest -q "Swing Trading/research/swing/strategy_v3_shallow_pullback/tests" | tee pr18-v3-tests.txt
+```
+
+PowerShell:
+
+```powershell
+python -m pytest -q "Swing Trading/research/swing/strategy_v3_shallow_pullback/tests" 2>&1 | Tee-Object -FilePath "pr18-v3-tests.txt"
+if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
 ```
 
 Require exit code 0.
 
-If running in PowerShell instead:
-
-```powershell
-python -m pytest -q "Swing Trading/research/swing/strategy_v3_shallow_pullback/tests" 2>&1 | Tee-Object -FilePath "$env:TEMP\pr18-v3-tests.txt"
-if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
-```
-
-- [ ] **Step 2: Run the complete canonical swing-research suite and capture fresh output**
+- [ ] **Step 2: Run the complete canonical swing-research suite and capture output**
 
 Bash:
 
@@ -727,14 +733,14 @@ set -o pipefail
 (
   cd "Swing Trading"
   python -m pytest -q research/swing
-) | tee /tmp/pr18-swing-tests.txt
+) | tee pr18-swing-tests.txt
 ```
 
 PowerShell:
 
 ```powershell
 Push-Location "Swing Trading"
-python -m pytest -q research/swing 2>&1 | Tee-Object -FilePath "$env:TEMP\pr18-swing-tests.txt"
+python -m pytest -q research/swing 2>&1 | Tee-Object -FilePath "..\pr18-swing-tests.txt"
 $code = $LASTEXITCODE
 Pop-Location
 if ($code -ne 0) { exit $code }
@@ -742,159 +748,234 @@ if ($code -ne 0) { exit $code }
 
 Require exit code 0.
 
-- [ ] **Step 3: If the full suite fails, classify against the exact PR base before changing legacy tests**
+- [ ] **Step 3: If the full suite fails, compare with the exact PR base before changing any legacy test**
 
-Use PR #18 base SHA:
+Base SHA:
 
 ```text
 d8e8ea37a7bb490f9410ad8fe3276e63ca3be62a
 ```
 
-Create a temporary worktree at that SHA and run the **same** `cd "Swing Trading" && python -m pytest -q research/swing` command. Only a base-pass/current-fail difference is a V3 regression. Do not weaken legacy tests to make the PR green.
+Create a temporary worktree at that SHA and run the same `cd "Swing Trading" && python -m pytest -q research/swing` command. Base-pass/current-fail means V3 introduced a regression. The same failure on both means surface the existing blocker; do not weaken legacy tests.
 
-- [ ] **Step 4: Parse the fresh passed counts instead of typing them from memory**
-
-Bash paths:
+- [ ] **Step 4: Parse test logs mechanically**
 
 ```bash
 python - <<'PY'
 from pathlib import Path
 import re
-for path in (Path("/tmp/pr18-v3-tests.txt"), Path("/tmp/pr18-swing-tests.txt")):
+
+for path in (Path("pr18-v3-tests.txt"), Path("pr18-swing-tests.txt")):
     text = path.read_text(encoding="utf-8", errors="replace")
     matches = re.findall(r"(\d+) passed", text)
     assert matches, f"no passed count in {path}"
-    assert " failed" not in text.lower(), f"failure text in {path}"
-    print(path.name, matches[-1])
+    assert not re.search(r"\b\d+ failed\b", text), f"failures present in {path}"
+    print(path.name, int(matches[-1]))
 PY
 ```
 
-Use the equivalent `%TEMP%` paths on PowerShell.
-
-- [ ] **Step 5: Verify final diff scope**
+- [ ] **Step 5: Verify diff scope**
 
 ```bash
 git diff --name-only d8e8ea37a7bb490f9410ad8fe3276e63ca3be62a...HEAD
 ```
 
-Expected additions/changes remain V3 implementation/evidence plus this remediation plan. No T1/V2 changes.
+Only V3 files plus this remediation plan may differ from the PR base.
 
-- [ ] **Step 6: Require a clean tree before updating PR metadata**
+- [ ] **Step 6: Verify working tree contains only temporary logs**
 
 ```bash
 git status --short
 ```
 
-Expected: clean.
+Expected untracked files only:
+
+```text
+?? pr18-v3-tests.txt
+?? pr18-swing-tests.txt
+```
+
+If anything else is modified/untracked, resolve it before PR metadata update.
 
 ---
 
-### Task 6: Replace PR #18 verification/result claims from fresh evidence and post a completion comment
+### Task 6: Update PR #18 mechanically from fresh logs/artifacts and post remediation evidence
 
 **Files:**
-- No repository file changes.
+- Create temporarily, then delete without committing: `.pr18_remediation_metadata.py`
 
-- [ ] **Step 1: Derive current historical counts directly from generated CSVs**
+- [ ] **Step 1: Create the deterministic PR metadata script**
 
-Run:
+Create `.pr18_remediation_metadata.py` with exactly:
 
-```bash
-python - <<'PY'
+```python
 from pathlib import Path
+import re
+import subprocess
 import pandas as pd
 
-out = Path("Swing Trading/research/swing/strategy_v3_shallow_pullback/output")
-validation = pd.read_csv(out / "v3_data_validation.csv")
-rs = pd.read_csv(out / "v3_universe_rs_audit.csv")
-signals = pd.read_csv(out / "v3_signal_candidates.csv")
-entries = pd.read_csv(out / "v3_entries.csv")
-cancels = pd.read_csv(out / "v3_entry_cancellations.csv")
-setup = pd.read_csv(out / "v3_setup_quality_trades.csv")
-gates = pd.read_csv(out / "v3_validation_gates.csv")
-qmask = signals["Signal_Qualified"].astype(str).str.lower().isin(["true", "1"])
-usable = validation["Usable"].astype(str).str.lower().isin(["true", "1"]).sum()
-status = gates.loc[gates["Gate"].eq("FINAL_STATUS"), "Status"].iloc[0]
+ROOT = Path.cwd()
+OUT = ROOT / "Swing Trading/research/swing/strategy_v3_shallow_pullback/output"
+
+
+def passed_count(path: Path) -> int:
+    text = path.read_text(encoding="utf-8", errors="replace")
+    matches = re.findall(r"(\d+) passed", text)
+    if not matches:
+        raise SystemExit(f"could not parse passed count from {path}")
+    if re.search(r"\b\d+ failed\b", text):
+        raise SystemExit(f"test failures present in {path}")
+    return int(matches[-1])
+
+
+v3_tests = passed_count(ROOT / "pr18-v3-tests.txt")
+swing_tests = passed_count(ROOT / "pr18-swing-tests.txt")
+validation = pd.read_csv(OUT / "v3_data_validation.csv")
+rs = pd.read_csv(OUT / "v3_universe_rs_audit.csv")
+signals = pd.read_csv(OUT / "v3_signal_candidates.csv")
+entries = pd.read_csv(OUT / "v3_entries.csv")
+cancels = pd.read_csv(OUT / "v3_entry_cancellations.csv")
+setup = pd.read_csv(OUT / "v3_setup_quality_trades.csv")
+gates = pd.read_csv(OUT / "v3_validation_gates.csv")
+report = (OUT / "research_report.md").read_text(encoding="utf-8")
+
+for column in ("Seed_RS_Coverage", "Seed_Composite_RS"):
+    if column not in signals.columns or signals[column].isna().any():
+        raise SystemExit(f"candidate numeric seed evidence invalid: {column}")
+
+for phrase in (
+    "Pre-window seed boundary:",
+    "PIT membership support in that boundary:",
+    "Actual pre-window SEEDED events in this run:",
+):
+    if phrase not in report:
+        raise SystemExit(f"report evidence missing: {phrase}")
+
+qualified_mask = signals["Signal_Qualified"].astype(str).str.lower().isin(["true", "1"])
+qualified = int(qualified_mask.sum())
+usable = int(validation["Usable"].astype(str).str.lower().isin(["true", "1"]).sum())
 pit = float(gates.loc[gates["Gate"].eq("POINT_IN_TIME_INTEGRITY"), "Value"].iloc[0])
-print(f"usable={usable}/{len(validation)}")
-print(f"rs_dates={len(rs)}")
-print(f"candidates={len(signals)}")
-print(f"qualified={int(qmask.sum())}")
-print(f"accepted={len(entries)}")
-print(f"cancelled={len(cancels)}")
-print(f"completed={len(setup)}")
-print(f"pit={pit:g}")
-print(f"status={status}")
-PY
-```
+status = str(gates.loc[gates["Gate"].eq("FINAL_STATUS"), "Status"].iloc[0])
+if pit != 0.0:
+    raise SystemExit(f"refusing PR update with PIT violations={pit}")
+if qualified != len(entries) + len(cancels):
+    raise SystemExit("qualified/accepted/cancelled accounting mismatch")
 
-- [ ] **Step 2: Update the PR body, preserving the scope summary but replacing the Validation block with fresh counts**
+body = f"""## Summary
 
-The updated body must state:
+Implements the locked Strategy V3 shallow-pullback resumption validation plan for issue #16.
 
-```text
-- Strategy V3 tests: <fresh parsed passed count> passed.
-- Full research/swing suite: <fresh parsed passed count> passed.
-- Historical artifacts: <fresh mechanically derived counts>.
-- Point-in-time integrity: 0 violations, including independent numeric seed RS coverage/composite checks.
-- Pre-window PIT support is explicitly reported in research_report.md.
-```
+- Adds adjusted-OHLCV feature construction, PIT membership/RS audits, and a canonical market-session spine.
+- Adds the deterministic leader → 3–10 session shallow pullback → resumption state machine, next-session entries, cancellation audit, and locked setup-quality/practical exit lenses.
+- Adds PIT integrity checks, temporal/outlier/leave-one-symbol-out robustness, breadth and overlap diagnostics, tests, and committed historical evidence.
+- PR #18 remediation strengthens independent numeric seed RS auditing and explicit pre-window PIT evidence reporting without changing the frozen strategy.
 
-Do not reuse `50` or `197` unless the fresh commands independently produce those exact values again.
+## Validation
 
-- [ ] **Step 3: Add a top-level PR comment summarizing remediation evidence**
+- Strategy V3 tests: {v3_tests} passed.
+- Full `research/swing` suite: {swing_tests} passed.
+- Historical artifacts: {usable}/{len(validation)} usable symbols; {len(rs)} RS audit dates; {len(signals)} candidates; {qualified} qualified; {len(entries)} accepted; {len(cancels)} cancelled; {len(setup)} completed paired outcomes.
+- Qualified reconciliation: {qualified} = {len(entries)} + {len(cancels)}; accepted/cancelled IDs are disjoint by the generated reconciliation step.
+- Point-in-time integrity: 0 violations, including independent numeric seed RS coverage and seed Composite_RS checks.
+- `research_report.md` explicitly records actual ten-session pre-window PIT membership support and actual pre-window SEEDED count.
 
-Use this exact structure with actual values substituted from fresh logs/artifacts:
+## Frozen-gate result
 
-```text
-PR #18 review remediation completed.
+The generated frozen validation status is `{status}`. No Strategy V3 thresholds, filters, rank cutoffs, lookbacks, entry/exit rules, diagnostic subgroup gates, or exclusions were tuned after outcomes.
+
+The committed report leaves strategy interpretation and follow-up decisions to the Portfolio Advisor.
+"""
+
+comment = f"""PR #18 review remediation completed.
 
 Addressed:
-1. repaired the impossible NEW_LEADER_CLOSE same-bar reseed fixture while preserving strict Close > Leader_Close production semantics;
-2. persisted Seed_RS_Coverage and Seed_Composite_RS into candidate artifacts and made the PIT audit independently verify both numeric values;
-3. research_report.md now states the actual ten-session pre-window PIT support status and actual pre-window SEEDED count.
+1. repaired the impossible `NEW_LEADER_CLOSE` same-bar reseed fixture while preserving strict `Close > Leader_Close` production semantics;
+2. persisted `Seed_RS_Coverage` and `Seed_Composite_RS` into candidate artifacts and made the PIT audit independently verify both numeric values;
+3. `research_report.md` now states actual ten-session pre-window PIT support and actual pre-window `SEEDED` count.
 
 Fresh verification:
-- V3 suite: <actual> passed.
-- full research/swing suite: <actual> passed.
-- qualified/accepted/cancelled/completed: <actual>/<actual>/<actual>/<actual>.
+- V3 suite: {v3_tests} passed.
+- full `research/swing` suite: {swing_tests} passed.
+- qualified/accepted/cancelled/completed: {qualified}/{len(entries)}/{len(cancels)}/{len(setup)}.
 - PIT violations: 0.
-- frozen final status: <actual>.
+- frozen final status: {status}.
 
 No Strategy V3 thresholds, filters, lookbacks, entry/exit rules, diagnostics-to-gates, or validation gates were changed.
+"""
+
+subprocess.run(
+    ["gh", "pr", "edit", "18", "--body", body],
+    check=True,
+)
+subprocess.run(
+    ["gh", "pr", "comment", "18", "--body", comment],
+    check=True,
+)
 ```
 
-- [ ] **Step 4: Do not mark the review concern resolved by assertion alone**
+- [ ] **Step 2: Run the metadata script**
 
-The Portfolio Advisor will re-review the final PR head. End execution after posting the fresh evidence; do not merge PR #18.
+```bash
+python .pr18_remediation_metadata.py
+```
+
+If GitHub CLI is not authenticated, stop and report that environment blocker. Do not manually reconstruct test counts from memory.
+
+- [ ] **Step 3: Delete all temporary files**
+
+Bash:
+
+```bash
+rm .pr18_remediation_metadata.py pr18-v3-tests.txt pr18-swing-tests.txt
+```
+
+PowerShell:
+
+```powershell
+Remove-Item .pr18_remediation_metadata.py, pr18-v3-tests.txt, pr18-swing-tests.txt
+```
+
+- [ ] **Step 4: Verify clean tree**
+
+```bash
+git status --short
+```
+
+Expected: no output.
+
+- [ ] **Step 5: Stop for Portfolio Advisor re-review**
+
+Do not merge PR #18. The Portfolio Advisor will independently re-read the final head, tests, and regenerated evidence.
 
 ---
 
 ## Final Remediation Checklist
 
 - [ ] Production `NEW_LEADER_CLOSE` remains strict `Close > Leader_Close`.
-- [ ] Equality boundary has its own regression.
-- [ ] Same-bar reseed matrix uses a genuinely `> Leader_Close` new-leader fixture.
-- [ ] `Seed_RS_Coverage` is persisted in `v3_signal_candidates.csv`.
-- [ ] `Seed_Composite_RS` is persisted in `v3_signal_candidates.csv`.
+- [ ] Equality has an explicit no-new-leader regression.
+- [ ] Same-bar reseed matrix uses `Close=100.2` for the `NEW_LEADER_CLOSE` case.
+- [ ] `Seed_RS_Coverage` is persisted in candidate artifacts.
+- [ ] `Seed_Composite_RS` is persisted in candidate artifacts.
 - [ ] PIT audit independently checks numeric seed coverage against `0.80`.
-- [ ] PIT audit independently checks numeric seed composite RS against `70`.
-- [ ] Numeric PIT regressions keep booleans true and still detect corrupted numeric values.
-- [ ] Duplicate identical PIT audit rows are deduplicated mechanically.
-- [ ] Report states exact ten-session pre-window boundary.
-- [ ] Report states number of those sessions with real PIT membership.
-- [ ] Report labels support `NONE`, `PARTIAL`, or `FULL`.
-- [ ] Report states actual pre-window `SEEDED` event count.
-- [ ] No pre-window membership is fabricated.
-- [ ] All historical artifacts are regenerated from code.
-- [ ] Qualified = accepted + cancelled and sets are disjoint.
+- [ ] PIT audit independently checks numeric seed Composite_RS against `70`.
+- [ ] Numeric PIT regressions keep boolean flags true and still detect invalid numeric evidence.
+- [ ] Identical PIT violations are deduplicated before counting.
+- [ ] Report states the exact ten canonical pre-window sessions.
+- [ ] Report states how many of those sessions have real PIT membership.
+- [ ] Report labels support as `NONE`, `PARTIAL`, or `FULL`.
+- [ ] Report states actual pre-window `SEEDED` count.
+- [ ] Unsupported pre-window dates are never backfilled.
+- [ ] Historical artifacts are regenerated from code.
+- [ ] Qualified = accepted + cancelled and accepted/cancelled sets are disjoint.
 - [ ] Setup/practical completed Entry_ID sets remain identical.
+- [ ] Overlap still counts all accepted entries.
 - [ ] Derived PIT violations are zero before profitability interpretation.
-- [ ] Frozen V3 final status is reported mechanically, whatever it is after regeneration.
-- [ ] V3 test suite passes freshly on final head.
-- [ ] Full `research/swing` suite passes freshly on final head.
-- [ ] PR body test counts come from those fresh commands, not previous claims.
+- [ ] Frozen final status is accepted mechanically regardless of PASS/FAIL outcome.
+- [ ] Complete V3 suite passes freshly on the final remediation head.
+- [ ] Complete `research/swing` suite passes freshly on the final remediation head.
+- [ ] PR body and comment are generated from fresh logs/artifacts.
 - [ ] No T1/V2 files changed.
-- [ ] No outcome-driven Strategy V3 tuning occurred.
+- [ ] No outcome-driven V3 tuning occurred.
 
 ## Execution Handoff
 
@@ -906,4 +987,4 @@ superpowers:executing-plans
 
 **Inline execution only. Never use `superpowers:subagent-driven-development`.**
 
-Work task-by-task, run the named tests at each boundary, commit each logical fix separately, regenerate historical evidence only after all correctness fixes are green, and stop after updating PR #18 with fresh evidence for Portfolio Advisor re-review.
+Work task-by-task, run the named tests at each boundary, commit each logical fix separately, regenerate historical evidence only after correctness tests are green, update PR #18 mechanically from fresh logs/artifacts, and stop for Portfolio Advisor re-review.

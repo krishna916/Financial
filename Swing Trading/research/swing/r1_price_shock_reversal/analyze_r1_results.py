@@ -244,6 +244,242 @@ def forward_open_return(
     return float(exit_bar["Open"]) / float(entry_open) - 1.0
 
 
+def _finite_values(values: pd.Series | object) -> np.ndarray:
+    numeric = pd.to_numeric(pd.Series(values), errors="coerce").to_numpy(dtype=float)
+    return numeric[np.isfinite(numeric)]
+
+
+def safe_profit_factor(values: pd.Series) -> float:
+    """Return positive-sum divided by absolute negative-sum, including infinity."""
+
+    numeric = _finite_values(values)
+    gains = float(numeric[numeric > 0].sum())
+    losses = float(-numeric[numeric < 0].sum())
+    if losses == 0:
+        return float("inf") if gains > 0 else 0.0
+    return gains / losses
+
+
+def bootstrap_mean_ci(
+    values: pd.Series,
+    seed: int = BOOTSTRAP_SEED,
+    resamples: int = BOOTSTRAP_RESAMPLES,
+) -> tuple[float, float]:
+    """Return a deterministic percentile bootstrap CI for a mean."""
+
+    numeric = _finite_values(values)
+    if len(numeric) == 0:
+        return float("nan"), float("nan")
+    if resamples <= 0:
+        raise ValueError("resamples must be positive")
+    rng = np.random.default_rng(seed)
+    means = np.empty(resamples, dtype=float)
+    chunk_size = 256
+    for start in range(0, resamples, chunk_size):
+        stop = min(start + chunk_size, resamples)
+        indices = rng.integers(0, len(numeric), size=(stop - start, len(numeric)))
+        means[start:stop] = numeric[indices].mean(axis=1)
+    return float(np.percentile(means, 2.5)), float(np.percentile(means, 97.5))
+
+
+def bootstrap_difference_ci(
+    low: pd.Series,
+    high: pd.Series,
+    seed: int = BOOTSTRAP_SEED,
+    resamples: int = BOOTSTRAP_RESAMPLES,
+) -> tuple[float, float]:
+    """Return a deterministic independent-resampling CI for low-minus-high means."""
+
+    low_values = _finite_values(low)
+    high_values = _finite_values(high)
+    if len(low_values) == 0 or len(high_values) == 0:
+        return float("nan"), float("nan")
+    if resamples <= 0:
+        raise ValueError("resamples must be positive")
+    rng = np.random.default_rng(seed)
+    differences = np.empty(resamples, dtype=float)
+    chunk_size = 128
+    for start in range(0, resamples, chunk_size):
+        stop = min(start + chunk_size, resamples)
+        low_indices = rng.integers(0, len(low_values), size=(stop - start, len(low_values)))
+        high_indices = rng.integers(0, len(high_values), size=(stop - start, len(high_values)))
+        differences[start:stop] = (
+            low_values[low_indices].mean(axis=1) - high_values[high_indices].mean(axis=1)
+        )
+    return float(np.percentile(differences, 2.5)), float(np.percentile(differences, 97.5))
+
+
+def summarize_lens(trades: pd.DataFrame, lens: str) -> dict[str, object]:
+    """Summarize a completed setup or practical result frame."""
+
+    if lens == "setup":
+        gross_column = "Gross_Return"
+        gross_label = "Gross_Return"
+        practical = False
+    elif lens == "practical":
+        gross_column = "Gross_R"
+        gross_label = "Gross_R"
+        practical = True
+    else:
+        raise ValueError("lens must be setup or practical")
+    numeric = _finite_values(trades.get(gross_column, pd.Series(dtype=float)))
+    summary: dict[str, object] = {
+        "Lens": lens,
+        "Completed_Trades": int(len(numeric)),
+        "Winners": int((numeric > 0).sum()),
+        "Losers": int((numeric < 0).sum()),
+        "Win_Rate": float((numeric > 0).mean()) if len(numeric) else np.nan,
+        f"{gross_label}_Mean": float(numeric.mean()) if len(numeric) else np.nan,
+        f"{gross_label}_Median": float(np.median(numeric)) if len(numeric) else np.nan,
+        f"{gross_label}_PF": safe_profit_factor(pd.Series(numeric)),
+    }
+    if practical:
+        for prefix, column in (
+            ("Base", "Base_Net_R"),
+            ("Stress", "Stress_Net_R"),
+            ("Severe", "Severe_Net_R"),
+        ):
+            values = _finite_values(trades.get(column, pd.Series(dtype=float)))
+            summary[f"{prefix}_Net_Mean_R"] = float(values.mean()) if len(values) else np.nan
+            summary[f"{prefix}_Net_R_PF"] = safe_profit_factor(pd.Series(values))
+    else:
+        for prefix in ("Base", "Stress", "Severe"):
+            column = f"{prefix}_Net_Return"
+            values = _finite_values(trades.get(column, pd.Series(dtype=float)))
+            summary[f"{prefix}_Net_Mean_Return"] = float(values.mean()) if len(values) else np.nan
+            summary[f"{prefix}_Net_Return_PF"] = safe_profit_factor(pd.Series(values))
+    return summary
+
+
+def temporal_summary(setup: pd.DataFrame) -> pd.DataFrame:
+    """Summarize the frozen first/second calendar halves."""
+
+    periods = (
+        ("FIRST_HALF", pd.Timestamp("2023-08-01"), pd.Timestamp("2025-02-11")),
+        ("SECOND_HALF", pd.Timestamp("2025-02-12"), pd.Timestamp("2026-08-25")),
+    )
+    rows: list[dict[str, object]] = []
+    dates = pd.to_datetime(setup.get("Signal_Date", pd.Series(dtype="datetime64[ns]")), errors="coerce")
+    for label, start, end in periods:
+        subset = setup.loc[dates.between(start, end)]
+        values = _finite_values(subset.get("Base_Net_Return", pd.Series(dtype=float)))
+        rows.append(
+            {
+                "Period": label,
+                "Signal_Start": start,
+                "Signal_End": end,
+                "Completed_Trades": len(values),
+                "Base_Net_Mean_Return": float(values.mean()) if len(values) else np.nan,
+                "Base_Net_Return_PF": safe_profit_factor(pd.Series(values)),
+            }
+        )
+    return pd.DataFrame(rows)
+
+
+def outlier_robustness(setup: pd.DataFrame) -> pd.DataFrame:
+    """Remove the five largest gross setup winners and recompute base metrics."""
+
+    ordered = setup.sort_values("Gross_Return", ascending=False).reset_index(drop=True)
+    remaining = ordered.iloc[5:].copy()
+    values = _finite_values(remaining.get("Base_Net_Return", pd.Series(dtype=float)))
+    return pd.DataFrame(
+        [
+            {
+                "Analysis": "TOP_FIVE_GROSS_WINNERS_REMOVED",
+                "Removed_Trades": min(5, len(ordered)),
+                "Remaining_Trades": len(values),
+                "Base_Net_Mean_Return": float(values.mean()) if len(values) else np.nan,
+                "Base_Net_Return_PF": safe_profit_factor(pd.Series(values)),
+            }
+        ]
+    )
+
+
+def leave_one_symbol_out(setup: pd.DataFrame) -> pd.DataFrame:
+    """Recompute base setup metrics after omitting each represented symbol."""
+
+    rows: list[dict[str, object]] = []
+    for symbol in sorted(setup.get("Symbol", pd.Series(dtype=str)).dropna().astype(str).unique()):
+        subset = setup.loc[setup["Symbol"].astype(str).ne(symbol)]
+        values = _finite_values(subset.get("Base_Net_Return", pd.Series(dtype=float)))
+        rows.append(
+            {
+                "Omitted_Symbol": symbol,
+                "Remaining_Trades": len(values),
+                "Base_Net_Mean_Return": float(values.mean()) if len(values) else np.nan,
+                "Base_Net_Return_PF": safe_profit_factor(pd.Series(values)),
+            }
+        )
+    return pd.DataFrame(rows)
+
+
+def control_comparison(setup: pd.DataFrame, controls: pd.DataFrame) -> pd.DataFrame:
+    """Compare low-volume setup returns with raw high-volume controls."""
+
+    low = _finite_values(setup.get("Gross_Return", pd.Series(dtype=float)))
+    high = _finite_values(controls.get("Gross_Return", pd.Series(dtype=float)))
+    return pd.DataFrame(
+        [
+            {
+                "Low_Volume_Trades": len(low),
+                "High_Volume_Trades": len(high),
+                "Low_Volume_Gross_Mean_Return": float(low.mean()) if len(low) else np.nan,
+                "High_Volume_Gross_Mean_Return": float(high.mean()) if len(high) else np.nan,
+                "Low_Volume_Gross_PF": safe_profit_factor(pd.Series(low)),
+                "High_Volume_Gross_PF": safe_profit_factor(pd.Series(high)),
+                "Low_Mean_Exceeds_High": bool(len(low) and len(high) and low.mean() > high.mean()),
+                "Low_PF_Exceeds_High": bool(
+                    len(low) and len(high) and safe_profit_factor(pd.Series(low)) > safe_profit_factor(pd.Series(high))
+                ),
+            }
+        ]
+    )
+
+
+def bootstrap_summary(
+    setup: pd.DataFrame,
+    practical: pd.DataFrame,
+    controls: pd.DataFrame,
+) -> pd.DataFrame:
+    """Persist the four required deterministic bootstrap intervals."""
+
+    low = _finite_values(setup.get("Gross_Return", pd.Series(dtype=float)))
+    high = _finite_values(controls.get("Gross_Return", pd.Series(dtype=float)))
+    metrics = [
+        ("GROSS_SETUP_MEAN_RETURN", setup.get("Gross_Return", pd.Series(dtype=float)), np.mean),
+        ("BASE_NET_SETUP_MEAN_RETURN", setup.get("Base_Net_Return", pd.Series(dtype=float)), np.mean),
+        ("BASE_NET_PRACTICAL_MEAN_R", practical.get("Base_Net_R", pd.Series(dtype=float)), np.mean),
+    ]
+    rows: list[dict[str, object]] = []
+    for label, values, _ in metrics:
+        numeric = _finite_values(values)
+        lower, upper = bootstrap_mean_ci(pd.Series(numeric))
+        rows.append(
+            {
+                "Metric": label,
+                "Estimate": float(numeric.mean()) if len(numeric) else np.nan,
+                "CI_Lower": lower,
+                "CI_Upper": upper,
+                "Seed": BOOTSTRAP_SEED,
+                "Resamples": BOOTSTRAP_RESAMPLES,
+                "Confidence": 0.95,
+            }
+        )
+    lower, upper = bootstrap_difference_ci(pd.Series(low), pd.Series(high))
+    rows.append(
+        {
+            "Metric": "LOW_MINUS_HIGH_GROSS_MEAN_RETURN",
+            "Estimate": float(low.mean() - high.mean()) if len(low) and len(high) else np.nan,
+            "CI_Lower": lower,
+            "CI_Upper": upper,
+            "Seed": BOOTSTRAP_SEED,
+            "Resamples": BOOTSTRAP_RESAMPLES,
+            "Confidence": 0.95,
+        }
+    )
+    return pd.DataFrame(rows)
+
+
 def _read_csv_or_empty(path: Path, parse_dates: list[str] | None = None) -> pd.DataFrame:
     if not path.exists():
         return pd.DataFrame()
@@ -336,6 +572,18 @@ if __name__ == "__main__":
     controls.to_csv(output_dir / "r1_control_outcomes.csv", index=False, date_format="%Y-%m-%d")
     pd.DataFrame(forward_rows).to_csv(
         output_dir / "r1_forward_diagnostics.csv", index=False, date_format="%Y-%m-%d"
+    )
+    pd.DataFrame([summarize_lens(setup, "setup"), summarize_lens(practical, "practical")]).to_csv(
+        output_dir / "r1_validation_summary.csv", index=False
+    )
+    temporal_summary(setup).to_csv(
+        output_dir / "r1_temporal_summary.csv", index=False, date_format="%Y-%m-%d"
+    )
+    outlier_robustness(setup).to_csv(output_dir / "r1_outlier_robustness.csv", index=False)
+    leave_one_symbol_out(setup).to_csv(output_dir / "r1_leave_one_symbol_out.csv", index=False)
+    control_comparison(setup, controls).to_csv(output_dir / "r1_control_comparison.csv", index=False)
+    bootstrap_summary(setup, practical, controls).to_csv(
+        output_dir / "r1_bootstrap_summary.csv", index=False
     )
     print(
         f"paired_setup={len(setup)} paired_practical={len(practical)} "

@@ -10,6 +10,9 @@ import pytest
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 from analyze_r1_results import (  # noqa: E402
+    bootstrap_difference_ci,
+    bootstrap_mean_ci,
+    safe_profit_factor,
     simulate_control_outcome,
     simulate_practical_trade,
     simulate_setup_quality_trade,
@@ -160,3 +163,21 @@ def test_forward_open_return_uses_entry_plus_holding_sessions():
 
     assert result == pytest.approx(106.0 / 101.0 - 1.0)
 
+
+def test_safe_profit_factor_boundaries():
+    assert safe_profit_factor(pd.Series([2.0, -1.0])) == pytest.approx(2.0)
+    assert safe_profit_factor(pd.Series([2.0, 1.0])) == np.inf
+    assert safe_profit_factor(pd.Series([-2.0, -1.0])) == 0.0
+
+
+def test_bootstrap_is_deterministic():
+    values = pd.Series([0.01, 0.02, -0.01, 0.03])
+
+    assert bootstrap_mean_ci(values) == bootstrap_mean_ci(values)
+
+
+def test_bootstrap_difference_is_deterministic():
+    low = pd.Series([0.03, 0.02, -0.01])
+    high = pd.Series([0.01, -0.01, 0.0])
+
+    assert bootstrap_difference_ci(low, high) == bootstrap_difference_ci(low, high)

@@ -10,10 +10,15 @@ sys.path.insert(0, str(MODULE_ROOT))
 
 from build_e1_trades import (  # noqa: E402
     build_trade_for_event,
+    canonical_sessions,
     next_distinct_quarterly_result,
     next_session_after,
     scheduled_exit_session,
 )
+
+
+def test_canonical_sessions_accepts_schema_empty_market_input():
+    assert canonical_sessions(pd.DataFrame()).empty
 
 
 def test_entry_is_immediate_next_session_and_exit_is_after_40_complete_sessions():

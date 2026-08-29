@@ -39,6 +39,8 @@ def _timestamp(value: object) -> pd.Timestamp:
 
 
 def _sessions(frame: pd.DataFrame) -> pd.DatetimeIndex:
+    if frame is None or "Date" not in frame.columns:
+        return pd.DatetimeIndex([])
     dates = pd.DatetimeIndex(pd.to_datetime(frame["Date"], errors="coerce"))
     if dates.tz is not None:
         dates = dates.tz_localize(None)

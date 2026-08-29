@@ -131,3 +131,68 @@ def test_action_normalization_persists_old_to_new_share_count_factor(
 
     assert action is not None
     assert action["Share_Count_Factor"] == pytest.approx(expected_factor)
+
+
+def test_filing_snapshot_reuses_validated_symbol_checkpoint(monkeypatch, tmp_path):
+    checkpoint_dir = tmp_path / "stage-a-work"
+
+    class _CheckpointNseClient:
+        calls = 0
+
+        def list_legacy(self, symbol: str) -> list[dict[str, object]]:
+            self.calls += 1
+            return [_filing(symbol)]
+
+        def list_integrated(self, symbol: str) -> list[dict[str, object]]:
+            self.calls += 1
+            return []
+
+    class _CheckpointBseClient:
+        calls = 0
+
+        def list_results(self, symbol: str) -> list[dict[str, object]]:
+            self.calls += 1
+            return []
+
+    nse = _CheckpointNseClient()
+    bse = _CheckpointBseClient()
+    monkeypatch.setattr(snapshot, "NseResultsClient", lambda: nse)
+    monkeypatch.setattr(snapshot, "BseResultsClient", lambda: bse)
+
+    first = snapshot.build_filing_snapshot(
+        ["AAA"], pd.Timestamp("2026-08-25"), checkpoint_dir=checkpoint_dir
+    )
+    first_calls = (nse.calls, bse.calls)
+
+    def fail_if_called(*args, **kwargs):
+        raise AssertionError("validated checkpoint was not reused")
+
+    monkeypatch.setattr(nse, "list_legacy", fail_if_called)
+    monkeypatch.setattr(nse, "list_integrated", fail_if_called)
+    monkeypatch.setattr(bse, "list_results", fail_if_called)
+    second = snapshot.build_filing_snapshot(
+        ["AAA"], pd.Timestamp("2026-08-25"), checkpoint_dir=checkpoint_dir
+    )
+
+    assert first_calls == (2, 1)
+    pd.testing.assert_frame_equal(first[0], second[0])
+    pd.testing.assert_frame_equal(first[1], second[1])
+    pd.testing.assert_frame_equal(first[2], second[2])
+
+
+def test_corporate_action_snapshot_records_bse_mapping_source_error(monkeypatch):
+    class _FakeNseClient:
+        def _get_json(self, url, params):
+            return {"data": []}
+
+    class _FakeBseClient:
+        def resolve_identifier(self, symbol):
+            raise ValueError("official BSE response was not JSON")
+
+    monkeypatch.setattr(snapshot, "NseResultsClient", _FakeNseClient)
+    monkeypatch.setattr(snapshot, "BseResultsClient", _FakeBseClient)
+
+    actions = snapshot.build_corporate_action_snapshot(["AAA"], pd.Timestamp("2026-08-25"))
+
+    audit = actions.attrs["audit"]
+    assert "BSE_SOURCE_ERROR" in audit["Violation"].tolist()

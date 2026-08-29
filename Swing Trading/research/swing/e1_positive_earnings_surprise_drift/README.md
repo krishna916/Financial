@@ -20,5 +20,24 @@ python "Swing Trading/research/swing/e1_positive_earnings_surprise_drift/build_e
 python "Swing Trading/research/swing/e1_positive_earnings_surprise_drift/run_e1_validation.py"
 ```
 
+Long Stage A acquisitions may use an explicitly temporary checkpoint directory;
+validated per-symbol filing/EPS checkpoints are reused and final frozen CSVs are
+still rebuilt deterministically. Checkpoints contain source/provenance fields
+only and are not Stage B inputs:
+
+```text
+python "Swing Trading/research/swing/e1_positive_earnings_surprise_drift/build_e1_source_snapshot.py" --work-dir .e1-stage-a-work
+```
+
+Before a full acquisition, validate the official exchange adapters with the
+fixed source-only smoke set (`RELIANCE`, `TCS`, and `INFY`):
+
+```text
+python "Swing Trading/research/swing/e1_positive_earnings_surprise_drift/build_e1_source_snapshot.py" --smoke --work-dir .e1-stage-a-smoke
+```
+
+Smoke mode writes filing, EPS, corporate-action, and source-audit snapshots
+only. It does not download prices or calculate SUE, trades, or returns.
+
 The formal status is the `FINAL_STATUS` value in
 `output/e1_validation_gates.csv`.

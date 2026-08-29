@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import json
 import re
 from datetime import datetime, timezone
 from pathlib import Path
@@ -24,6 +25,7 @@ from constants import (
 from load_e1_inputs import active_members_on, load_membership, sha256_file
 from source_clients import (
     BSE_RESULTS_URL,
+    BseIdentifierError,
     NSE_LEGACY_URL,
     BseResultsClient,
     NseResultsClient,
@@ -48,6 +50,9 @@ SOURCE_COLUMNS = [
     "Source_URL",
     "Source_Record_ID",
     "Machine_Readable_URL",
+    "BSE_Scrip_Code",
+    "BSE_Scrip_ID",
+    "BSE_Mapping_Source_URL",
 ]
 EPS_COLUMNS = SOURCE_COLUMNS + ["EPS", "EPS_Source_Resolved"]
 ACTION_COLUMNS = [
@@ -107,67 +112,199 @@ def _fetch_eps(
     return extract_basic_eps_continuing(response.content, pd.Timestamp(period_end), basis)
 
 
-def build_filing_snapshot(
-    symbols: list[str], cutoff: pd.Timestamp
+def _checkpoint_stem(symbol: str) -> str:
+    return re.sub(r"[^A-Z0-9_.-]", "_", str(symbol).strip().upper())
+
+
+def _checkpoint_paths(checkpoint_dir: Path, symbol: str) -> dict[str, Path]:
+    stem = _checkpoint_stem(symbol)
+    return {
+        "filings": checkpoint_dir / f"{stem}.filings.csv",
+        "eps": checkpoint_dir / f"{stem}.eps.csv",
+        "audit": checkpoint_dir / f"{stem}.audit.csv",
+        "metadata": checkpoint_dir / f"{stem}.checkpoint.json",
+    }
+
+
+def _read_symbol_checkpoint(
+    checkpoint_dir: Path | None,
+    symbol: str,
+    cutoff: pd.Timestamp,
+) -> tuple[pd.DataFrame, pd.DataFrame, pd.DataFrame] | None:
+    if checkpoint_dir is None:
+        return None
+    paths = _checkpoint_paths(checkpoint_dir, symbol)
+    try:
+        metadata = json.loads(paths["metadata"].read_text(encoding="utf-8"))
+        if (
+            metadata.get("Checkpoint_Version") != 1
+            or metadata.get("Symbol") != str(symbol).strip().upper()
+            or metadata.get("Source_Cutoff") != str(cutoff.date())
+            or metadata.get("Complete") is not True
+        ):
+            return None
+        frames = {
+            "filings": pd.read_csv(paths["filings"]),
+            "eps": pd.read_csv(paths["eps"]),
+            "audit": pd.read_csv(paths["audit"]),
+        }
+        required = {
+            "filings": set(SOURCE_COLUMNS),
+            "eps": set(EPS_COLUMNS),
+            "audit": {"Symbol", "Source_Record_ID", "Violation", "Detail"},
+        }
+        for name, frame in frames.items():
+            artifact = metadata.get("Artifacts", {}).get(name, {})
+            if not required[name].issubset(frame.columns):
+                return None
+            if len(frame) != int(artifact.get("Row_Count", -1)):
+                return None
+            if sha256_file(paths[name]) != artifact.get("SHA256"):
+                return None
+        return frames["filings"], frames["eps"], frames["audit"]
+    except (OSError, TypeError, ValueError, KeyError, json.JSONDecodeError):
+        return None
+
+
+def _write_symbol_checkpoint(
+    checkpoint_dir: Path,
+    symbol: str,
+    cutoff: pd.Timestamp,
+    filings: pd.DataFrame,
+    eps: pd.DataFrame,
+    audit: pd.DataFrame,
+) -> None:
+    checkpoint_dir.mkdir(parents=True, exist_ok=True)
+    paths = _checkpoint_paths(checkpoint_dir, symbol)
+    frames = {
+        "filings": filings.reindex(columns=SOURCE_COLUMNS),
+        "eps": eps.reindex(columns=EPS_COLUMNS),
+        "audit": audit.reindex(columns=["Symbol", "Source_Record_ID", "Violation", "Detail"]),
+    }
+    for name, frame in frames.items():
+        frame.to_csv(paths[name], index=False)
+    metadata = {
+        "Checkpoint_Version": 1,
+        "Symbol": str(symbol).strip().upper(),
+        "Source_Cutoff": str(cutoff.date()),
+        "Complete": True,
+        "Artifacts": {
+            name: {"Row_Count": len(frame), "SHA256": sha256_file(paths[name])}
+            for name, frame in frames.items()
+        },
+        "Scope": "official filing, EPS, and source-audit provenance only",
+    }
+    paths["metadata"].write_text(json.dumps(metadata, indent=2) + "\n", encoding="utf-8")
+
+
+def _canonicalize_source_frame(frame: pd.DataFrame) -> pd.DataFrame:
+    result = frame.copy()
+    if "Fiscal_Period_End" in result:
+        result["Fiscal_Period_End"] = pd.to_datetime(result["Fiscal_Period_End"], errors="coerce")
+    if "Public_Timestamp" in result:
+        result["Public_Timestamp"] = pd.to_datetime(
+            result["Public_Timestamp"], errors="coerce", utc=True
+        )
+    for column in result.columns:
+        if column not in {"Fiscal_Period_End", "Public_Timestamp", "EPS"}:
+            result[column] = result[column].astype("string")
+    return result
+
+
+def _build_filing_snapshot_for_symbol(
+    symbol: str,
+    cutoff: pd.Timestamp,
+    nse: NseResultsClient,
+    bse: BseResultsClient,
+    fetch_session: requests.Session,
 ) -> tuple[pd.DataFrame, pd.DataFrame, pd.DataFrame]:
-    """Acquire and normalize official filing catalogs without return calculations."""
+    records: list[tuple[dict[str, object], str]] = []
+    audit_rows: list[dict[str, object]] = []
+    try:
+        records.extend((record, "legacy") for record in nse.list_legacy(symbol))
+        records.extend((record, "integrated") for record in nse.list_integrated(symbol))
+    except Exception as exc:  # noqa: BLE001 - preserve per-symbol source errors
+        audit_rows.append({"Symbol": symbol, "Violation": "NSE_SOURCE_ERROR", "Detail": str(exc)})
+    try:
+        records.extend((record, "bse") for record in bse.list_results(symbol))
+    except BseIdentifierError as exc:
+        audit_rows.append({"Symbol": symbol, "Violation": exc.code, "Detail": str(exc)})
+    except Exception as exc:  # noqa: BLE001 - preserve per-symbol source errors
+        audit_rows.append({"Symbol": symbol, "Violation": "BSE_SOURCE_ERROR", "Detail": str(exc)})
+
+    filing_rows: list[dict[str, object]] = []
+    eps_rows: list[dict[str, object]] = []
+    for raw, feed in records:
+        normalized = normalize_bse_record(raw) if feed == "bse" else normalize_nse_record(raw, feed)
+        public_timestamp = normalized.get("Public_Timestamp")
+        public_date = (
+            pd.Timestamp(public_timestamp).tz_convert("Asia/Kolkata").tz_localize(None).normalize()
+            if pd.notna(public_timestamp) and getattr(public_timestamp, "tz", None) is not None
+            else _naive_date(public_timestamp)
+        )
+        if pd.notna(public_date) and public_date > cutoff:
+            continue
+        filing_rows.append({column: normalized.get(column) for column in SOURCE_COLUMNS})
+        try:
+            eps = _fetch_eps(normalized, fetch_session)
+        except Exception as exc:  # noqa: BLE001 - keep failed parsing explicit in audit
+            eps = None
+            audit_rows.append(
+                {
+                    "Symbol": normalized.get("Symbol", symbol),
+                    "Source_Record_ID": normalized.get("Source_Record_ID", ""),
+                    "Violation": "EPS_PARSE_ERROR",
+                    "Detail": f"{type(exc).__name__}: {exc}",
+                }
+            )
+        if eps is not None:
+            eps_rows.append(
+                {
+                    **{column: normalized.get(column) for column in SOURCE_COLUMNS},
+                    "EPS": eps,
+                    "EPS_Source_Resolved": True,
+                }
+            )
+    return (
+        pd.DataFrame(filing_rows, columns=SOURCE_COLUMNS),
+        pd.DataFrame(eps_rows, columns=EPS_COLUMNS),
+        pd.DataFrame(audit_rows, columns=["Symbol", "Source_Record_ID", "Violation", "Detail"]),
+    )
+
+
+def build_filing_snapshot(
+    symbols: list[str],
+    cutoff: pd.Timestamp,
+    checkpoint_dir: Path | str | None = None,
+) -> tuple[pd.DataFrame, pd.DataFrame, pd.DataFrame]:
+    """Acquire normalized official filings, optionally using validated checkpoints."""
 
     nse = NseResultsClient()
     bse = BseResultsClient()
     fetch_session = requests.Session()
     fetch_session.headers.update({"User-Agent": "Mozilla/5.0 E1-source-snapshot"})
-    filing_rows: list[dict[str, object]] = []
-    eps_rows: list[dict[str, object]] = []
-    audit_rows: list[dict[str, object]] = []
+    checkpoint_root = Path(checkpoint_dir) if checkpoint_dir is not None else None
     cutoff = pd.Timestamp(cutoff).normalize()
-
+    filing_frames: list[pd.DataFrame] = []
+    eps_frames: list[pd.DataFrame] = []
+    audit_frames: list[pd.DataFrame] = []
     for symbol in sorted({str(item).strip().upper() for item in symbols if str(item).strip()}):
-        records: list[tuple[dict[str, object], str]] = []
-        try:
-            records.extend((record, "legacy") for record in nse.list_legacy(symbol))
-            records.extend((record, "integrated") for record in nse.list_integrated(symbol))
-        except Exception as exc:  # noqa: BLE001 - preserve per-symbol source errors
-            audit_rows.append({"Symbol": symbol, "Violation": "NSE_SOURCE_ERROR", "Detail": str(exc)})
-        try:
-            records.extend((record, "bse") for record in bse.list_results(symbol))
-        except Exception as exc:  # noqa: BLE001 - preserve per-symbol source errors
-            audit_rows.append({"Symbol": symbol, "Violation": "BSE_SOURCE_ERROR", "Detail": str(exc)})
-
-        for raw, feed in records:
-            normalized = normalize_bse_record(raw) if feed == "bse" else normalize_nse_record(raw, feed)
-            public_timestamp = normalized.get("Public_Timestamp")
-            public_date = (
-                pd.Timestamp(public_timestamp).tz_convert("Asia/Kolkata").tz_localize(None).normalize()
-                if pd.notna(public_timestamp) and getattr(public_timestamp, "tz", None) is not None
-                else _naive_date(public_timestamp)
-            )
-            if pd.notna(public_date) and public_date > cutoff:
-                continue
-            filing_rows.append({column: normalized.get(column) for column in SOURCE_COLUMNS})
-            try:
-                eps = _fetch_eps(normalized, fetch_session)
-            except Exception as exc:  # noqa: BLE001 - keep failed parsing explicit in audit
-                eps = None
-                audit_rows.append(
-                    {
-                        "Symbol": normalized.get("Symbol", symbol),
-                        "Source_Record_ID": normalized.get("Source_Record_ID", ""),
-                        "Violation": "EPS_PARSE_ERROR",
-                        "Detail": f"{type(exc).__name__}: {exc}",
-                    }
-                )
-            if eps is not None:
-                eps_rows.append(
-                    {
-                        **{column: normalized.get(column) for column in SOURCE_COLUMNS},
-                        "EPS": eps,
-                        "EPS_Source_Resolved": True,
-                    }
-                )
-
-    filings = pd.DataFrame(filing_rows, columns=SOURCE_COLUMNS)
-    eps = pd.DataFrame(eps_rows, columns=EPS_COLUMNS)
-    audit = pd.DataFrame(audit_rows)
+        checkpoint = _read_symbol_checkpoint(checkpoint_root, symbol, cutoff)
+        if checkpoint is None:
+            checkpoint = _build_filing_snapshot_for_symbol(symbol, cutoff, nse, bse, fetch_session)
+            if checkpoint_root is not None:
+                _write_symbol_checkpoint(checkpoint_root, symbol, cutoff, *checkpoint)
+        filing_frame, eps_frame, audit_frame = checkpoint
+        filing_frames.append(_canonicalize_source_frame(filing_frame))
+        eps_frames.append(_canonicalize_source_frame(eps_frame))
+        audit_frames.append(audit_frame)
+    filings = pd.concat(filing_frames, ignore_index=True) if filing_frames else pd.DataFrame(columns=SOURCE_COLUMNS)
+    eps = pd.concat(eps_frames, ignore_index=True) if eps_frames else pd.DataFrame(columns=EPS_COLUMNS)
+    audit = (
+        pd.concat(audit_frames, ignore_index=True)
+        if audit_frames
+        else pd.DataFrame(columns=["Symbol", "Source_Record_ID", "Violation", "Detail"])
+    )
     return filings, eps, audit
 
 
@@ -268,18 +405,29 @@ def build_corporate_action_snapshot(
     bse = BseResultsClient()
     cutoff = pd.Timestamp(cutoff).normalize()
     for symbol in sorted({str(item).strip().upper() for item in symbols if str(item).strip()}):
+        try:
+            bse_identity = bse.resolve_identifier(symbol)
+        except BseIdentifierError as exc:
+            bse_identity = None
+            audit.append({"Symbol": symbol, "Violation": exc.code, "Detail": str(exc)})
+        except Exception as exc:  # noqa: BLE001 - preserve malformed official responses in the audit
+            bse_identity = None
+            audit.append({"Symbol": symbol, "Violation": "BSE_SOURCE_ERROR", "Detail": str(exc)})
         endpoints = [
             (
                 nse,
                 "https://www.nseindia.com/api/corporates-corporateActions",
                 {"index": "equities", "symbol": symbol},
             ),
-            (
-                bse,
-                "https://api.bseindia.com/BseIndiaAPI/api/CorporateAction/w",
-                {"scripcode": symbol, "pageno": 1, "pagesize": 100},
-            ),
         ]
+        if bse_identity is not None:
+            endpoints.append(
+                (
+                    bse,
+                    "https://api.bseindia.com/BseIndiaAPI/api/CorporateAction/w",
+                    {"scripcode": bse_identity["BSE_Scrip_Code"], "pageno": 1, "pagesize": 100},
+                )
+            )
         for client, url, params in endpoints:
             try:
                 payload = client._get_json(url, params)
@@ -454,9 +602,49 @@ def write_manifest(input_dir: Path, provenance: dict[str, str]) -> pd.DataFrame:
     return manifest
 
 
-def _write_stage_a(input_dir: Path, membership: pd.DataFrame, symbols: list[str]) -> None:
+SMOKE_SYMBOLS = ("RELIANCE", "TCS", "INFY")
+
+
+def run_source_smoke(
+    work_dir: Path | str,
+    symbols: tuple[str, ...] = SMOKE_SYMBOLS,
+) -> dict[str, object]:
+    """Run fixed-symbol official-source validation without prices, SUE, or returns."""
+
+    root = Path(work_dir)
+    root.mkdir(parents=True, exist_ok=True)
+    filings, eps, audit = build_filing_snapshot(
+        list(symbols), SOURCE_CUTOFF, checkpoint_dir=root / "filings"
+    )
+    actions = build_corporate_action_snapshot(list(symbols), SOURCE_CUTOFF)
+    filings.to_csv(root / "smoke_exchange_filings.csv", index=False)
+    eps.to_csv(root / "smoke_eps.csv", index=False)
+    actions.to_csv(root / "smoke_corporate_actions.csv", index=False)
+    audit.to_csv(root / "smoke_source_audit.csv", index=False)
+    return {
+        "Symbols": list(symbols),
+        "Filing_Rows": len(filings),
+        "EPS_Rows": len(eps),
+        "Corporate_Action_Rows": len(actions),
+        "Audit_Rows": len(audit),
+        "Output_Directory": str(root),
+    }
+
+
+def _write_stage_a(
+    input_dir: Path,
+    membership: pd.DataFrame,
+    symbols: list[str],
+    work_dir: Path | str | None = None,
+) -> None:
     input_dir.mkdir(parents=True, exist_ok=True)
-    filings, eps, audit = build_filing_snapshot(symbols, SOURCE_CUTOFF)
+    work_root = Path(work_dir) if work_dir is not None else None
+    if work_root is None:
+        filings, eps, audit = build_filing_snapshot(symbols, SOURCE_CUTOFF)
+    else:
+        filings, eps, audit = build_filing_snapshot(
+            symbols, SOURCE_CUTOFF, checkpoint_dir=work_root / "filings"
+        )
     actions = build_corporate_action_snapshot(symbols, SOURCE_CUTOFF)
     action_audit = actions.attrs.get("audit", pd.DataFrame())
     if isinstance(action_audit, pd.DataFrame) and not action_audit.empty:
@@ -480,10 +668,20 @@ def repository_root() -> Path:
 
 
 if __name__ == "__main__":
+    import argparse
+
+    parser = argparse.ArgumentParser(description="Build the immutable E1 Stage A source snapshot")
+    parser.add_argument("--smoke", action="store_true", help="validate a fixed small official-source symbol set only")
+    parser.add_argument("--work-dir", type=Path, help="temporary directory for resumable source checkpoints")
+    args = parser.parse_args()
     module_root = Path(__file__).resolve().parent
+    if args.smoke:
+        smoke_root = args.work_dir or module_root / "smoke-work"
+        print(run_source_smoke(smoke_root))
+        raise SystemExit(0)
     membership = load_membership(
         repository_root() / "Swing Trading/research/swing/market_breadth/config/nifty500_membership.csv"
     )
     symbols = _symbols_active_in_window(membership)["Symbol"].astype(str).tolist()
-    _write_stage_a(module_root / "input", membership, symbols)
+    _write_stage_a(module_root / "input", membership, symbols, work_dir=args.work_dir)
     print(f"Frozen E1 Stage A snapshot for {len(symbols)} symbols")

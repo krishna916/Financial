@@ -18,8 +18,18 @@ import requests
 NSE_LEGACY_URL = "https://www.nseindia.com/api/corporates-financial-results"
 NSE_INTEGRATED_URL = "https://www.nseindia.com/api/integrated-filing-results"
 BSE_RESULTS_URL = "https://api.bseindia.com/BseIndiaAPI/api/Result/w"
+BSE_SECURITY_MASTER_URL = "https://api.bseindia.com/BseIndiaAPI/api/ListofScripData/w"
 INDIA_TZ = "Asia/Kolkata"
 TRANSIENT_STATUS_CODES = {429, 500, 502, 503, 504}
+
+
+class BseIdentifierError(ValueError):
+    """Raised when an official BSE security identity cannot be resolved uniquely."""
+
+    def __init__(self, code: str, symbol: str) -> None:
+        self.code = code
+        self.symbol = symbol
+        super().__init__(f"{code}: {symbol}")
 
 
 def _key(value: object) -> str:
@@ -153,6 +163,11 @@ def normalize_bse_record(record: dict[str, object]) -> dict[str, object]:
         "Source_URL": str(source_url or ""),
         "Source_Record_ID": str(_get(record, "recordId", "id", "scripCode") or ""),
         "Machine_Readable_URL": str(machine_url or ""),
+        "BSE_Scrip_Code": str(_get(record, "BSE_Scrip_Code", "scripCode", "securityCode") or ""),
+        "BSE_Scrip_ID": str(
+            _get(record, "BSE_Scrip_ID", "scripId", "scripID", "instrumentCode", "symbol") or ""
+        ),
+        "BSE_Mapping_Source_URL": str(_get(record, "BSE_Mapping_Source_URL") or ""),
     }
     if _get(record, "EPS", "basicEPS", "basicEps") is not None:
         row["EPS"] = _get(record, "EPS", "basicEPS", "basicEps")
@@ -164,7 +179,7 @@ def _records(payload: object) -> list[dict[str, object]]:
         return [item for item in payload if isinstance(item, dict)]
     if not isinstance(payload, dict):
         return []
-    for key in ("data", "results", "result", "records", "items"):
+    for key in ("data", "results", "result", "records", "items", "Table", "Table1"):
         value = payload.get(key)
         if isinstance(value, list):
             return [item for item in value if isinstance(item, dict)]
@@ -173,6 +188,55 @@ def _records(payload: object) -> list[dict[str, object]]:
             if nested:
                 return nested
     return []
+
+
+def resolve_bse_identifier(
+    symbol: str,
+    securities: list[dict[str, object]],
+    source_url: str = BSE_SECURITY_MASTER_URL,
+) -> dict[str, str]:
+    """Resolve an NSE symbol using exact fields from an official BSE security list."""
+
+    requested = str(symbol).strip().upper()
+    matches: list[dict[str, str]] = []
+    for record in securities:
+        aliases = {
+            str(value).strip().upper()
+            for value in (
+                _get(record, "Scrip ID", "scripId", "scripID", "instrumentCode"),
+                _get(record, "Symbol", "symbol", "securitySymbol"),
+            )
+            if value is not None and str(value).strip()
+        }
+        if requested not in aliases:
+            continue
+        code_value = _get(record, "Scrip Code", "scripCode", "securityCode", "security_code")
+        scrip_code = str(code_value).strip() if code_value is not None else ""
+        scrip_id_value = _get(
+            record,
+            "Scrip ID",
+            "scripId",
+            "scripID",
+            "instrumentCode",
+            "Symbol",
+            "symbol",
+        )
+        scrip_id = str(scrip_id_value).strip() if scrip_id_value is not None else ""
+        if not scrip_code.isdigit() or not scrip_id:
+            continue
+        matches.append(
+            {
+                "BSE_Scrip_Code": scrip_code,
+                "BSE_Scrip_ID": scrip_id,
+                "BSE_Mapping_Source_URL": source_url,
+            }
+        )
+    unique = {(item["BSE_Scrip_Code"], item["BSE_Scrip_ID"]): item for item in matches}
+    if not unique:
+        raise BseIdentifierError("BSE_IDENTIFIER_UNRESOLVED", requested)
+    if len(unique) != 1:
+        raise BseIdentifierError("BSE_IDENTIFIER_AMBIGUOUS", requested)
+    return next(iter(unique.values()))
 
 
 class _OfficialResultsClient:
@@ -243,9 +307,44 @@ class NseResultsClient(_OfficialResultsClient):
 
 
 class BseResultsClient(_OfficialResultsClient):
+    def __init__(
+        self,
+        session: requests.Session | None = None,
+        timeout: float = 30.0,
+        max_retries: int = 3,
+    ) -> None:
+        super().__init__(session=session, timeout=timeout, max_retries=max_retries)
+        self._security_master: list[dict[str, object]] | None = None
+
+    def list_securities(self) -> list[dict[str, object]]:
+        """Load the official BSE equity security master once per client."""
+
+        if self._security_master is None:
+            payload = self._get_json(
+                BSE_SECURITY_MASTER_URL,
+                {"scripcode": "", "Group": "", "industry": "", "segment": "", "status": ""},
+            )
+            self._security_master = _records(payload)
+        return list(self._security_master)
+
+    def resolve_identifier(self, symbol: str) -> dict[str, str]:
+        return resolve_bse_identifier(symbol, self.list_securities())
+
     def list_results(self, symbol: str) -> list[dict[str, object]]:
+        identity = self.resolve_identifier(symbol)
         payload = self._get_json(
             BSE_RESULTS_URL,
-            {"scripcode": symbol, "pageno": 1, "pagesize": 100},
+            {"scripcode": identity["BSE_Scrip_Code"], "pageno": 1, "pagesize": 100},
         )
-        return _records(payload)
+        rows: list[dict[str, object]] = []
+        for record in _records(payload):
+            enriched = dict(record)
+            enriched.update(
+                {
+                    "BSE_Scrip_Code": identity["BSE_Scrip_Code"],
+                    "BSE_Scrip_ID": identity["BSE_Scrip_ID"],
+                    "BSE_Mapping_Source_URL": identity["BSE_Mapping_Source_URL"],
+                }
+            )
+            rows.append(enriched)
+        return rows

@@ -4,15 +4,19 @@ import sys
 from pathlib import Path
 
 import pandas as pd
+import pytest
 
 MODULE_ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(MODULE_ROOT))
 
 from source_clients import (  # noqa: E402
+    BSE_SECURITY_MASTER_URL,
     BseResultsClient,
+    BseIdentifierError,
     NseResultsClient,
     normalize_bse_record,
     normalize_nse_record,
+    resolve_bse_identifier,
 )
 
 
@@ -83,10 +87,51 @@ def test_source_clients_return_catalog_records_without_strategy_fields(monkeypat
         },
     )
     bse = BseResultsClient()
-    monkeypatch.setattr(bse, "_get_json", lambda *args, **kwargs: {"data": [{"scripCode": "1"}]})
+
+    def bse_payload(url, params=None):
+        if url == BSE_SECURITY_MASTER_URL:
+            return {"data": [{"Scrip ID": "AAA", "Scrip Code": "1"}]}
+        return {"data": [{"scripCode": "1"}]}
+
+    monkeypatch.setattr(bse, "_get_json", bse_payload)
 
     nse_rows = nse.list_legacy("AAA")
     bse_rows = bse.list_results("AAA")
     forbidden = {"Gross_Return", "Net_Return", "SUE", "Cohort"}
     assert forbidden.isdisjoint(nse_rows[0])
     assert forbidden.isdisjoint(bse_rows[0])
+
+
+def test_bse_result_requests_use_resolved_numeric_scrip_code(monkeypatch):
+    client = BseResultsClient()
+    calls = []
+
+    def fake_get_json(url, params=None):
+        calls.append((url, params))
+        if url == BSE_SECURITY_MASTER_URL:
+            return {"data": [{"Scrip ID": "AAA", "Scrip Code": "500001"}]}
+        return {"data": [{"scripCode": "500001", "scripName": "AAA"}]}
+
+    monkeypatch.setattr(client, "_get_json", fake_get_json)
+
+    rows = client.list_results("AAA")
+
+    assert calls[0][0] == BSE_SECURITY_MASTER_URL
+    assert calls[1][1]["scripcode"] == "500001"
+    assert calls[1][1]["scripcode"] != "AAA"
+    assert rows[0]["BSE_Scrip_Code"] == "500001"
+    assert rows[0]["BSE_Scrip_ID"] == "AAA"
+
+
+def test_bse_identifier_resolution_fails_closed_for_unresolved_and_ambiguous_symbols():
+    with pytest.raises(BseIdentifierError, match="BSE_IDENTIFIER_UNRESOLVED"):
+        resolve_bse_identifier("AAA", [])
+
+    with pytest.raises(BseIdentifierError, match="BSE_IDENTIFIER_AMBIGUOUS"):
+        resolve_bse_identifier(
+            "AAA",
+            [
+                {"Scrip ID": "AAA", "Scrip Code": "500001"},
+                {"Scrip ID": "AAA", "Scrip Code": "500002"},
+            ],
+        )

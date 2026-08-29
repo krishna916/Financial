@@ -112,3 +112,52 @@ def test_next_distinct_quarterly_result_ignores_same_event_and_revisions():
     )
     assert result is not None
     assert result["Fiscal_Period_End"] == pd.Timestamp("2024-03-31")
+
+
+def _market_frame(dates: pd.DatetimeIndex, open_value: float = 100.0) -> pd.DataFrame:
+    values = [open_value] * len(dates)
+    return pd.DataFrame(
+        {
+            "Date": dates,
+            "Open": values,
+            "High": [value + 2.0 for value in values],
+            "Low": [value - 2.0 for value in values],
+            "Close": values,
+            "Volume": [1000.0] * len(values),
+        }
+    )
+
+
+def test_missing_stock_bar_on_immediate_canonical_entry_session_cancels():
+    sessions = pd.bdate_range("2024-01-01", periods=45)
+    stock = _market_frame(sessions.delete(1))
+    index = _market_frame(sessions).drop(columns=["Volume"])
+
+    trade, reason = build_trade_for_event(_event(), stock, index, pd.DataFrame())
+
+    assert trade is None
+    assert reason == "NO_VALID_NEXT_SESSION_OPEN"
+
+
+def test_holding_period_uses_canonical_sessions_when_stock_bar_is_missing():
+    sessions = pd.bdate_range("2024-01-01", periods=50)
+    stock = _market_frame(sessions.delete(10))
+    index = _market_frame(sessions).drop(columns=["Volume"])
+
+    trade, reason = build_trade_for_event(_event(), stock, index, pd.DataFrame())
+
+    assert reason == ""
+    assert trade is not None
+    assert trade["Exit_Date"] == sessions[41]
+    assert trade["Holding_Sessions"] == 40
+
+
+def test_missing_stock_bar_on_exact_canonical_exit_cancels():
+    sessions = pd.bdate_range("2024-01-01", periods=50)
+    stock = _market_frame(sessions.delete(41))
+    index = _market_frame(sessions).drop(columns=["Volume"])
+
+    trade, reason = build_trade_for_event(_event(), stock, index, pd.DataFrame())
+
+    assert trade is None
+    assert reason == "NO_VALID_EXIT_OPEN"

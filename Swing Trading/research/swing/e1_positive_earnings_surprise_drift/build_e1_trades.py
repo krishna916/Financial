@@ -46,6 +46,12 @@ def _sessions(frame: pd.DataFrame) -> pd.DatetimeIndex:
     return pd.DatetimeIndex(sorted(set(dates)))
 
 
+def canonical_sessions(index_prices: pd.DataFrame) -> pd.DatetimeIndex:
+    """Return the frozen benchmark session calendar used for all trade timing."""
+
+    return _sessions(index_prices)
+
+
 def next_session_after(date: pd.Timestamp, sessions: pd.DatetimeIndex) -> pd.Timestamp | None:
     """Return the first canonical session strictly after a public date."""
 
@@ -125,6 +131,7 @@ def build_trade_for_event(
     stock_prices: pd.DataFrame,
     index_prices: pd.DataFrame,
     all_original_events: pd.DataFrame,
+    canonical_sessions: pd.DatetimeIndex | None = None,
 ) -> tuple[dict[str, object] | None, str]:
     """Build one completed trade using the same lifecycle for every cohort."""
 
@@ -136,7 +143,13 @@ def build_trade_for_event(
     index = index_prices.copy()
     index["Date"] = index["Date"].map(_date)
     index = index.sort_values("Date").drop_duplicates("Date", keep="first")
-    sessions = _sessions(stock)
+    sessions = (
+        pd.DatetimeIndex(canonical_sessions).normalize().sort_values().unique()
+        if canonical_sessions is not None
+        else _sessions(index)
+    )
+    if len(sessions) == 0:
+        return None, "NO_VALID_NEXT_SESSION_OPEN"
     event_date = _date(event.get("Event_Public_Date", event.get("Event_Public_Timestamp")))
     entry_date = next_session_after(event_date, sessions)
     if entry_date is None:
@@ -226,6 +239,7 @@ def build_primary_trades(
         "NEGATIVE_CONTROL": [],
     }
     cancellations: list[dict[str, object]] = []
+    calendar = canonical_sessions(index_prices)
     for _, event in classified_events.iterrows():
         cohort = str(event.get("Cohort", ""))
         if cohort not in outputs:
@@ -233,7 +247,13 @@ def build_primary_trades(
         symbol_prices = stock_prices.loc[
             stock_prices["Symbol"].astype(str).str.upper().eq(str(event.get("Symbol", "")).upper())
         ] if "Symbol" in stock_prices else stock_prices
-        trade, reason = build_trade_for_event(event, symbol_prices, index_prices, all_original_events)
+        trade, reason = build_trade_for_event(
+            event,
+            symbol_prices,
+            index_prices,
+            all_original_events,
+            canonical_sessions=calendar,
+        )
         if trade is None:
             cancellations.append({"Event_ID": event.get("Event_ID", ""), "Symbol": event.get("Symbol", ""), "Cohort": cohort, "Reason": reason})
         else:

@@ -132,6 +132,35 @@ def is_timely_result(period_end: pd.Timestamp, public_date: pd.Timestamp, fiscal
     return bool(end <= public <= end + pd.Timedelta(days=days))
 
 
+def _flag(value: object) -> bool:
+    if value is None or (not isinstance(value, (list, tuple, dict, set)) and pd.isna(value)):
+        return False
+    if isinstance(value, str):
+        return value.strip().lower() in {"true", "1", "yes", "y"}
+    return bool(value)
+
+
+def formal_event_eligibility(row: pd.Series) -> tuple[bool, str]:
+    """Apply the frozen primary-event rules in their formal decision order."""
+
+    event_date = _date(row.get("Event_Public_Date"))
+    if pd.isna(event_date) or not (PRIMARY_START <= event_date <= PRIMARY_END):
+        return False, "NON_PRIMARY_EVENT"
+    if not _flag(row.get("PIT_Membership_OK", False)):
+        return False, "PIT_MEMBERSHIP_NOT_ACTIVE"
+    if not _flag(row.get("Timely_Result", False)):
+        return False, "LATE_RESULT"
+    selected_basis = row.get("Selected_Basis")
+    basis = "" if selected_basis is None or pd.isna(selected_basis) else str(selected_basis).strip()
+    if not basis:
+        return False, "INVALID_REPORTING_BASIS"
+    if str(row.get("EPS_Source_Status") or "") == "CROSS_EXCHANGE_EPS_MISMATCH":
+        return False, "CROSS_EXCHANGE_EPS_MISMATCH"
+    if not _flag(row.get("EPS_Source_Resolved", False)):
+        return False, "EPS_SOURCE_UNRESOLVED"
+    return True, ""
+
+
 def _eps_key(frame: pd.DataFrame) -> pd.Series:
     return (
         frame["Symbol"].astype(str).str.strip().str.upper()
@@ -217,8 +246,9 @@ def _coverage_row(event_master: pd.DataFrame) -> pd.DataFrame:
             ]
         )
     technical = event_master.loc[
-        event_master["PIT_Membership_OK"].astype(bool)
-        & event_master["Timely_Result"].astype(bool)
+        event_master["Event_Public_Date"].map(_date).between(PRIMARY_START, PRIMARY_END, inclusive="both")
+        & event_master["PIT_Membership_OK"].map(_flag)
+        & event_master["Timely_Result"].map(_flag)
         & event_master["Selected_Basis"].notna()
         & event_master["Machine_Readable_URL"].notna()
     ]
@@ -299,31 +329,19 @@ def build_event_master(
             "Source_Exchanges": event.get("Source_Exchanges", ""),
             "Original_or_Revised": event.get("Original_or_Revised", "ORIGINAL"),
             "Original_Record_Count": event.get("Original_Record_Count", 1),
-            "Primary_Event": (
-                bool(PRIMARY_START <= public_date <= PRIMARY_END) and pit_ok
-                if pd.notna(public_date)
-                else False
-            ),
+            "Primary_Event": False,
         }
+        eligible, eligibility_reason = formal_event_eligibility(pd.Series(row))
+        row["Primary_Event"] = eligible
         rows.append(row)
-        reason = None
-        if not pit_ok:
-            reason = "PIT_MEMBERSHIP_NOT_ACTIVE"
-        elif not (pd.notna(public_date) and PRIMARY_START <= public_date <= PRIMARY_END):
-            reason = "NON_PRIMARY_EVENT"
-        elif not timely:
-            reason = "LATE_RESULT"
-        elif not basis:
-            reason = "INVALID_REPORTING_BASIS"
-        elif mismatch or not resolved:
-            reason = "EPS_SOURCE_UNRESOLVED"
-        if reason:
+        if eligibility_reason:
             exclusions.append(
                 {
                     "Event_ID": event_id,
                     "Symbol": symbol,
                     "Fiscal_Period_End": period_end,
-                    "Reason": reason,
+                    "Reason": eligibility_reason,
+                    "Exclusion_Stage": "EVENT",
                     "Event_Public_Date": public_date,
                 }
             )
@@ -331,7 +349,7 @@ def build_event_master(
     master = pd.DataFrame(rows)
     exclusion_frame = pd.DataFrame(
         exclusions,
-        columns=["Event_ID", "Symbol", "Fiscal_Period_End", "Reason", "Event_Public_Date"],
+        columns=["Event_ID", "Symbol", "Fiscal_Period_End", "Reason", "Exclusion_Stage", "Event_Public_Date"],
     )
     coverage = _coverage_row(master)
     return master, exclusion_frame, coverage, ignored

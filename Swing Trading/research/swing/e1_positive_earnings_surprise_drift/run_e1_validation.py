@@ -192,6 +192,8 @@ def build_integrity_audit(
     trade_frames: dict[str, pd.DataFrame] | None = None,
     cancellations: pd.DataFrame | None = None,
     final_package_issues: list[dict[str, object]] | None = None,
+    event_exclusions: pd.DataFrame | None = None,
+    sue_exclusions: pd.DataFrame | None = None,
 ) -> pd.DataFrame:
     """Create explicit systemic integrity rows; never filter violations away."""
 
@@ -218,6 +220,63 @@ def build_integrity_audit(
     sue = sue_events if isinstance(sue_events, pd.DataFrame) else pd.DataFrame()
     if not sue.empty and "Event_ID" in sue and "Cohort" in sue:
         add("SUE_CLASSIFICATION", "SUE_COHORT_OVERLAP", int(sue["Event_ID"].duplicated().sum()))
+    if not events.empty and "Event_ID" in events:
+        formal_ids = set(
+            events.loc[
+                events.get("Primary_Event", pd.Series(False, index=events.index)).map(bool),
+                "Event_ID",
+            ].dropna().astype(str)
+        )
+        finite_ids = (
+            set(sue["Event_ID"].dropna().astype(str))
+            if not sue.empty and "Event_ID" in sue
+            else set()
+        )
+        sue_exclusion_frame = sue_exclusions if isinstance(sue_exclusions, pd.DataFrame) else pd.DataFrame()
+        sue_exclusion_ids = (
+            set(sue_exclusion_frame["Event_ID"].dropna().astype(str))
+            if not sue_exclusion_frame.empty and "Event_ID" in sue_exclusion_frame
+            else set()
+        )
+        event_exclusion_frame = event_exclusions if isinstance(event_exclusions, pd.DataFrame) else pd.DataFrame()
+        event_exclusion_ids = (
+            set(event_exclusion_frame["Event_ID"].dropna().astype(str))
+            if not event_exclusion_frame.empty and "Event_ID" in event_exclusion_frame
+            else set()
+        )
+        unaccounted = formal_ids - finite_ids - sue_exclusion_ids
+        add(
+            "EVENT_ACCOUNTING",
+            "FORMAL_EVENT_UNACCOUNTED",
+            len(unaccounted),
+            sorted(unaccounted),
+        )
+        duplicate_finite = (
+            set(sue.loc[sue["Event_ID"].duplicated(keep=False), "Event_ID"].dropna().astype(str))
+            if not sue.empty and "Event_ID" in sue
+            else set()
+        )
+        duplicate_sue_exclusions = (
+            set(
+                sue_exclusion_frame.loc[
+                    sue_exclusion_frame["Event_ID"].duplicated(keep=False), "Event_ID"
+                ].dropna().astype(str)
+            )
+            if not sue_exclusion_frame.empty and "Event_ID" in sue_exclusion_frame
+            else set()
+        )
+        double_accounted = (
+            (finite_ids & sue_exclusion_ids)
+            | duplicate_finite
+            | duplicate_sue_exclusions
+            | (formal_ids & event_exclusion_ids)
+        )
+        add(
+            "EVENT_ACCOUNTING",
+            "FORMAL_EVENT_DOUBLE_ACCOUNTED",
+            len(double_accounted),
+            sorted(double_accounted),
+        )
     for cohort, frame in (trade_frames or {}).items():
         if frame.empty:
             continue
@@ -345,7 +404,7 @@ def run_validation(
         loaded.get("e1_eps_snapshot.csv", pd.DataFrame()),
         membership,
     )
-    _, sue_events, classified = build_sue_events(
+    _, sue_events, classified, sue_exclusions = build_sue_events(
         event_master,
         loaded.get("e1_eps_snapshot.csv", pd.DataFrame()),
         loaded.get("e1_corporate_actions_snapshot.csv", pd.DataFrame()),
@@ -356,8 +415,11 @@ def run_validation(
     trade_frames, cancellations = build_primary_trades(classified_events, stock_prices, index_prices, event_master)
 
     event_schema = OUTPUT_SCHEMAS["e1_event_master.csv"] + ("Event_Public_Timestamp", "Fiscal_Period_End", "Reporting_Basis", "Selected_Basis", "Fiscal_Quarter", "Timely_Result", "PIT_Membership_OK", "EPS_Source_Status", "EPS_Source_Resolved", "Machine_Readable_URL", "Source_Exchanges", "Original_or_Revised", "Original_Record_Count")
-    exclusion_schema = OUTPUT_SCHEMAS["e1_event_exclusions.csv"] + ("Symbol", "Fiscal_Period_End", "Event_Public_Date")
-    write_event_outputs(output_root, _ensure_frame(event_master, event_schema), _ensure_frame(exclusions, exclusion_schema), coverage)
+    exclusion_schema = OUTPUT_SCHEMAS["e1_event_exclusions.csv"] + ("Symbol", "Fiscal_Period_End", "Exclusion_Stage", "Event_Public_Date")
+    event_exclusions = pd.concat([exclusions, sue_exclusions], ignore_index=True)
+    if not event_exclusions.empty:
+        event_exclusions = event_exclusions.drop_duplicates("Event_ID", keep="first")
+    write_event_outputs(output_root, _ensure_frame(event_master, event_schema), _ensure_frame(event_exclusions, exclusion_schema), coverage)
     sue_schema = OUTPUT_SCHEMAS["e1_sue_events.csv"] + ("Symbol", "Fiscal_Period_End", "Event_Public_Date", "Reporting_Basis", "Current_EPS", "EPS_t_minus_4", "D_t", "D_t_minus_1", "D_t_minus_2", "D_t_minus_3", "D_t_minus_4", "D_t_minus_5", "D_t_minus_6", "D_t_minus_7", "D_t_minus_8", "Historical_Mean", "Historical_SD")
     write_sue_outputs(output_root, _ensure_frame(sue_events, sue_schema), _ensure_frame(sue_events, sue_schema), _ensure_frame(classified, sue_schema))
     write_trade_outputs(output_root, trade_frames)
@@ -366,7 +428,15 @@ def run_validation(
     negative = trade_frames.get("NEGATIVE_CONTROL", pd.DataFrame())
     analysis = write_analysis_outputs(output_root, positive, neutral, negative)
     coverage_value = float(coverage.iloc[0].get("Machine_Readable_EPS_Resolution", np.nan)) if not coverage.empty else np.nan
-    integrity = build_integrity_audit(manifest_audit, event_master, classified, trade_frames, cancellations)
+    integrity = build_integrity_audit(
+        manifest_audit,
+        event_master,
+        classified,
+        trade_frames,
+        cancellations,
+        event_exclusions=exclusions,
+        sue_exclusions=sue_exclusions,
+    )
     temporal = analysis.get("e1_temporal_summary.csv", temporal_summary(positive))
     year_loo = analysis.get("e1_leave_one_year_out.csv", leave_one_year_out(positive))
     top_five = analysis.get("e1_top_five_robustness.csv", top_five_robustness(positive))

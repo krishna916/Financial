@@ -13,6 +13,7 @@ sys.path.insert(0, str(MODULE_ROOT))
 from compute_e1_sue import (  # noqa: E402
     _sue_from_changes,
     adjust_historical_eps_for_actions,
+    build_sue_events,
     classify_sue,
     compute_sue_for_event,
 )
@@ -61,6 +62,37 @@ def test_future_public_historical_eps_makes_sue_unavailable():
     row, reason = compute_sue_for_event(event, history, pd.DataFrame())
     assert row is None
     assert reason in {"INSUFFICIENT_EPS_HISTORY", "FUTURE_EPS_USED"}
+
+
+def test_sue_unavailable_reason_is_persisted_as_explicit_exclusion():
+    event_master = pd.DataFrame(
+        [
+            {
+                "Event_ID": "AAA-20240630-CONSOLIDATED",
+                "Symbol": "AAA",
+                "Fiscal_Period_End": pd.Timestamp("2024-06-30"),
+                "Event_Public_Date": pd.Timestamp("2024-08-10"),
+                "Selected_Basis": "CONSOLIDATED",
+                "Reporting_Basis": "CONSOLIDATED",
+                "Timely_Result": True,
+                "PIT_Membership_OK": True,
+                "EPS_Source_Status": "RESOLVED",
+                "EPS_Source_Resolved": True,
+                "Primary_Event": True,
+            }
+        ]
+    )
+    eps = pd.DataFrame(columns=["Symbol", "Fiscal_Period_End", "Reporting_Basis", "EPS"])
+
+    _, _, _, exclusions = build_sue_events(event_master, eps, pd.DataFrame())
+
+    assert exclusions[["Event_ID", "Reason", "Exclusion_Stage"]].to_dict("records") == [
+        {
+            "Event_ID": "AAA-20240630-CONSOLIDATED",
+            "Reason": "MISSING_CURRENT_EPS",
+            "Exclusion_Stage": "SUE",
+        }
+    ]
 
 
 def test_split_adjusts_only_pre_split_history():

@@ -8,6 +8,7 @@ import numpy as np
 import pandas as pd
 
 from constants import PRIMARY_END, PRIMARY_START
+from build_e1_events import formal_event_eligibility
 
 
 def _date(value: object) -> pd.Timestamp:
@@ -216,20 +217,52 @@ def build_sue_events(
     event_master: pd.DataFrame,
     eps_snapshot: pd.DataFrame,
     actions: pd.DataFrame,
-) -> tuple[pd.DataFrame, pd.DataFrame, pd.DataFrame]:
-    """Build EPS-history, finite-SUE, and classified-cohort evidence frames."""
+) -> tuple[pd.DataFrame, pd.DataFrame, pd.DataFrame, pd.DataFrame]:
+    """Build EPS-history, finite-SUE, classified-cohort, and SUE-exclusion evidence."""
 
     successful: list[dict[str, object]] = []
+    exclusions: list[dict[str, object]] = []
     for _, event in event_master.iterrows():
-        if "Primary_Event" in event and not bool(event["Primary_Event"]):
+        eligible, eligibility_reason = formal_event_eligibility(event)
+        if not eligible:
             continue
-        row, _ = compute_sue_for_event(event, eps_snapshot, actions)
+        row, reason = compute_sue_for_event(event, eps_snapshot, actions)
         if row is not None:
             successful.append(row)
-    history = pd.DataFrame(successful)
+        else:
+            exclusions.append(
+                {
+                    "Event_ID": event.get("Event_ID", ""),
+                    "Symbol": str(event.get("Symbol", "")).upper(),
+                    "Fiscal_Period_End": _date(event.get("Fiscal_Period_End")),
+                    "Event_Public_Date": _date(event.get("Event_Public_Date")),
+                    "Reason": reason or "INSUFFICIENT_EPS_HISTORY",
+                    "Exclusion_Stage": "SUE",
+                }
+            )
+    history_columns = [
+        "Event_ID",
+        "Symbol",
+        "Fiscal_Period_End",
+        "Event_Public_Date",
+        "Reporting_Basis",
+        "Current_EPS",
+        "EPS_t_minus_4",
+        "D_t",
+        *[f"D_t_minus_{offset}" for offset in range(1, 9)],
+        "Historical_Mean",
+        "Historical_SD",
+        "SUE",
+        "Cohort",
+    ]
+    history = pd.DataFrame(successful, columns=history_columns)
     sue_events = history.copy()
     cohorts = history.copy()
-    return history, sue_events, cohorts
+    sue_exclusions = pd.DataFrame(
+        exclusions,
+        columns=["Event_ID", "Symbol", "Fiscal_Period_End", "Event_Public_Date", "Reason", "Exclusion_Stage"],
+    )
+    return history, sue_events, cohorts, sue_exclusions
 
 
 def write_sue_outputs(output_dir: Path, history: pd.DataFrame, sue_events: pd.DataFrame, cohorts: pd.DataFrame) -> None:

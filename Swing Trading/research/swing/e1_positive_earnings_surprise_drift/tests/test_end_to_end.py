@@ -14,8 +14,10 @@ from constants import (
     SECOND_HALF_START,
     SOURCE_CUTOFF,
 )
+from build_e1_events import build_event_master
+from compute_e1_sue import build_sue_events
 from load_e1_inputs import active_members_on, verify_manifest
-from run_e1_validation import evaluate_gates, run_validation
+from run_e1_validation import build_integrity_audit, evaluate_gates, run_validation
 
 
 def test_frozen_windows_are_exact():
@@ -93,6 +95,93 @@ def test_technical_coverage_boundary_is_frozen():
     )
     assert below == "INVALID_RESEARCH_RUN"
     assert exact != "INVALID_RESEARCH_RUN"
+
+
+def test_late_result_is_excluded_from_sue_and_trades():
+    period_ends = pd.period_range("2021Q2", "2024Q2", freq="Q").to_timestamp(how="end").normalize()
+    public_timestamp = "2024-08-20 10:00:00+05:30"
+    filing = {
+        "Symbol": "AAA",
+        "Exchange": "NSE",
+        "Feed": "legacy",
+        "Fiscal_Period_End": period_ends[-1],
+        "Fiscal_Quarter": "Q1",
+        "Reporting_Basis": "CONSOLIDATED",
+        "Quarterly_or_Annual": "QUARTERLY",
+        "Original_or_Revised": "ORIGINAL",
+        "Public_Timestamp": public_timestamp,
+        "Source_URL": "https://example.test/late-result",
+        "Source_Record_ID": "late-result",
+        "Machine_Readable_URL": "https://example.test/late-result.xml",
+    }
+    filings = pd.DataFrame([filing])
+    eps = pd.DataFrame(
+        [
+            {
+                **filing,
+                "Fiscal_Period_End": period_end,
+                "Public_Timestamp": "2024-08-19 10:00:00+05:30",
+                "Source_Record_ID": f"eps-{index}",
+                "EPS": value,
+                "EPS_Source_Resolved": True,
+            }
+            for index, (period_end, value) in enumerate(
+                zip(period_ends, [1.0, 2.0, 4.0, 7.0, 11.0, 16.0, 22.0, 29.0, 37.0, 46.0, 56.0, 67.0, 79.0])
+            )
+        ]
+    )
+    membership = pd.DataFrame(
+        {
+            "Symbol": ["AAA"],
+            "Member_From": ["2020-01-01"],
+            "Member_To": ["2026-12-31"],
+        }
+    )
+
+    event_master, event_exclusions, _, _ = build_event_master(filings, eps, membership)
+    sue_result = build_sue_events(event_master, eps, pd.DataFrame())
+    sue_events = sue_result[1]
+    classified = sue_result[2]
+    event_id = event_master.loc[0, "Event_ID"]
+
+    assert not bool(event_master.loc[0, "Primary_Event"])
+    assert "LATE_RESULT" in event_exclusions["Reason"].tolist()
+    assert event_id not in set(sue_events["Event_ID"])
+    assert event_id not in set(classified["Event_ID"])
+
+
+def test_formal_event_accounting_reconciles_to_sue_outcome_or_exclusion():
+    event_id = "AAA-20240630-CONSOLIDATED"
+    event_master = pd.DataFrame(
+        [
+            {
+                "Event_ID": event_id,
+                "Symbol": "AAA",
+                "Event_Public_Date": pd.Timestamp("2024-08-10"),
+                "Primary_Event": True,
+            }
+        ]
+    )
+    sue_exclusions = pd.DataFrame(
+        [
+            {
+                "Event_ID": event_id,
+                "Reason": "MISSING_CURRENT_EPS",
+                "Exclusion_Stage": "SUE",
+            }
+        ]
+    )
+
+    audit = build_integrity_audit(
+        event_master=event_master,
+        sue_events=pd.DataFrame(columns=["Event_ID", "Cohort"]),
+        event_exclusions=pd.DataFrame(columns=["Event_ID", "Reason"]),
+        sue_exclusions=sue_exclusions,
+    )
+
+    assert not audit["Violation"].isin(
+        ["FORMAL_EVENT_UNACCOUNTED", "FORMAL_EVENT_DOUBLE_ACCOUNTED"]
+    ).any()
 
 
 def test_formal_validator_is_offline_against_frozen_fixture_inputs(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):

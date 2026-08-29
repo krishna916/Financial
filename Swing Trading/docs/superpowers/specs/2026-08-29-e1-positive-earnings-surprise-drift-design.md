@@ -15,7 +15,7 @@ The research question is intentionally narrow:
 
 > **Do point-in-time Nifty 500 stocks reporting a materially positive quarterly earnings surprise produce positive practical returns over the following several weeks because the market underreacts to the earnings information?**
 
-The required workflow is:
+Required workflow:
 
 ```text
 predeclared hypothesis
@@ -56,7 +56,7 @@ The primary E1 signal must not use:
 - breakout/pullback structure;
 - post-announcement price reaction as a qualification filter.
 
-Any later evidence that a price-confirmed earnings strategy might work would be a **new named hypothesis**, not a rescue of E1.
+Any later evidence that a price-confirmed earnings strategy might work is a **new named hypothesis**, not a rescue of E1.
 
 ---
 
@@ -69,8 +69,6 @@ Any later evidence that a price-confirmed earnings strategy might work would be 
 > Stocks reporting a materially positive quarterly earnings surprise subsequently exhibit positive practical returns over the following several weeks because the market does not fully incorporate the earnings information immediately.
 
 E1 tests **unexpected earnings information**, not merely reported growth.
-
-For example:
 
 ```text
 EPS growth of +30% YoY
@@ -97,14 +95,26 @@ E1 is an Indian cash-equity, long-only module.
 Freeze exactly:
 
 ```text
-2023-08-01 through 2026-08-25 inclusive
+2023-08-01 through 2026-06-30 inclusive
 ```
 
-A primary event is eligible by its `Event_Public_Date`, not by quarter-end date or entry date.
+A primary event is eligible by `Event_Public_Date`, not fiscal-period end or entry date.
+
+This cutoff is chosen to prevent right-censoring: every primary event must have enough already-observed market history to complete the frozen 40-session holding horizon.
 
 No extension backward or forward is allowed after observing cohort counts or returns.
 
-### 4.2 EPS history-only seed window
+### 4.2 Source-data cutoff
+
+The source snapshot may include official result filings through:
+
+```text
+2026-08-25
+```
+
+Events after `2026-06-30` are **non-primary forward observations**. They may be retained for provenance and future forward work but cannot contribute to the formal historical validation or any E1 PASS/FAIL gate.
+
+### 4.3 EPS history-only seed window
 
 Acquire quarterly-result history from at least:
 
@@ -118,20 +128,20 @@ The period:
 2020-01-01 through 2023-07-31
 ```
 
-is **history-only**. It can contribute to SUE calculation but can never create an E1 trade.
+is **history-only**. It may contribute to SUE calculation but can never create an E1 trade.
 
-### 4.3 Temporal validation split
+### 4.4 Temporal validation split
 
-The frozen calendar midpoint of the primary event window is `2025-02-11`.
+The frozen calendar midpoint of the primary event window is `2025-01-14`.
 
 Use exactly:
 
 ```text
-FIRST:  2023-08-01 through 2025-02-11 inclusive
-SECOND: 2025-02-12 through 2026-08-25 inclusive
+FIRST:  2023-08-01 through 2025-01-14 inclusive
+SECOND: 2025-01-15 through 2026-06-30 inclusive
 ```
 
-Do not move the split after seeing outcomes.
+Do not move this split after seeing outcomes.
 
 ---
 
@@ -145,30 +155,25 @@ Primary universe:
 
 A result event is universe-eligible only if the company is an active PIT Nifty 500 member on `Event_Public_Date`.
 
-Do not use:
-
-- current Nifty 500 membership;
-- entry-date membership;
-- fiscal-quarter-end membership;
-- survivorship backfill.
+Do not use current Nifty 500 membership, entry-date membership, fiscal-quarter-end membership, or survivorship backfill.
 
 ### 5.2 Existing PIT source
 
-Reuse the repository's existing point-in-time membership source read-only:
+Reuse read-only:
 
 `Swing Trading/research/swing/market_breadth/config/nifty500_membership.csv`
 
-The E1 source builder may use the set of symbols that overlap the primary window to know which companies require historical result retrieval, but historical EPS observations do not themselves require the company to have been a Nifty 500 member when those prior quarters were reported.
+Historical EPS observations used to calculate a current event's SUE do not themselves require Nifty 500 membership when those earlier quarters were reported.
 
 ---
 
-## 6. Official earnings-result sources
+## 6. Official result sources
 
 E1 uses **official exchange filings** as the source of truth.
 
 ### 6.1 NSE role
 
-NSE financial-result / Integrated Filing metadata is an authoritative source for fields such as:
+NSE financial-result / Integrated Filing metadata is authoritative for fields such as:
 
 - company/symbol;
 - period / period ended;
@@ -178,7 +183,7 @@ NSE financial-result / Integrated Filing metadata is an authoritative source for
 - filing/broadcast date and time;
 - XBRL or Integrated Filing document references.
 
-The collector must support both legacy financial-result records and the Integrated Filing form used for newer periods.
+The source collector must support both legacy financial-result records and newer Integrated Filing forms.
 
 ### 6.2 BSE role
 
@@ -190,19 +195,11 @@ BSE historical corporate-result records are an authoritative second exchange sou
 - `New` versus `Revised` identity;
 - filing date/time;
 - XBRL/result-detail references;
-- structured financial-result fields where available, including Basic EPS for continuing operations.
+- structured result fields where available, including Basic EPS for continuing operations.
 
 ### 6.3 No third-party primary source
 
-The primary E1 dataset must not source historical earnings values or event timestamps from:
-
-- Screener;
-- Trendlyne;
-- broker APIs/databases;
-- manually curated earnings calendars;
-- analyst-data websites;
-- paid consensus feeds;
-- model-memory or hand-entered values.
+The frozen E1 dataset must not source historical earnings values or event timestamps from Screener, Trendlyne, broker databases, manually curated earnings calendars, analyst-data websites, paid consensus feeds, model memory, or hand-entered values.
 
 Third-party material may be used only to debug a source issue during development; it must never become an authoritative value in the frozen research snapshot.
 
@@ -212,7 +209,7 @@ Third-party material may be used only to debug a source issue during development
 
 ### 7.1 Deterministic event key
 
-The normalized event identity should be deterministic around:
+Normalize around:
 
 ```text
 Symbol
@@ -220,7 +217,7 @@ Symbol
 + Reporting_Basis
 ```
 
-The implementation may add a stable encoded `Event_ID`, but the same economic quarterly result must not become multiple events merely because NSE and BSE both contain a record.
+The implementation may encode a stable `Event_ID`, but the same economic quarterly result must not become multiple events merely because NSE and BSE both contain it.
 
 ### 7.2 Earliest valid public timestamp
 
@@ -232,33 +229,25 @@ Event_Public_Timestamp
       across authoritative NSE and BSE records
 ```
 
-All timestamps must be normalized to `Asia/Kolkata`.
-
-If one exchange made the result public earlier than the other, the earlier valid timestamp is the event timestamp.
+Normalize timestamps to `Asia/Kolkata`.
 
 ### 7.3 Original filing only
 
 For each event key, select the first valid `New`/original financial-result filing.
 
-Later:
+Later revisions, corrections, resubmissions, duplicate XBRL records, and duplicate exchange copies:
 
-- revisions;
-- corrections;
-- resubmissions;
-- duplicate XBRL records;
-- duplicate exchange copies
+- do not create new primary E1 events;
+- do not retrospectively rewrite the EPS that was first public;
+- may be retained only as provenance/audit evidence.
 
-must not create new primary E1 events and must not retrospectively rewrite the EPS that was first public.
+### 7.4 PIT historical EPS
 
-A revision may be retained as provenance/audit evidence only.
+Historical quarters used in an event's SUE must use the original point-in-time EPS observation that was public before the current event.
 
-### 7.4 No retrospective replacement of historical EPS
+Do not replace old quarters with later revised/restated values merely because a newer archive now contains them.
 
-Historical quarters used in an event's SUE calculation must use the **original point-in-time EPS observation** that was public before the current event.
-
-Do not replace old quarters with later restatements or revised values merely because a newer database/file now contains them.
-
-Mechanical per-share adjustment for corporate actions effective on or before the current event is allowed under Section 12; that is comparability normalization, not earnings restatement.
+Mechanical per-share adjustment for corporate actions already effective by the current event is allowed under Section 12.
 
 ---
 
@@ -276,7 +265,7 @@ Final fiscal quarter:
 Event_Public_Date <= Fiscal_Period_End + 60 calendar days
 ```
 
-The company-specific fiscal calendar determines which quarter is the final fiscal quarter.
+The company-specific fiscal calendar determines the final fiscal quarter.
 
 Anything later is:
 
@@ -286,9 +275,7 @@ LATE_RESULT
 
 and is excluded from the primary experiment.
 
-Do not make discretionary exceptions for filings that are only slightly late.
-
-If the fiscal-quarter identity cannot be established reliably, use the appropriate event-level exclusion rather than guessing.
+No discretionary exceptions.
 
 ---
 
@@ -316,9 +303,7 @@ STANDALONE
 
 if that basis has the complete comparable chain.
 
-Do not switch basis inside a single SUE chain.
-
-If both bases are fully usable, consolidated wins.
+Do not switch basis inside a single SUE chain. If both bases are fully usable, consolidated wins.
 
 ### 9.2 EPS field
 
@@ -328,20 +313,13 @@ Use:
 
 Use genuine quarterly, non-cumulative EPS only.
 
-Do not substitute:
+Do not substitute diluted EPS, annual EPS, cumulative nine-month EPS, adjusted/non-GAAP EPS, or management-defined normalized EPS.
 
-- diluted EPS;
-- total-company EPS when continuing-operations EPS is separately available;
-- annual EPS;
-- nine-month cumulative EPS;
-- adjusted/non-GAAP EPS;
-- management-defined normalized EPS.
-
-### 9.3 March/final-quarter handling
+### 9.3 Final-quarter handling
 
 When a filing exposes both quarter and full-year figures, use the actual quarter EPS.
 
-Do not derive quarterly EPS by subtracting nine-month cumulative EPS from annual EPS unless the exchange filing itself explicitly provides the genuine quarterly value needed by this design.
+Do not derive quarterly EPS by subtracting cumulative values unless the original exchange filing explicitly supplies the required genuine quarterly value.
 
 If genuine quarterly EPS is unavailable, the event is ineligible.
 
@@ -357,7 +335,7 @@ For company `i`, fiscal quarter `t`:
 D[t] = EPS[t] - EPS[t-4]
 ```
 
-Use exactly the previous eight seasonal changes:
+Use exactly:
 
 ```text
 D[t-1], D[t-2], ..., D[t-8]
@@ -376,17 +354,11 @@ SUE[t]
     = (D[t] - Historical_Mean[t]) / Historical_SD[t]
 ```
 
-Use sample standard deviation with `ddof=1` semantics.
+Use sample-standard-deviation semantics (`ddof=1`).
 
 ### 10.1 Exact history requirement
 
-All eight prior seasonal changes are mandatory.
-
-This normally requires a clean comparable EPS sequence covering approximately:
-
-```text
-t-12 through t
-```
+All eight prior seasonal changes are mandatory, normally requiring comparable quarterly EPS covering approximately `t-12` through `t`.
 
 No six-observation fallback is allowed.
 
@@ -400,38 +372,21 @@ with an explicit exclusion reason.
 
 ### 10.2 Strict PIT history
 
-The current event `t` may not contribute to its own historical mean or standard deviation.
+The current event may not contribute to its own historical mean or standard deviation.
 
-Only historical EPS observations public before `Event_Public_Timestamp[t]` may contribute to:
-
-```text
-D[t-1] ... D[t-8]
-```
+Only historical EPS observations public before `Event_Public_Timestamp[t]` may contribute to `D[t-1] ... D[t-8]`.
 
 ### 10.3 Zero and negative EPS
 
-Do **not** exclude losses merely because EPS is zero or negative.
+Do not exclude zero or negative EPS.
 
-Examples such as:
+Loss-to-profit, loss-to-smaller-loss, profit-to-profit and profit-to-loss transitions remain valid because E1 uses EPS differences rather than percentage growth.
 
-- loss -> profit;
-- loss -> smaller loss;
-- profit -> profit;
-- profit -> loss
-
-remain mathematically valid because E1 uses EPS differences rather than percentage growth.
-
-These transitions may be reported diagnostically but are not strategy filters.
+These transitions are diagnostics only.
 
 ### 10.4 Invalid historical volatility
 
-If:
-
-```text
-Historical_SD <= 0
-```
-
-or is non-finite:
+If `Historical_SD <= 0` or is non-finite:
 
 ```text
 ZERO_HISTORICAL_SUE_SD
@@ -439,13 +394,13 @@ ZERO_HISTORICAL_SUE_SD
 
 and SUE is unavailable.
 
-Do not add epsilon values or arbitrary denominator floors.
+Do not add epsilon values or denominator floors.
 
-### 10.5 No primary winsorisation
+### 10.5 No winsorisation
 
 Do not cap, winsorize or discard extreme SUE values in the primary experiment.
 
-Extreme SUE buckets may be diagnostic only.
+Extreme SUE buckets are diagnostics only.
 
 ---
 
@@ -470,20 +425,16 @@ SUE <= -1.0
     -> NEGATIVE_CONTROL
 ```
 
-The boundary values are intentional:
+Boundary ownership is intentional:
 
-- `+0.5` belongs to `POSITIVE_BUFFER`;
-- `-0.5` belongs to `NEGATIVE_BUFFER`;
-- `+1.0` belongs to `POSITIVE_SURPRISE`;
-- `-1.0` belongs to `NEGATIVE_CONTROL`.
-
-No valid SUE event may be unclassified or appear in more than one cohort.
+- `+0.5` → `POSITIVE_BUFFER`
+- `-0.5` → `NEGATIVE_BUFFER`
+- `+1.0` → `POSITIVE_SURPRISE`
+- `-1.0` → `NEGATIVE_CONTROL`
 
 Only `POSITIVE_SURPRISE` creates an actual E1 long candidate.
 
-`NEUTRAL_CONTROL` and `NEGATIVE_CONTROL` use identical hypothetical long execution mechanics for research comparison.
-
-The buffer cohorts are diagnostics only.
+`NEUTRAL_CONTROL` and `NEGATIVE_CONTROL` use identical hypothetical long execution mechanics. Buffer cohorts are diagnostic only.
 
 ---
 
@@ -491,21 +442,17 @@ The buffer cohorts are diagnostics only.
 
 Historical EPS must be comparable on a per-share basis at the current event.
 
-Use official exchange corporate-action records for actions such as:
-
-- stock splits;
-- share consolidations;
-- bonus issues.
+Use official exchange corporate-action records for stock splits, share consolidations and bonus issues.
 
 ### 12.1 PIT adjustment rule
 
 For SUE event `t`, only corporate actions effective on or before `Event_Public_Date[t]` may adjust historical EPS comparability.
 
-A future corporate action must never rewrite an earlier E1 event's SUE.
+A future corporate action must never rewrite an earlier event's SUE.
 
 ### 12.2 Adjustment intent
 
-The historical EPS sequence should be normalized to the per-share basis economically comparable with current-quarter EPS after actions already effective by the current event.
+Normalize historical EPS only enough to establish per-share comparability with current EPS after actions already effective by the current event.
 
 Do not use corporate-action adjustment to change underlying earnings, reporting basis or accounting restatements.
 
@@ -515,7 +462,7 @@ If comparable per-share history cannot be established deterministically:
 EPS_HISTORY_NOT_COMPARABLE
 ```
 
-and the event is excluded.
+and exclude the event.
 
 ---
 
@@ -525,13 +472,13 @@ and the event is excluded.
 
 For the selected original event/basis:
 
-1. use a matching BSE structured Basic EPS from continuing operations value when available;
-2. otherwise use matching NSE XBRL / Integrated Filing machine-readable value;
-3. if neither can produce a trustworthy machine-readable value, classify the event as `EPS_SOURCE_UNRESOLVED`.
+1. use matching BSE structured Basic EPS from continuing operations when available;
+2. otherwise use matching NSE XBRL / Integrated Filing machine-readable EPS;
+3. if neither source can provide a trustworthy machine-readable value, use `EPS_SOURCE_UNRESOLVED`.
 
 Do not build OCR/PDF extraction merely to rescue missing observations in E1 V1.
 
-### 13.2 Cross-exchange numerical check
+### 13.2 Cross-exchange check
 
 When both NSE and BSE provide machine-readable EPS for the same selected event/basis, require agreement within either:
 
@@ -541,26 +488,43 @@ OR
 relative difference <= 0.5%
 ```
 
-If they disagree beyond tolerance, record:
+Beyond tolerance:
 
 ```text
 CROSS_EXCHANGE_EPS_MISMATCH
 ```
 
-and resolve the cause deterministically from original exchange evidence before the event can be used.
+The cause must be deterministically resolved from original exchange evidence before use.
 
-Do not pick whichever value looks more plausible.
+### 13.3 Objective source-coverage denominator
 
-### 13.3 Source-resolution coverage gate
+The source-coverage gate must not depend on a subjective judgement that a record "should be resolvable."
 
-Define a `Source_Resolvable_Candidate` as a PIT Nifty 500 timely quarterly-result event for which the reporting basis is identifiable and for which the official source architecture should be able to resolve a machine-readable EPS.
+Define:
 
-Across the primary event window require:
+```text
+Technical_EPS_Candidate
+=
+PIT Nifty500 event
+AND timely quarterly original filing identified
+AND selected reporting basis identified
+AND an official machine-readable structured/XBRL result reference exists
+for that selected filing/basis
+```
+
+Then:
 
 ```text
 Machine_Readable_EPS_Resolution
-    = resolved source candidates / source-resolvable candidates
+=
+Technical_EPS_Candidates with successfully parsed valid EPS
+/
+all Technical_EPS_Candidates
+```
 
+Require:
+
+```text
 Machine_Readable_EPS_Resolution >= 95%
 ```
 
@@ -570,36 +534,55 @@ Below 95%:
 INVALID_RESEARCH_RUN
 ```
 
-because selective extraction failure could bias the sample.
+The denominator and every failed technical candidate must be preserved in source-coverage evidence.
 
-### 13.4 Structural SUE exclusions do not reduce source coverage
+### 13.4 Structural exclusions do not reduce source coverage
 
-Legitimate economic/history exclusions such as:
+Legitimate economic/history exclusions such as insufficient EPS history, fiscal-calendar change, incomparable reporting basis, zero historical SUE SD, or restructuring that destroys comparability are not technical parsing failures.
 
-- insufficient EPS history;
-- fiscal-calendar change;
-- incomparable reporting basis;
-- zero historical SUE SD;
-- corporate restructuring that destroys comparability
-
-are not technical source-resolution failures and do not count against the 95% extraction-quality gate.
-
-They must still be counted and reported separately.
+Report them separately.
 
 ---
 
 ## 14. Source snapshot architecture
 
-Data acquisition and strategy validation must be separated.
-
-### 14.1 Stage A — source snapshot
-
-Stage A may access official external sources and normalize them into frozen immutable inputs.
-
-Minimum normalized input package:
+Data acquisition and strategy validation are separate stages.
 
 ```text
-Swing Trading/research/swing/e1_positive_earnings_surprise_drift/input/
+STAGE A — SOURCE SNAPSHOT
+official NSE/BSE filings
++ official corporate actions
+        ↓
+normalize
+        ↓
+freeze immutable inputs
+        ↓
+hash + provenance manifest
+
+STAGE B — VALIDATION
+frozen E1 inputs
++ PIT Nifty500 membership
++ frozen stock/index prices
+        ↓
+SUE
+        ↓
+cohorts
+        ↓
+fixed trades
+        ↓
+controls / benchmark / robustness
+        ↓
+formal status
+```
+
+The formal validator must perform **no network calls**.
+
+### 14.1 Frozen input artifacts
+
+Under the E1 module, freeze at minimum:
+
+```text
+input/
 ├── e1_exchange_filings_snapshot.csv
 ├── e1_eps_snapshot.csv
 ├── e1_corporate_actions_snapshot.csv
@@ -607,58 +590,9 @@ Swing Trading/research/swing/e1_positive_earnings_surprise_drift/input/
 └── e1_source_build_audit.csv
 ```
 
-### 14.2 `e1_exchange_filings_snapshot.csv`
+### 14.2 Provenance manifest
 
-Retain one row per discovered official filing with enough provenance to audit deduplication and first-public identity, including at minimum:
-
-```text
-Symbol
-Exchange
-Fiscal_Period_End
-Fiscal_Quarter
-Reporting_Basis
-Quarterly_or_Annual
-Original_or_Revised
-Public_Timestamp
-Source_URL
-Source_Record_ID
-```
-
-Do not silently deduplicate the raw normalized exchange records before audit evidence can establish how duplicates/revisions were resolved.
-
-### 14.3 `e1_eps_snapshot.csv`
-
-Retain normalized machine-readable EPS observations including at minimum:
-
-```text
-Symbol
-Fiscal_Period_End
-Reporting_Basis
-EPS_Continuing_Operations_Basic
-Source_Exchange
-Source_URL
-Public_Timestamp
-Original_or_Revised
-```
-
-### 14.4 `e1_corporate_actions_snapshot.csv`
-
-Retain the official per-share comparability actions required by Section 12, including at minimum:
-
-```text
-Symbol
-Action_Type
-Ratio
-Ex_Date
-Record_Date
-Source_URL
-```
-
-### 14.5 `e1_source_manifest.csv`
-
-Fingerprint each frozen source artifact and each read-only external repository input actually consumed by validation.
-
-At minimum record:
+`e1_source_manifest.csv` must record at minimum:
 
 ```text
 Artifact
@@ -666,614 +600,217 @@ Source
 Retrieved_At
 Row_Count
 SHA256
-Primary_Window
+Primary_Event_Window
+Source_Data_Cutoff
 Notes
 ```
 
-Also fingerprint:
+Also fingerprint the exact external read-only files used for PIT membership, stock prices and Nifty 500 benchmark prices.
 
-- PIT Nifty 500 membership source;
-- frozen stock-price corpus;
-- frozen Nifty 500 benchmark-price source.
+### 14.3 Source acquisition blind to returns
 
-### 14.6 Stage A must be return-blind
+Stage A may know filings, timestamps, EPS, reporting basis, exclusions and corporate actions.
 
-Stage A may know filing/EPS/corporate-action facts.
-
-Stage A must **not compute post-event stock returns or judge parsing quality from profitability**.
-
-Source resolution must be completed before E1 returns are interpreted.
+It must not calculate post-event returns or use profitability to decide whether parsing is acceptable.
 
 ---
 
 ## 15. Frozen price and benchmark inputs
 
-The formal E1 validator must not download market prices during a run.
+The validator consumes frozen price data; it must not fetch fresh Yahoo or other live market data on each rerun.
 
-Use a frozen price corpus and fingerprint it in `e1_source_manifest.csv`.
+For each eligible event, require:
 
-### 15.1 Required stock fields
+- stock next-session Open;
+- stock session-41 Open or earlier deterministic exit Open;
+- daily High/Low during holding for MAE/MFE;
+- Nifty 500 Open on the exact stock entry and exit sessions.
 
-For each potentially executable cohort event, validation needs enough daily data to establish:
+Trade-return measurement must be **corporate-action consistent** so splits/bonuses/dividends do not manufacture P&L. This adjustment is return accounting only and must not alter event eligibility or SUE formation.
 
-- next-session entry Open;
-- scheduled/early exit Open;
-- daily High/Low during the holding period for MAE/MFE;
-- corporate-action-consistent return measurement.
+Missing or inconsistent temporal price alignment is an integrity failure unless explicitly classified as an allowed event-level execution cancellation.
 
-### 15.2 Corporate actions during trade-return measurement
+---
 
-Signal formation remains entirely independent of future price/corporate-action information.
+## 16. Frozen entry mechanics
 
-For **ex-post return accounting only**, the price corpus or explicit cash-flow accounting must neutralize mechanical P&L distortions from:
+For a qualifying primary event with `SUE >= +1.0`:
 
-- splits;
-- consolidations;
-- bonus issues;
-- cash dividends/distributions received during the holding interval.
+```text
+result becomes public on Event_Public_Date T
+        ↓
+no same-day trade
+        ↓
+enter at next canonical trading-session Open
+```
 
-The chosen accounting convention must be deterministic and applied identically to positive, neutral and negative cohorts.
+The same timing applies to neutral and negative shadow controls.
 
-It must not alter entry eligibility, SUE or event timing.
+### 16.1 No gap filter
 
-### 15.3 Benchmark
+Do not reject or require any entry based on initial price reaction or gap size/direction.
 
-For every completed trade/control, calculate a Nifty 500 total-return-consistent benchmark over the same entry and exit sessions.
+Record initial reaction diagnostically only.
 
-The benchmark input must be frozen and deterministic. If the repository stores a price-index Open plus a separate total-return adjustment series, the implementation may deterministically construct a total-return-consistent open series, but the exact transformation must be fixed before outcomes are interpreted and must be covered by tests.
+### 16.2 Entry unavailable
 
-Benchmark receives no fictional E1 trading friction.
-
-### 15.4 Missing/invalid price
-
-If the immediate next canonical-session stock Open is genuinely unavailable/non-executable:
+If there is no valid executable next-session Open because of suspension or missing valid price:
 
 ```text
 NO_VALID_NEXT_SESSION_OPEN
 ```
 
-and the event is cancelled/excluded from completed-trade evidence.
-
-Do not defer the entry to a later day.
-
-Genuine suspension, delisting, merger termination or other inability to transact must be explicitly audited; never silently drop an inconvenient outcome.
+and cancel the event. Do not defer to a later day.
 
 ---
 
-## 16. Frozen event-to-trade timing
+## 17. Frozen holding period and exits
 
-### 16.1 Entry
+### 17.1 Primary exit
 
-For an eligible event whose result becomes public on date `T`:
+Freeze:
 
-```text
-no trade on T
-→ enter at the next canonical trading-session Open
-```
+> **40 complete trading sessions after entry, then exit at the following session Open.**
 
-This applies regardless of whether the result was published:
-
-- before market open;
-- during trading hours;
-- after market close;
-- on a weekend/holiday.
-
-E1 deliberately sacrifices same-day responsiveness for a universally reproducible EOD workflow.
-
-### 16.2 No gap filter
-
-All qualifying `POSITIVE_SURPRISE` events use the next-session Open if executable.
-
-Do not reject or require entries based on:
-
-- positive gap;
-- negative gap;
-- gap size;
-- first-day price direction;
-- pullback after the result.
-
-Initial reaction remains diagnostic only.
-
-### 16.3 Primary holding period
-
-Freeze a 40-complete-session holding horizon.
-
-If entry occurs at canonical session index `s` Open:
+Conceptually:
 
 ```text
-sessions s through s+39 are the 40 completed holding sessions
-scheduled exit = session s+40 Open
+Entry Open
+→ 40 completed sessions
+→ session-41 Open exit
 ```
 
-Do not optimize 20/30/60-session alternatives after seeing E1 results.
+No alternative 20/60-day primary exits.
 
-### 16.4 Next earnings event before scheduled exit
+### 17.2 No technical stop or target
 
-If the same company publishes another valid quarterly earnings event before the scheduled exit Open:
+Primary E1 has no ATR stop, fixed-percentage stop, SMA exit, trailing stop, profit target or breakeven rule.
+
+This isolates the event-underreaction hypothesis.
+
+### 17.3 Next distinct quarterly result while holding
+
+If the same company publishes its **next distinct quarterly financial result** before the scheduled time exit:
 
 ```text
-old event exits at the next eligible canonical-session Open
+old trade
+→ exit at next canonical session Open after that new result becomes public
 ```
 
-with:
+Use:
 
 ```text
 EXIT_NEXT_EARNINGS_EVENT
 ```
 
-If the new event independently qualifies as `POSITIVE_SURPRISE`, it may create a new E1 entry at that same Open as a separate event/trade record.
+This early-exit trigger applies whether or not the new result:
 
-There is no pyramiding or extension of the old trade.
+- is itself timely;
+- has enough EPS history;
+- has a valid SUE;
+- belongs to the primary E1 event window;
+- would qualify as a new E1 trade.
 
-If the next-event-triggered exit Open is the same as the scheduled fixed-horizon exit Open, use the same price and apply a deterministic documented exit-reason precedence; the economic outcome must not differ.
+It exists to prevent one trade's return from being contaminated by a new quarterly information event.
 
-### 16.5 Primary exit style
+If that new result independently qualifies as a new primary `POSITIVE_SURPRISE`, it may open a new E1 trade at the same eligible Open as a separate `Event_ID`.
 
-Primary E1 uses **fixed-time/event-replacement exits only**.
+No pyramiding and no extension of the old trade.
 
-Do not add:
+### 17.4 Genuine security termination
 
-- ATR stop;
-- fixed percentage stop;
-- SMA exit;
-- trailing stop;
-- breakeven stop;
-- profit target;
-- partial profit taking.
-
-This isolates whether the earnings-surprise signal itself has drift.
+Delisting, merger termination, prolonged suspension or another genuine inability to transact must be explicitly audited. Do not silently drop such trades.
 
 ---
 
-## 17. Friction and return definitions
+## 18. Friction and return formulas
 
-Use exactly:
-
-```text
-Base round-trip friction:    0.40%
-Stress round-trip friction:  0.60%
-Severe diagnostic friction: 0.80%
-```
-
-For any completed cohort observation:
+Round-trip friction:
 
 ```text
-Gross_Return
-    = corporate-action-consistent stock return
-      from Entry_Open to Exit_Open
-
-Base_Net_Return
-    = Gross_Return - 0.004
-
-Stress_Net_Return
-    = Gross_Return - 0.006
-
-Severe_Net_Return
-    = Gross_Return - 0.008
+Base:   0.40%
+Stress: 0.60%
+Severe: 0.80% diagnostic only
 ```
 
-There is no R-multiple because E1 has no initial stop defining `1R`.
-
-For benchmark return `B` over exactly the same entry/exit sessions:
+For friction `c`:
 
 ```text
-Base_Net_Excess_Return
-    = Base_Net_Return - B
+Gross_Return = Exit_Open / Entry_Open - 1
 
-Stress_Net_Excess_Return
-    = Stress_Net_Return - B
+Net_Return = Gross_Return - c
 ```
 
-The severe excess case may be reported diagnostically.
-
-### 17.1 Profit-factor definition
-
-For a return series `x`:
+Benchmark:
 
 ```text
-PF(x)
-    = sum(all positive x)
-      / abs(sum(all negative x))
+Benchmark_Return
+    = Nifty500_Exit_Open / Nifty500_Entry_Open - 1
+
+Net_Excess_Return
+    = Net_Return - Benchmark_Return
 ```
 
-Handle empty positive/negative sides explicitly and deterministically; never silently coerce undefined PF to a convenient passing value.
+The benchmark is not charged fictional trading friction.
+
+There is no R-multiple because E1 intentionally has no initial stop defining `1R`.
 
 ---
 
-## 18. Control experiment
+## 19. Signal-level sample and portfolio treatment
 
-The `NEUTRAL_CONTROL` and `NEGATIVE_CONTROL` cohorts use the **same hypothetical long mechanics** as the positive cohort:
+At signal-level validation, every eligible event remains an independent observation.
 
-- same next-session entry Open;
-- same cancellation rules;
-- same 40-complete-session scheduled hold;
-- same earlier exit at next earnings event;
-- same corporate-action accounting;
-- same benchmark alignment;
-- same base/stress/severe friction.
+Do not impose the eventual 3–5-position limit, portfolio capital constraint, sector cap or candidate ranking yet.
 
-They are never actually traded by E1.
+Record:
 
-This lets E1 test whether the earnings-surprise direction discriminates outcomes rather than merely riding a generally rising market.
-
----
-
-## 19. Accounting invariants
-
-The validator must make event/trade accounting explicit.
-
-At minimum:
-
-```text
-All valid finite SUE events
-    = POSITIVE_SURPRISE
-    + POSITIVE_BUFFER
-    + NEUTRAL_CONTROL
-    + NEGATIVE_BUFFER
-    + NEGATIVE_CONTROL
-```
-
-with no overlap.
-
-For each primary execution cohort:
-
-```text
-qualified cohort events
-    = completed observations
-    + explicit entry cancellations/exclusions
-```
-
-For every completed observation:
-
-```text
-stock Entry_Date == benchmark Entry_Date
-stock Exit_Date  == benchmark Exit_Date
-```
-
-No completed observation may lack its exact benchmark pairing.
-
-Every source candidate/event that disappears from execution evidence must have an explicit reason in the event/exclusion audit trail.
-
----
-
-## 20. Integrity requirements
-
-A research run is invalid if the evidence cannot establish the frozen methodology.
-
-The integrity audit must verify at minimum:
-
-- source snapshot artifacts exist, are readable and match their manifest hashes;
-- PIT Nifty 500 membership input matches its frozen manifest fingerprint;
-- stock and benchmark price inputs match their frozen manifest fingerprints;
-- event timestamps are parseable and normalized consistently;
-- the selected event is the earliest valid original public filing for its event key;
-- revisions/duplicates never create additional primary events;
-- later revisions/restatements never rewrite an earlier SUE history;
-- every historical EPS used in `D[t-1]...D[t-8]` was public before the current event;
-- current `D[t]` never contributes to the historical mean/SD;
-- reporting basis remains identical throughout each SUE chain;
-- fiscal-quarter identity is comparable throughout each SUE chain;
-- corporate-action EPS adjustments use only actions effective on/before the event date;
-- future corporate actions never alter earlier SUE values;
-- cross-exchange EPS conflicts are either within tolerance or deterministically resolved;
-- source technical resolution coverage is measured from the frozen candidate denominator;
-- every valid SUE is classified exactly once;
-- positive/neutral/negative execution cohorts use identical trade mechanics;
-- `Event_Public_Date < Entry_Date` for completed/cancelled execution attempts;
-- no same-day result trade exists;
-- fixed-horizon exit session indexing is exact;
-- next-earnings early exits use only a later public earnings event;
-- completed stock/benchmark dates align exactly;
-- all completed/cancelled cohort accounting reconciles;
-- diagnostic fields do not alter mandatory eligibility or gates;
-- the validator performs no network calls and does not modify frozen inputs.
-
-Any systemic integrity failure takes precedence over profitability.
-
----
-
-## 21. Sample sufficiency
-
-Require at least:
-
-```text
-POSITIVE_SURPRISE completed observations >= 300
-NEUTRAL_CONTROL completed observations  >= 300
-NEGATIVE_CONTROL completed observations >= 300
-```
-
-Also require positive-surprise completed observations in each temporal half:
-
-```text
-FIRST positive completed  >= 100
-SECOND positive completed >= 100
-```
-
-If integrity is clean but any of these counts fails:
-
-```text
-INSUFFICIENT_EVIDENCE
-```
-
-Do not loosen SUE, history length, universe or primary date window to manufacture more trades.
-
----
-
-## 22. Mandatory E1 profitability gates
-
-For the completed `POSITIVE_SURPRISE` cohort under **base 0.40% friction**, require all:
-
-```text
-Base_Mean_Net_Return >= +1.00%
-Base_Median_Net_Return > 0
-Base_Return_PF >= 1.20
-Base_Mean_Net_Excess_Return > 0
-Base_Excess_Return_PF > 1.00
-```
-
-The +1.00% mean threshold is intentionally economically meaningful for a roughly two-month holding period.
-
----
-
-## 23. Mandatory stress-friction gates
-
-At **0.60% round-trip friction**, require:
-
-```text
-Stress_Mean_Net_Return > 0
-Stress_Return_PF > 1.00
-Stress_Mean_Net_Excess_Return > 0
-```
-
-The 0.80% severe case is diagnostic only.
-
----
-
-## 24. Mandatory earnings-surprise discrimination gates
-
-Using base-friction completed cohorts, require mean stock returns to order:
-
-```text
-Positive_Mean_Net_Return
-    > Neutral_Mean_Net_Return
-    > Negative_Mean_Net_Return
-```
-
-Also require benchmark-adjusted means to order:
-
-```text
-Positive_Mean_Net_Excess_Return
-    > Neutral_Mean_Net_Excess_Return
-    > Negative_Mean_Net_Excess_Return
-```
-
-And require:
-
-```text
-Positive_Return_PF > Neutral_Return_PF
-Positive_Return_PF > Negative_Return_PF
-```
-
-If the positive cohort makes money but does not discriminate according to earnings surprise, E1 fails.
-
----
-
-## 25. Mandatory temporal robustness
-
-For each frozen temporal half independently, on the positive cohort require:
-
-```text
-Base_Mean_Net_Return > 0
-Base_Return_PF > 1.00
-Base_Mean_Net_Excess_Return > 0
-```
-
-The sample sufficiency rule in Section 21 also requires at least 100 completed positive events in each half.
-
-Calendar-year results remain diagnostic except for the leave-one-year-out test below.
-
----
-
-## 26. Mandatory leave-one-calendar-year-out robustness
-
-For every calendar year represented by the primary positive cohort:
-
-1. remove all positive-cohort completed observations whose `Event_Public_Date` belongs to that year;
-2. recompute the remaining positive-cohort metrics;
-3. require all:
-
-```text
-Remaining Base_Mean_Net_Return > 0
-Remaining Base_Return_PF > 1.00
-Remaining Base_Mean_Net_Excess_Return > 0
-```
-
-Every year omission must pass.
-
-Do not cherry-pick only unusual years.
-
----
-
-## 27. Mandatory top-five-winner robustness
-
-Rank completed positive-cohort observations by **gross stock return**.
-
-Remove exactly the five highest gross-return winners.
-
-On the remaining positive cohort require:
-
-```text
-Base_Mean_Net_Return > 0
-Base_Return_PF > 1.00
-Base_Mean_Net_Excess_Return > 0
-```
-
-This prevents a few extraordinary post-result winners from manufacturing the entire edge.
-
----
-
-## 28. Mandatory leave-one-symbol-out robustness
-
-For every distinct symbol appearing in completed positive-cohort evidence:
-
-1. remove all completed positive observations for that symbol;
-2. recompute the remaining metrics;
-3. require all:
-
-```text
-Base_Mean_Net_Return > 0
-Base_Return_PF > 1.00
-Base_Mean_Net_Excess_Return > 0
-```
-
-Every symbol omission must pass.
-
----
-
-## 29. Downside diagnostics — mandatory to report, not gates
-
-Because E1 intentionally has no technical stop, the evidence package must report at minimum:
-
-- worst completed positive trade;
-- 1st percentile positive-cohort return;
-- 5th percentile positive-cohort return;
-- maximum adverse excursion distribution;
-- maximum favourable excursion distribution;
-- median within-trade drawdown;
-- maximum within-trade drawdown;
-- entry-gap / initial-reaction distribution;
-- next-earnings-event truncated exits;
-- suspension/termination edge cases if any.
-
-These diagnostics may reveal implementation risk but cannot be retrofitted into the E1 signal after results are known.
-
----
-
-## 30. Approved non-gating diagnostics
-
-The following cuts may be reported without affecting the primary result:
-
-- SUE `1-2`, `2-3`, `3-5`, `>=5`;
-- profit -> profit;
-- loss -> profit;
-- loss -> smaller loss;
-- profit -> loss;
-- entry-gap / initial-reaction buckets;
-- market-cap bucket;
-- liquidity bucket;
-- sector;
-- reporting basis;
-- fiscal quarter;
-- announcement weekday;
-- calendar year;
-- holding duration / next-event truncation.
-
-The diagnostic output must structurally mark these as non-mandatory or keep them outside `evaluate_gates()`.
-
-A diagnostic cannot become a rescue filter inside E1.
-
----
-
-## 31. Capacity diagnostics — mandatory to report, not gates
-
-Signal-level validation retains every qualifying observation independently.
-
-Do not impose the eventual 3-5-position portfolio limit yet.
-
-Report at minimum:
-
-- maximum simultaneous active positive trades;
-- median simultaneous active positive trades;
-- same-day positive entry counts;
+- same-day qualifying events;
+- simultaneous active trades;
+- sector clustering;
 - event-season clustering;
-- sector clustering/concentration;
-- capital-utilization implications if useful.
+- implied capital demand.
 
-If E1 passes, portfolio-constrained simulation becomes the next experiment.
-
----
-
-## 32. Minimum source input package
-
-Stage A must freeze at least:
-
-```text
-e1_exchange_filings_snapshot.csv
-e1_eps_snapshot.csv
-e1_corporate_actions_snapshot.csv
-e1_source_manifest.csv
-e1_source_build_audit.csv
-```
-
-These files are immutable inputs to formal validation.
-
-The formal validator must reject missing or fingerprint-mismatched inputs rather than silently rebuilding them.
+If E1 passes, portfolio-constrained simulation is the next experiment.
 
 ---
 
-## 33. Minimum validation evidence package
+## 20. Mandatory integrity rules
 
-Formal validation must generate at least:
+Any systemic violation makes the run:
 
 ```text
-output/
-├── e1_data_validation.csv
-├── e1_source_coverage.csv
-├── e1_event_master.csv
-├── e1_event_exclusions.csv
-├── e1_eps_history.csv
-├── e1_sue_events.csv
-├── e1_cohort_classification.csv
-│
-├── e1_positive_trades.csv
-├── e1_neutral_control.csv
-├── e1_negative_control.csv
-│
-├── e1_validation_summary.csv
-├── e1_cohort_comparison.csv
-├── e1_benchmark_comparison.csv
-├── e1_temporal_summary.csv
-├── e1_year_summary.csv
-├── e1_leave_one_year_out.csv
-├── e1_top_five_robustness.csv
-├── e1_leave_one_symbol_out.csv
-│
-├── e1_downside_diagnostic.csv
-├── e1_diagnostic_summary.csv
-├── e1_overlap_capacity_diagnostic.csv
-│
-├── e1_integrity_audit.csv
-├── e1_validation_gates.csv
-└── research_report.md
+INVALID_RESEARCH_RUN
 ```
 
-No dashboard or notebook is required for the formal result.
+At minimum verify:
+
+- PIT Nifty 500 membership integrity;
+- event timestamp provenance;
+- original versus revised filing identity;
+- historical EPS uses only information public before the current event;
+- no future corporate action alters earlier SUE;
+- same reporting basis throughout each SUE chain;
+- fiscal-quarter comparability;
+- every valid SUE event classified exactly once;
+- no cohort overlap;
+- original event deduplication across NSE/BSE;
+- source technical coverage calculation is objective and >=95%;
+- unresolved cross-exchange EPS conflicts do not enter the sample;
+- `Event_Public_Date < Entry_Date`;
+- exact stock/benchmark entry-exit session alignment;
+- primary events lie inside `2023-08-01..2026-06-30`;
+- non-primary July-August 2026 observations never enter formal gates;
+- completed/cancelled event accounting reconciles;
+- positive, neutral and negative primary cohorts use identical execution mechanics.
+
+Repair integrity only; never change strategy mechanics in response to `INVALID_RESEARCH_RUN`.
 
 ---
 
-## 34. Core evidence semantics
+## 21. Event-level exclusions
 
-### 34.1 `e1_event_master.csv`
-
-Every PIT Nifty 500 timely-result candidate before SUE eligibility, retaining at minimum:
-
-```text
-Event_ID
-Symbol
-Fiscal_Period_End
-Event_Public_Timestamp
-Event_Public_Date
-Reporting_Basis
-Timely_Result
-PIT_Membership_OK
-EPS_Source_Status
-```
-
-### 34.2 `e1_event_exclusions.csv`
-
-Every excluded event with one primary reason and enough detail for audit.
-
-Approved reasons include, as applicable:
+Expected event-level exclusions/cancellations include:
 
 ```text
 LATE_RESULT
@@ -1286,11 +823,263 @@ EPS_HISTORY_NOT_COMPARABLE
 NO_VALID_NEXT_SESSION_OPEN
 ```
 
-Additional integrity-oriented reason codes may be introduced only where necessary to describe a frozen requirement precisely; they must not create new strategy filters.
+Every excluded event must retain an explicit reason. Nothing disappears silently.
 
-### 34.3 `e1_eps_history.csv`
+A systemic pattern of technical extraction failure is still governed by the 95% source-coverage integrity gate.
 
-For every calculable event retain enough data to independently reproduce SUE, including:
+---
+
+## 22. Control cohorts
+
+Primary controls use exactly the same execution mechanics as E1:
+
+```text
+NEUTRAL_CONTROL:
+-0.5 < SUE < +0.5
+
+NEGATIVE_CONTROL:
+SUE <= -1.0
+```
+
+They are hypothetical longs only.
+
+`POSITIVE_BUFFER` and `NEGATIVE_BUFFER` remain diagnostic cohorts.
+
+---
+
+## 23. Mandatory sample sufficiency
+
+Require completed observations:
+
+```text
+POSITIVE_SURPRISE >= 300
+NEUTRAL_CONTROL   >= 300
+NEGATIVE_CONTROL  >= 300
+```
+
+Also require in each temporal half:
+
+```text
+POSITIVE_SURPRISE completed >= 100
+```
+
+If integrity is clean but any requirement is missed:
+
+```text
+INSUFFICIENT_EVIDENCE
+```
+
+Do not loosen SUE/history thresholds or extend the historical window.
+
+---
+
+## 24. Mandatory profitability gates
+
+For `POSITIVE_SURPRISE` under base 0.40% friction:
+
+```text
+Mean Net Return >= +1.00%
+Median Net Return > 0
+Return Profit Factor >= 1.20
+Mean Net Excess Return > 0
+Excess-Return Profit Factor > 1.00
+```
+
+At stress 0.60% friction:
+
+```text
+Mean Net Return > 0
+Return Profit Factor > 1.00
+Mean Net Excess Return > 0
+```
+
+The 0.80% severe case is diagnostic only.
+
+---
+
+## 25. Mandatory surprise-discrimination gates
+
+Base-friction mean returns must satisfy:
+
+```text
+POSITIVE_SURPRISE
+    >
+NEUTRAL_CONTROL
+    >
+NEGATIVE_CONTROL
+```
+
+Base benchmark-adjusted mean returns must also satisfy the same ordering.
+
+Additionally:
+
+```text
+Positive Return PF > Neutral Return PF
+Positive Return PF > Negative Return PF
+```
+
+A profitable positive cohort without correct surprise ordering is a FAIL.
+
+---
+
+## 26. Mandatory temporal robustness
+
+For both frozen halves:
+
+```text
+Base Mean Net Return > 0
+Base Return PF > 1.00
+Mean Net Excess Return > 0
+```
+
+Each half must also meet the >=100 positive-event sufficiency rule.
+
+Calendar-year results are diagnostic only except through the leave-one-year-out robustness gate below.
+
+---
+
+## 27. Mandatory robustness gates
+
+### 27.1 Leave one calendar year out
+
+For every calendar year represented in primary positive trades, remove that year's positive trades.
+
+Every remaining sample must retain:
+
+```text
+Base Mean Net Return > 0
+Base Return PF > 1.00
+Mean Net Excess Return > 0
+```
+
+### 27.2 Top-five winner removal
+
+Remove the five largest positive trades by **gross stock return**.
+
+Remaining sample must retain:
+
+```text
+Base Mean Net Return > 0
+Base Return PF > 1.00
+Mean Net Excess Return > 0
+```
+
+### 27.3 Leave one symbol out
+
+For every symbol appearing in the positive cohort, remove that symbol.
+
+Every omission must retain:
+
+```text
+Base Mean Net Return > 0
+Base Return PF > 1.00
+Mean Net Excess Return > 0
+```
+
+No single stock may be required for the edge.
+
+---
+
+## 28. Mandatory diagnostics, not gates
+
+Because E1 has no price stop, report:
+
+- maximum adverse excursion;
+- maximum favourable excursion;
+- worst completed trade;
+- 1st percentile return;
+- 5th percentile return;
+- median trade drawdown;
+- maximum trade drawdown;
+- entry-gap distribution;
+- next-earnings truncated exits;
+- simultaneous active trades.
+
+Also report non-gating cuts for:
+
+- SUE 1–2, 2–3, 3–5, >=5;
+- profit→profit;
+- loss→profit;
+- loss→smaller loss;
+- profit→loss;
+- initial reaction/gap buckets;
+- market cap;
+- liquidity;
+- sector;
+- reporting basis;
+- fiscal quarter;
+- announcement weekday;
+- calendar year.
+
+These may motivate a **new named hypothesis** only. They cannot rescue E1.
+
+---
+
+## 29. Required frozen evidence package
+
+Under:
+
+`Swing Trading/research/swing/e1_positive_earnings_surprise_drift/output/`
+
+generate at minimum:
+
+```text
+e1_data_validation.csv
+e1_source_coverage.csv
+e1_event_master.csv
+e1_event_exclusions.csv
+e1_eps_history.csv
+e1_sue_events.csv
+e1_cohort_classification.csv
+
+e1_positive_trades.csv
+e1_neutral_control.csv
+e1_negative_control.csv
+
+e1_validation_summary.csv
+e1_cohort_comparison.csv
+e1_benchmark_comparison.csv
+e1_temporal_summary.csv
+e1_year_summary.csv
+e1_leave_one_year_out.csv
+e1_top_five_robustness.csv
+e1_leave_one_symbol_out.csv
+
+e1_downside_diagnostic.csv
+e1_diagnostic_summary.csv
+e1_overlap_capacity_diagnostic.csv
+
+e1_integrity_audit.csv
+e1_validation_gates.csv
+research_report.md
+```
+
+No dashboard is required for the formal result.
+
+### 29.1 Event master
+
+`e1_event_master.csv` must retain at minimum:
+
+```text
+Event_ID
+Symbol
+Fiscal_Period_End
+Event_Public_Timestamp
+Event_Public_Date
+Reporting_Basis
+Timely_Result
+PIT_Membership_OK
+EPS_Source_Status
+Primary_Event
+```
+
+### 29.2 Exclusions
+
+`e1_event_exclusions.csv` must preserve every excluded event with exactly one primary reason.
+
+### 29.3 EPS history
+
+For every calculable event, retain:
 
 ```text
 Event_ID
@@ -1298,25 +1087,16 @@ Current_EPS
 EPS_t_minus_4
 D_t
 D_t_minus_1
-D_t_minus_2
-D_t_minus_3
-D_t_minus_4
-D_t_minus_5
-D_t_minus_6
-D_t_minus_7
+...
 D_t_minus_8
 Historical_Mean
 Historical_SD
 SUE
 ```
 
-### 34.4 `e1_cohort_classification.csv`
+### 29.4 Trade evidence
 
-Every valid finite SUE event exactly once with its frozen cohort label.
-
-### 34.5 Trade/control evidence
-
-All positive/neutral/negative primary execution files use the same core fields, including at minimum:
+Positive, neutral and negative completed-trade files must share comparable fields:
 
 ```text
 Event_ID
@@ -1333,48 +1113,53 @@ Gross_Return
 Base_Net_Return
 Stress_Net_Return
 Severe_Net_Return
-Nifty500_Entry_Value
-Nifty500_Exit_Value
+Nifty500_Entry_Open
+Nifty500_Exit_Open
 Benchmark_Return
 Base_Net_Excess_Return
 Stress_Net_Excess_Return
 ```
 
-Include the fields required to reproduce MAE/MFE and initial-reaction diagnostics.
+Include diagnostic fields needed for MAE/MFE and initial reaction.
 
 ---
 
-## 35. Source-coverage evidence
+## 30. Accounting invariants
 
-`e1_source_coverage.csv` must expose at minimum:
+At minimum:
 
 ```text
-PIT timely-result candidates
-source-resolvable candidates
-machine-readable EPS resolved
-technical EPS unresolved
-machine-readable resolution percentage
-consolidated selected
-standalone fallback selected
-NSE-only resolved
-BSE-only resolved
-cross-exchange resolved
-cross-exchange mismatches
-original filings selected
-revisions ignored
-SUE available
-SUE unavailable by reason
+all valid finite SUE events
+=
+POSITIVE_SURPRISE
++ POSITIVE_BUFFER
++ NEUTRAL_CONTROL
++ NEGATIVE_BUFFER
++ NEGATIVE_CONTROL
 ```
 
-The frozen 95% technical source-resolution gate must be explicit in evidence and in the final gate table.
+No overlap.
+
+For each primary traded/control cohort:
+
+```text
+qualified events
+=
+completed outcomes
++ explicit entry cancellations
+```
+
+Every completed outcome must have exact benchmark entry/exit dates.
+
+Primary and non-primary event sets must be disjoint.
 
 ---
 
-## 36. Formal gate artifact and status precedence
+## 31. Formal gate artifact and status hierarchy
 
-`e1_validation_gates.csv` is the only authority for formal E1 status.
+`e1_validation_gates.csv` is the authority for strategy status.
 
-Each gate must record at minimum:
+Each gate should expose:
 
 ```text
 Gate
@@ -1384,20 +1169,17 @@ Pass
 Mandatory
 ```
 
-The final status precedence is exactly:
+Status precedence:
 
 ```text
-if systemic integrity violations > 0:
+if systemic integrity violation:
     INVALID_RESEARCH_RUN
 
-elif machine-readable source resolution < 95%:
+elif Machine_Readable_EPS_Resolution < 95%:
     INVALID_RESEARCH_RUN
 
-elif positive completed < 300
-     or neutral completed < 300
-     or negative completed < 300
-     or FIRST positive completed < 100
-     or SECOND positive completed < 100:
+elif primary cohort sample requirements fail
+     or temporal-half positive counts fail:
     INSUFFICIENT_EVIDENCE
 
 elif every mandatory strategy gate passes:
@@ -1407,96 +1189,13 @@ else:
     FAIL
 ```
 
-There is no fifth state such as:
-
-- promising;
-- borderline;
-- conditional pass;
-- needs tuning.
+No fifth state such as "promising", "borderline", "conditional pass", or "needs tuning".
 
 ---
 
-## 37. Mandatory gate checklist
+## 32. Research report
 
-A valid and sufficient E1 run passes only if **every** mandatory strategy gate below passes.
-
-### Integrity / sufficiency
-
-```text
-SYSTEMIC_INTEGRITY_ZERO
-SOURCE_TECHNICAL_RESOLUTION >= 95%
-POSITIVE_SAMPLE >= 300
-NEUTRAL_SAMPLE >= 300
-NEGATIVE_SAMPLE >= 300
-FIRST_POSITIVE_SAMPLE >= 100
-SECOND_POSITIVE_SAMPLE >= 100
-```
-
-### Base positive-cohort economics
-
-```text
-BASE_MEAN_NET_RETURN >= +1.00%
-BASE_MEDIAN_NET_RETURN > 0
-BASE_RETURN_PF >= 1.20
-BASE_MEAN_NET_EXCESS_RETURN > 0
-BASE_EXCESS_RETURN_PF > 1.00
-```
-
-### Stress economics
-
-```text
-STRESS_MEAN_NET_RETURN > 0
-STRESS_RETURN_PF > 1.00
-STRESS_MEAN_NET_EXCESS_RETURN > 0
-```
-
-### Surprise discrimination
-
-```text
-POSITIVE_MEAN > NEUTRAL_MEAN > NEGATIVE_MEAN
-POSITIVE_EXCESS_MEAN > NEUTRAL_EXCESS_MEAN > NEGATIVE_EXCESS_MEAN
-POSITIVE_PF > NEUTRAL_PF
-POSITIVE_PF > NEGATIVE_PF
-```
-
-### Temporal robustness
-
-```text
-FIRST_MEAN > 0
-FIRST_PF > 1.00
-FIRST_EXCESS_MEAN > 0
-
-SECOND_MEAN > 0
-SECOND_PF > 1.00
-SECOND_EXCESS_MEAN > 0
-```
-
-### Robustness
-
-```text
-EVERY_LEAVE_ONE_YEAR_OUT:
-    mean > 0
-    PF > 1.00
-    excess mean > 0
-
-TOP_FIVE_WINNERS_REMOVED:
-    mean > 0
-    PF > 1.00
-    excess mean > 0
-
-EVERY_LEAVE_ONE_SYMBOL_OUT:
-    mean > 0
-    PF > 1.00
-    excess mean > 0
-```
-
-The 0.80% severe-friction case, diagnostic buckets, downside statistics and capacity statistics are not mandatory gates.
-
----
-
-## 38. Research report
-
-`research_report.md` must be generated mechanically from formal evidence and contain exactly these decision-focused sections:
+`research_report.md` must be generated mechanically from frozen evidence and contain:
 
 1. Frozen E1 hypothesis
 2. Source provenance
@@ -1517,38 +1216,37 @@ The 0.80% severe-friction case, diagnostic buckets, downside statistics and capa
 17. Downside diagnostics
 18. Capacity / overlap diagnostics
 19. Mandatory gate table
-20. One formal conclusion and explicit next action
+20. One formal conclusion and next action
 
-The report must not recommend alternate thresholds, stop rules, gap filters, sectors, regimes or holding periods after seeing results.
+No alternate thresholds or rescue suggestions.
 
 ---
 
-## 39. One-command formal validation
+## 33. One-command formal run
 
-After the source snapshot and market-price inputs are frozen:
+After source inputs are frozen:
 
-```bash
+```text
 python run_e1_validation.py
 ```
 
 must generate the complete evidence package.
 
-The formal validation run must:
+It must:
 
-- perform no network calls;
-- not modify frozen source snapshots;
-- not modify V3/M1 or their evidence;
-- be deterministic for identical manifest hashes;
-- fail loudly on missing/mismatched input fingerprints;
-- produce one formal E1 status.
+- make no network calls;
+- not modify input snapshots;
+- not modify V3/M1/R1 artifacts;
+- be deterministic against identical input hashes;
+- fail loudly on missing/mismatched required fingerprints.
 
-Source acquisition is a separate explicit process/command and is not allowed to run implicitly inside `run_e1_validation.py`.
+The source-snapshot builder is a separate explicit process.
 
 ---
 
-## 40. Hard out-of-scope list for E1 V1
+## 34. Hard out-of-scope list
 
-Explicitly prohibited:
+E1 V1 explicitly excludes:
 
 - analyst-consensus estimates;
 - revenue surprise;
@@ -1560,150 +1258,95 @@ Explicitly prohibited:
 - RS filters;
 - SMA filters;
 - market-regime filters;
-- sector filters;
 - volume confirmation;
 - positive-gap requirement;
 - gap-size exclusion;
 - ATR stop;
-- fixed percentage stop;
+- fixed-percentage stop;
 - trailing stop;
 - profit target;
-- alternate 20/60-day primary exits;
+- alternative 20/60-day primary exits;
 - SUE threshold optimization;
-- retrospective top-decile SUE ranking;
-- profit-only company filter;
+- retrospective top-decile ranking;
+- sector filtering;
+- profit-only-company filter;
 - loss-company exclusion;
 - machine learning;
-- PDF/OCR rescue;
-- dashboard building;
-- generic financial-data warehouse/platform work.
-
-These may be separate future hypotheses only if the project still has research budget and the primary E1 result is already formally closed.
+- PDF OCR rescue;
+- dashboards;
+- generic financial-data warehouse.
 
 ---
 
-## 41. Explicit no-rescue rule
+## 35. Final decision and next action
 
-If E1 fails, do **not** rescue it by trying:
+### PASS
 
-- `SUE >= 1.5` or `SUE >= 2`;
-- six historical seasonal changes;
-- 20-day/30-day/60-day exits;
-- positive initial gap only;
-- excluding large gaps;
-- trend/RS confirmation;
-- market-regime filters;
-- sector filters;
-- only profit-making companies;
-- excluding loss-to-profit events;
-- optimized stop losses;
-- only specific years.
+Stop signal research.
 
-Any such idea would require a new named predeclared hypothesis and would consume separate research budget.
-
-The default next action after a valid E1 `FAIL` or `INSUFFICIENT_EVIDENCE` is to move to the final remaining independent non-event candidate rather than continue PEAD strategy shopping.
-
----
-
-## 42. Decision path after the run
-
-### 42.1 PASS
-
-If every mandatory gate passes:
+Proceed to:
 
 ```text
-PASS
-→ stop signal-family research
-→ portfolio-constrained simulation
-→ 3-5 position slots
+3–5 position portfolio simulation
 → event collisions / candidate ranking
 → position sizing
-→ cash utilization
 → portfolio drawdown
+→ cash utilisation
 → small-account feasibility
 → forward/paper validation
 ```
 
-Historical PASS is not immediate permission to deploy live capital.
+### FAIL
 
-### 42.2 FAIL
+Close E1 permanently under this specification.
 
-If integrity and sample are sufficient but any mandatory strategy gate fails:
+Move to the final remaining independent candidate:
 
-```text
-FAIL
-→ close E1 permanently as specified
-→ no PEAD rescue
-→ move to final remaining independent non-event candidate
-```
+> objective range reversion **or** volatility compression → expansion
 
-The remaining research candidate is expected to be one of:
+No PEAD rescue.
 
-- objective range reversion; or
-- volatility compression -> expansion.
+### INSUFFICIENT_EVIDENCE
 
-Choose that separately before implementation; do not blend it into E1.
+Do not extend history or loosen SUE/history requirements to manufacture trades.
 
-### 42.3 INSUFFICIENT_EVIDENCE
+Move on.
 
-If primary or temporal cohort sufficiency fails:
+### INVALID_RESEARCH_RUN
 
-```text
-INSUFFICIENT_EVIDENCE
-→ do not extend history opportunistically
-→ do not loosen SUE/history requirements
-→ move on
-```
-
-### 42.4 INVALID_RESEARCH_RUN
-
-If systemic integrity/source-quality requirements fail:
-
-```text
-INVALID_RESEARCH_RUN
-→ repair only the research/data-integrity defect
-→ rerun the unchanged frozen E1 methodology
-```
+Repair only the research/data integrity defect and rerun E1 unchanged.
 
 ---
 
-## 43. Final frozen E1 summary
+## 36. Frozen summary
 
 ```text
 Official NSE/BSE original quarterly filings
                 ↓
-PIT Nifty500 on Event_Public_Date
+PIT Nifty500
                 ↓
-timely result (45d / 60d rule)
+timely quarterly result
                 ↓
-consistent quarterly reporting basis
-                ↓
-Basic EPS from continuing operations
-                ↓
-corporate-action comparable 13-quarter history
+consistent machine-readable EPS history
                 ↓
 8 prior seasonal EPS changes
-                ↓
-SUE = (current seasonal change - prior mean) / prior sample SD
                 ↓
 SUE >= +1.0
                 ↓
 next-session Open
                 ↓
-no gap / momentum / regime / trend filter
+no gap / momentum / regime filter
                 ↓
-40 complete sessions
-(or earlier next quarterly earnings event)
+40-session fixed hold
+or next quarterly-result early exit
                 ↓
-fixed exit, no technical stop/target
+0.40% base friction
                 ↓
-0.40% base / 0.60% stress / 0.80% severe diagnostic
+Nifty500-relative comparison
                 ↓
-Nifty500 total-return-consistent benchmark
+neutral + negative controls
                 ↓
-neutral + negative long-control cohorts
-                ↓
-temporal / year / top-five / symbol robustness
+hard temporal / concentration / winner robustness
                 ↓
 PASS / FAIL / INSUFFICIENT_EVIDENCE / INVALID_RESEARCH_RUN
 ```

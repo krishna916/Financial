@@ -171,44 +171,59 @@ def _eps_key(frame: pd.DataFrame) -> pd.Series:
     )
 
 
-def select_reporting_basis(events: pd.DataFrame, eps: pd.DataFrame) -> pd.DataFrame:
-    """Prefer consolidated current EPS, falling back to standalone when necessary."""
+def select_reporting_basis(
+    events: pd.DataFrame,
+    eps: pd.DataFrame,
+    actions: pd.DataFrame | None = None,
+) -> pd.DataFrame:
+    """Prefer the first basis with a complete comparable point-in-time SUE chain."""
 
     if events.empty:
         result = events.copy()
         result["Selected_Basis"] = pd.Series(dtype="string")
         return result
-    eps_frame = eps.copy()
-    if not eps_frame.empty:
-        eps_frame["Symbol"] = eps_frame["Symbol"].astype(str).str.strip().str.upper()
-        eps_frame["Reporting_Basis"] = eps_frame["Reporting_Basis"].fillna("").astype(str).str.upper()
-        eps_frame["_Key"] = _eps_key(eps_frame)
-        available = set(
-            eps_frame.loc[
-                pd.to_numeric(eps_frame.get("EPS"), errors="coerce").notna(), "_Key"
-            ].astype(str)
-        )
-    else:
-        available = set()
-
     frame = events.copy()
     frame["Symbol"] = frame["Symbol"].astype(str).str.strip().str.upper()
     frame["Fiscal_Period_End"] = frame["Fiscal_Period_End"].map(_date)
+    eps_frame = eps.copy()
+    if not eps_frame.empty:
+        eps_frame["Symbol"] = eps_frame["Symbol"].astype(str).str.strip().str.upper()
+        eps_frame["Fiscal_Period_End"] = eps_frame["Fiscal_Period_End"].map(_date)
+        eps_frame["Reporting_Basis"] = eps_frame["Reporting_Basis"].fillna("").astype(str).str.upper()
+    action_frame = actions if isinstance(actions, pd.DataFrame) else pd.DataFrame()
     choices: list[pd.Series] = []
     for (_, period), group in frame.groupby(["Symbol", "Fiscal_Period_End"], sort=True):
-        chosen = None
+        fallback = None
+        fallback_reason = "INSUFFICIENT_EPS_HISTORY"
         for basis in ("CONSOLIDATED", "STANDALONE"):
             candidates = group.loc[group["Reporting_Basis"].eq(basis)]
             if candidates.empty:
                 continue
-            has_current_eps = any(_eps_key(candidates.to_frame().T).iloc[0] in available for _, candidates in candidates.iterrows())
-            if has_current_eps or chosen is None:
-                chosen = candidates.iloc[0].copy()
-            if has_current_eps:
+            candidate = candidates.iloc[0].copy()
+            if fallback is None:
+                fallback = candidate.copy()
+            from compute_e1_sue import basis_chain_status
+
+            ok, reason = basis_chain_status(
+                str(candidate["Symbol"]),
+                period,
+                basis,
+                candidate.get("Public_Timestamp"),
+                eps_frame,
+                action_frame,
+            )
+            if ok:
+                chosen = candidate
+                chosen["Selected_Basis"] = basis
+                choices.append(chosen)
                 break
-        if chosen is not None:
-            chosen["Selected_Basis"] = str(chosen.get("Reporting_Basis") or "").upper()
-            choices.append(chosen)
+            fallback_reason = reason
+        else:
+            chosen = fallback
+            if chosen is not None:
+                chosen["Selected_Basis"] = np.nan
+                chosen["Basis_Selection_Reason"] = fallback_reason
+                choices.append(chosen)
     return pd.DataFrame(choices).reset_index(drop=True)
 
 
@@ -277,11 +292,12 @@ def build_event_master(
     filings: pd.DataFrame,
     eps: pd.DataFrame,
     membership: pd.DataFrame,
+    actions: pd.DataFrame | None = None,
 ) -> tuple[pd.DataFrame, pd.DataFrame, pd.DataFrame, pd.DataFrame]:
     """Build event master, explicit exclusions, coverage evidence, and ignored filing audit."""
 
     first_public, ignored = select_first_public_filings(filings)
-    selected = select_reporting_basis(first_public, eps)
+    selected = select_reporting_basis(first_public, eps, actions)
     rows: list[dict[str, object]] = []
     exclusions: list[dict[str, object]] = []
     eps_frame = eps.copy()
@@ -295,7 +311,8 @@ def build_event_master(
         period_end = _date(event.get("Fiscal_Period_End"))
         public_timestamp = event.get("Public_Timestamp")
         public_date = _public_date(public_timestamp)
-        basis = str(event.get("Selected_Basis") or "").upper()
+        selected_basis = event.get("Selected_Basis")
+        basis = "" if selected_basis is None or pd.isna(selected_basis) else str(selected_basis).upper()
         event_id = str(event.get("Event_ID") or _event_id(symbol, period_end, basis))
         fiscal_quarter = str(event.get("Fiscal_Quarter") or "").upper()
         timely = is_timely_result(period_end, public_date, fiscal_quarter)

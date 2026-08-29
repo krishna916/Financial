@@ -90,11 +90,12 @@ def test_event_public_date_uses_pit_membership_not_entry_date():
 
 
 def test_consolidated_basis_is_preferred_when_current_eps_is_available():
+    period_ends = pd.period_range("2021Q2", "2024Q2", freq="Q").to_timestamp(how="end").normalize()
     filing = {
         "Symbol": "AAA",
         "Exchange": "NSE",
         "Feed": "legacy",
-        "Fiscal_Period_End": "2024-06-30",
+        "Fiscal_Period_End": period_ends[-1],
         "Fiscal_Quarter": "Q1",
         "Reporting_Basis": "CONSOLIDATED",
         "Quarterly_or_Annual": "QUARTERLY",
@@ -108,8 +109,24 @@ def test_consolidated_basis_is_preferred_when_current_eps_is_available():
     filings = pd.DataFrame([filing, standalone])
     eps = pd.DataFrame(
         [
-            {**filing, "EPS": 10.0, "EPS_Source_Resolved": True},
-            {**standalone, "EPS": 9.0, "EPS_Source_Resolved": True},
+            {
+                **filing,
+                "Fiscal_Period_End": period_end,
+                "Source_Record_ID": f"eps-consolidated-{index}",
+                "EPS": float(index + 1),
+                "EPS_Source_Resolved": True,
+            }
+            for index, period_end in enumerate(period_ends)
+        ]
+        + [
+            {
+                **standalone,
+                "Fiscal_Period_End": period_end,
+                "Source_Record_ID": f"eps-standalone-{index}",
+                "EPS": float(index + 1),
+                "EPS_Source_Resolved": True,
+            }
+            for index, period_end in enumerate(period_ends)
         ]
     )
     membership = pd.DataFrame(
@@ -121,3 +138,50 @@ def test_consolidated_basis_is_preferred_when_current_eps_is_available():
     )
     master, _, _, _ = build_event_master(filings, eps, membership)
     assert master.iloc[0]["Selected_Basis"] == "CONSOLIDATED"
+
+
+def test_standalone_basis_fallback_requires_complete_sue_chain():
+    period_ends = pd.period_range("2021Q2", "2024Q2", freq="Q").to_timestamp(how="end").normalize()
+    filing = {
+        "Symbol": "AAA",
+        "Exchange": "NSE",
+        "Feed": "legacy",
+        "Fiscal_Period_End": period_ends[-1],
+        "Fiscal_Quarter": "Q1",
+        "Reporting_Basis": "CONSOLIDATED",
+        "Quarterly_or_Annual": "QUARTERLY",
+        "Original_or_Revised": "ORIGINAL",
+        "Public_Timestamp": "2024-08-10 10:00:00+05:30",
+        "Source_URL": "https://example.test/a",
+        "Source_Record_ID": "filing-consolidated",
+        "Machine_Readable_URL": "https://example.test/a.xml",
+    }
+    standalone_filing = {**filing, "Reporting_Basis": "STANDALONE", "Source_Record_ID": "filing-standalone"}
+    filings = pd.DataFrame([filing, standalone_filing])
+    eps_rows = []
+    for basis in ("CONSOLIDATED", "STANDALONE"):
+        basis_periods = period_ends if basis == "STANDALONE" else period_ends[1:]
+        for index, period_end in enumerate(basis_periods):
+            eps_rows.append(
+                {
+                    **filing,
+                    "Fiscal_Period_End": period_end,
+                    "Reporting_Basis": basis,
+                    "Public_Timestamp": "2024-08-09 10:00:00+05:30",
+                    "Source_Record_ID": f"eps-{basis.lower()}-{index}",
+                    "EPS": float(index + 1),
+                    "EPS_Source_Resolved": True,
+                }
+            )
+    eps = pd.DataFrame(eps_rows)
+    membership = pd.DataFrame(
+        {
+            "Symbol": ["AAA"],
+            "Member_From": [pd.Timestamp("2020-01-01")],
+            "Member_To": [pd.Timestamp("2026-12-31")],
+        }
+    )
+
+    master, _, _, _ = build_event_master(filings, eps, membership)
+
+    assert master.iloc[0]["Selected_Basis"] == "STANDALONE"

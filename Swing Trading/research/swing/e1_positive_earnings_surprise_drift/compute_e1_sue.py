@@ -145,6 +145,45 @@ def _history_for_event(
     return history, ""
 
 
+def basis_chain_status(
+    symbol: str,
+    period_end: pd.Timestamp,
+    basis: str,
+    event_timestamp: pd.Timestamp,
+    eps: pd.DataFrame,
+    actions: pd.DataFrame,
+) -> tuple[bool, str]:
+    """Validate the complete point-in-time comparable SUE chain for one basis."""
+
+    if "Public_Timestamp" not in eps.columns:
+        return False, "MISSING_EPS_PUBLIC_TIMESTAMP"
+    event = pd.Series(
+        {
+            "Event_ID": "",
+            "Symbol": symbol,
+            "Fiscal_Period_End": period_end,
+            "Event_Public_Timestamp": event_timestamp,
+            "Event_Public_Date": _date(event_timestamp),
+            "Reporting_Basis": basis,
+        }
+    )
+    history, reason = _history_for_event(event, eps, actions)
+    if history.empty:
+        return False, reason or "INSUFFICIENT_EPS_HISTORY"
+    current_idx = _quarter_index(period_end)
+    if current_idx is None:
+        return False, "INVALID_FISCAL_QUARTER"
+    by_index = {
+        _quarter_index(period): float(value)
+        for period, value in zip(history["Fiscal_Period_End"], history["EPS"])
+        if _quarter_index(period) is not None
+    }
+    required_indices = [current_idx - offset for offset in range(0, 13)]
+    if any(index not in by_index for index in required_indices):
+        return False, "INSUFFICIENT_EPS_HISTORY"
+    return True, ""
+
+
 def compute_sue_for_event(
     event: pd.Series,
     eps_history: pd.DataFrame,

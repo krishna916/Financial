@@ -4,6 +4,7 @@ import sys
 from pathlib import Path
 
 import pandas as pd
+import pytest
 
 MODULE_ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(MODULE_ROOT))
@@ -109,3 +110,24 @@ def test_stage_a_exports_corporate_action_parse_audit(monkeypatch, tmp_path):
     snapshot._write_stage_a(tmp_path, pd.DataFrame(), [])
     written = pd.read_csv(tmp_path / "e1_source_build_audit.csv")
     assert written.iloc[0]["Violation"] == "UNPARSEABLE_CORPORATE_ACTION_RATIO"
+
+
+@pytest.mark.parametrize(
+    ("purpose", "expected_factor"),
+    [
+        ("2:1 split", 2.0),
+        ("1:2 consolidation", 0.5),
+        ("1:1 bonus", 2.0),
+        ("2:1 bonus", 3.0),
+    ],
+)
+def test_action_normalization_persists_old_to_new_share_count_factor(
+    purpose: str, expected_factor: float
+):
+    action = snapshot._normalize_action(
+        {"purpose": purpose, "exDate": "2023-06-01", "id": purpose},
+        "AAA",
+    )
+
+    assert action is not None
+    assert action["Share_Count_Factor"] == pytest.approx(expected_factor)

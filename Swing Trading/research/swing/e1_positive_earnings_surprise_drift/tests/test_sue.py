@@ -95,7 +95,22 @@ def test_sue_unavailable_reason_is_persisted_as_explicit_exclusion():
     ]
 
 
-def test_split_adjusts_only_pre_split_history():
+@pytest.mark.parametrize(
+    ("action_type", "old_shares", "new_shares", "bonus_shares", "expected"),
+    [
+        ("SPLIT", 1.0, 2.0, np.nan, 5.0),
+        ("CONSOLIDATION", 2.0, 1.0, np.nan, 20.0),
+        ("BONUS", 1.0, 2.0, 1.0, 5.0),
+        ("BONUS", 1.0, 3.0, 2.0, 10.0 / 3.0),
+    ],
+)
+def test_corporate_action_share_count_factors_adjust_eps_economically(
+    action_type: str,
+    old_shares: float,
+    new_shares: float,
+    bonus_shares: float,
+    expected: float,
+):
     history = pd.DataFrame(
         {
             "Symbol": ["AAA", "AAA"],
@@ -106,14 +121,15 @@ def test_split_adjusts_only_pre_split_history():
     actions = pd.DataFrame(
         {
             "Symbol": ["AAA"],
-            "Action_Type": ["SPLIT"],
-            "Ratio_Numerator": [1.0],
-            "Ratio_Denominator": [2.0],
+            "Action_Type": [action_type],
+            "Old_Shares": [old_shares],
+            "New_Shares": [new_shares],
+            "Bonus_Shares": [bonus_shares],
             "Ex_Date": [pd.Timestamp("2023-06-01")],
         }
     )
     adjusted = adjust_historical_eps_for_actions(history, actions, pd.Timestamp("2024-06-30"))
-    assert adjusted.loc[0, "EPS"] == pytest.approx(5.0)
+    assert adjusted.loc[0, "EPS"] == pytest.approx(expected)
 
     after_event = adjust_historical_eps_for_actions(history, actions, pd.Timestamp("2023-05-31"))
     assert after_event.loc[0, "EPS"] == pytest.approx(10.0)
@@ -125,8 +141,9 @@ def test_unparseable_relevant_action_is_not_silently_ignored():
         {
             "Symbol": ["AAA"],
             "Action_Type": ["SPLIT"],
-            "Ratio_Numerator": [np.nan],
-            "Ratio_Denominator": [2.0],
+            "Old_Shares": [np.nan],
+            "New_Shares": [2.0],
+            "Bonus_Shares": [np.nan],
             "Ex_Date": [pd.Timestamp("2023-06-01")],
         }
     )

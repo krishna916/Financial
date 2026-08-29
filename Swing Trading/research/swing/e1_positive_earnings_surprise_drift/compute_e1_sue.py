@@ -55,11 +55,26 @@ def _sue_from_changes(current: float, seasonal_changes: pd.Series) -> dict[str, 
 
 
 def _action_factor(action: pd.Series) -> float:
-    numerator = pd.to_numeric(action.get("Ratio_Numerator"), errors="coerce")
-    denominator = pd.to_numeric(action.get("Ratio_Denominator"), errors="coerce")
-    if not np.isfinite(numerator) or not np.isfinite(denominator) or numerator <= 0 or denominator <= 0:
+    normalized = pd.to_numeric(action.get("Share_Count_Factor"), errors="coerce")
+    if np.isfinite(normalized) and normalized > 0:
+        return float(normalized)
+    action_type = str(action.get("Action_Type") or "").upper()
+    old_shares = pd.to_numeric(action.get("Old_Shares"), errors="coerce")
+    new_shares = pd.to_numeric(action.get("New_Shares"), errors="coerce")
+    bonus_shares = pd.to_numeric(action.get("Bonus_Shares"), errors="coerce")
+    if (
+        not np.isfinite(old_shares)
+        or not np.isfinite(new_shares)
+        or old_shares <= 0
+        or new_shares <= 0
+    ):
         raise ValueError("EPS_HISTORY_NOT_COMPARABLE")
-    return float(numerator / denominator)
+    if action_type == "BONUS":
+        if not np.isfinite(bonus_shares) or bonus_shares <= 0 or abs(new_shares - old_shares - bonus_shares) > 1e-12:
+            raise ValueError("EPS_HISTORY_NOT_COMPARABLE")
+    elif action_type not in {"SPLIT", "CONSOLIDATION"}:
+        raise ValueError("EPS_HISTORY_NOT_COMPARABLE")
+    return float(new_shares / old_shares)
 
 
 def adjust_historical_eps_for_actions(
@@ -72,7 +87,7 @@ def adjust_historical_eps_for_actions(
     result = eps_history.copy()
     if result.empty or actions is None or actions.empty:
         return result
-    required = {"Symbol", "Action_Type", "Ratio_Numerator", "Ratio_Denominator", "Ex_Date"}
+    required = {"Symbol", "Action_Type", "Ex_Date"}
     missing = required.difference(actions.columns)
     if missing:
         raise ValueError(f"EPS_HISTORY_NOT_COMPARABLE: actions missing {sorted(missing)}")
@@ -92,7 +107,7 @@ def adjust_historical_eps_for_actions(
             result["Symbol"].astype(str).str.upper().eq(str(action["Symbol"]).upper())
             & result["Fiscal_Period_End"].lt(action["Ex_Date"])
         )
-        result.loc[mask, "EPS"] = result.loc[mask, "EPS"] * factor
+        result.loc[mask, "EPS"] = result.loc[mask, "EPS"] / factor
     return result
 
 

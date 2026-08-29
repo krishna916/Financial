@@ -53,8 +53,14 @@ EPS_COLUMNS = SOURCE_COLUMNS + ["EPS", "EPS_Source_Resolved"]
 ACTION_COLUMNS = [
     "Symbol",
     "Action_Type",
+    "Old_Shares",
+    "New_Shares",
+    "Bonus_Shares",
+    "Share_Count_Factor",
     "Ratio_Numerator",
     "Ratio_Denominator",
+    "Normalization_Status",
+    "Action_Text",
     "Ex_Date",
     "Record_Date",
     "Source_URL",
@@ -176,6 +182,15 @@ def _action_ratio(value: object) -> tuple[float, float] | None:
     return numerator, denominator
 
 
+def _record_number(record: dict[str, object], *names: str) -> float | None:
+    for name in names:
+        if name in record:
+            value = _number(record.get(name))
+            if value is not None:
+                return value
+    return None
+
+
 def _normalize_action(record: dict[str, object], symbol: str) -> dict[str, object] | None:
     action_text = str(
         record.get("purpose")
@@ -194,13 +209,47 @@ def _normalize_action(record: dict[str, object], symbol: str) -> dict[str, objec
     else:
         return None
     ratio = _action_ratio(action_text)
-    if ratio is None:
-        return None
+    ratio_numerator, ratio_denominator = ratio or (None, None)
+    old_shares = _record_number(record, "oldShares", "old_shares", "fromShares", "from_shares")
+    new_shares = _record_number(record, "newShares", "new_shares", "toShares", "to_shares")
+    bonus_shares = _record_number(record, "bonusShares", "bonus_shares")
+    if old_shares is None or (action_type == "BONUS" and bonus_shares is None):
+        if ratio is not None:
+            first, second = ratio
+            if action_type == "BONUS":
+                bonus_shares = first
+                old_shares = second
+                new_shares = old_shares + bonus_shares
+            else:
+                new_shares = first
+                old_shares = second
+    elif action_type == "BONUS" and new_shares is None:
+        new_shares = old_shares + bonus_shares
+
+    factor = None
+    normalization_status = "NORMALIZED"
+    if old_shares is None or new_shares is None or old_shares <= 0 or new_shares <= 0:
+        factor = None
+        normalization_status = "UNPARSEABLE"
+    elif action_type == "BONUS":
+        if bonus_shares is None or bonus_shares <= 0 or abs(new_shares - (old_shares + bonus_shares)) > 1e-12:
+            factor = None
+            normalization_status = "UNPARSEABLE"
+        else:
+            factor = new_shares / old_shares
+    else:
+        factor = new_shares / old_shares
     return {
         "Symbol": symbol,
         "Action_Type": action_type,
-        "Ratio_Numerator": ratio[0],
-        "Ratio_Denominator": ratio[1],
+        "Old_Shares": old_shares,
+        "New_Shares": new_shares,
+        "Bonus_Shares": bonus_shares,
+        "Share_Count_Factor": factor,
+        "Ratio_Numerator": ratio_numerator,
+        "Ratio_Denominator": ratio_denominator,
+        "Normalization_Status": normalization_status,
+        "Action_Text": action_text,
         "Ex_Date": _naive_date(record.get("exDate") or record.get("ex_date")),
         "Record_Date": _naive_date(record.get("recordDate") or record.get("record_date")),
         "Source_URL": str(record.get("sourceUrl") or record.get("url") or ""),
@@ -250,6 +299,14 @@ def build_corporate_action_snapshot(
                             }
                         )
                     continue
+                if action.get("Normalization_Status") != "NORMALIZED":
+                    audit.append(
+                        {
+                            "Symbol": symbol,
+                            "Violation": "UNPARSEABLE_CORPORATE_ACTION_RATIO",
+                            "Detail": action.get("Action_Text", ""),
+                        }
+                    )
                 effective = action["Ex_Date"]
                 if pd.notna(effective) and effective <= cutoff:
                     action["Source_URL"] = action["Source_URL"] or url

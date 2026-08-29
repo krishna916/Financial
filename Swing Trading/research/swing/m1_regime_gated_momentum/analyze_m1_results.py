@@ -345,6 +345,9 @@ def overlap_capacity_diagnostic(
     classification = enabled_classification.copy()
     entries = enabled_entries.copy()
     practical = enabled_practical.copy()
+    for column in ("Entry_ID", "Symbol"):
+        if column not in entries:
+            entries[column] = pd.Series(dtype=str)
     if "Signal_Date" in classification:
         classification["Signal_Date"] = pd.to_datetime(classification["Signal_Date"], errors="coerce")
     for frame in (entries, practical):
@@ -363,7 +366,7 @@ def overlap_capacity_diagnostic(
             continue
         known_lifecycles += 1
         if entry_date == exit_date:
-            active_sessions = session_index[session_index.eq(entry_date)]
+            active_sessions = session_index[session_index == entry_date]
         else:
             active_sessions = session_index[(session_index >= entry_date) & (session_index < exit_date)]
         simultaneous_counts.extend(active_sessions.tolist())

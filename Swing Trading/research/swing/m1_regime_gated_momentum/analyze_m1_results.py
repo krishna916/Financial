@@ -322,3 +322,197 @@ def leave_one_symbol_out(enabled_practical: pd.DataFrame) -> pd.DataFrame:
             }
         )
     return pd.DataFrame(rows, columns=["Omitted_Symbol", "Remaining_Completed", "Mean_Base_Net_R", "Base_R_PF"])
+
+
+def _metric_rows(metrics: dict[str, object]) -> list[dict[str, object]]:
+    return [
+        {"Metric": key, "Dimension": "", "Value": value}
+        for key, value in metrics.items()
+    ]
+
+
+def overlap_capacity_diagnostic(
+    enabled_classification: pd.DataFrame,
+    enabled_entries: pd.DataFrame,
+    enabled_practical: pd.DataFrame,
+    canonical_sessions: pd.DatetimeIndex,
+    sector_mapping: pd.DataFrame,
+) -> pd.DataFrame:
+    """Report overlap/capacity evidence without feeding it into any gate."""
+
+    accepted_ids = set(enabled_entries.get("Entry_ID", pd.Series(dtype=str)).dropna().astype(str))
+    completed_ids = set(enabled_practical.get("Entry_ID", pd.Series(dtype=str)).dropna().astype(str))
+    classification = enabled_classification.copy()
+    entries = enabled_entries.copy()
+    practical = enabled_practical.copy()
+    if "Signal_Date" in classification:
+        classification["Signal_Date"] = pd.to_datetime(classification["Signal_Date"], errors="coerce")
+    for frame in (entries, practical):
+        for column in ("Entry_Date", "Exit_Date"):
+            if column in frame:
+                frame[column] = pd.to_datetime(frame[column], errors="coerce")
+
+    session_index = pd.DatetimeIndex(pd.to_datetime(canonical_sessions, errors="coerce"))
+    session_index = session_index.dropna().drop_duplicates().sort_values()
+    simultaneous_counts: list[int] = []
+    known_lifecycles = 0
+    for _, row in practical.iterrows():
+        entry_date = row.get("Entry_Date")
+        exit_date = row.get("Exit_Date")
+        if pd.isna(entry_date) or pd.isna(exit_date):
+            continue
+        known_lifecycles += 1
+        if entry_date == exit_date:
+            active_sessions = session_index[session_index.eq(entry_date)]
+        else:
+            active_sessions = session_index[(session_index >= entry_date) & (session_index < exit_date)]
+        simultaneous_counts.extend(active_sessions.tolist())
+    session_counts = pd.Series(simultaneous_counts).value_counts() if simultaneous_counts else pd.Series(dtype=int)
+    max_simultaneous = int(session_counts.max()) if not session_counts.empty else 0
+    completed_count = len(completed_ids)
+
+    qualified_counts = (
+        classification.groupby("Signal_Date").size()
+        if "Signal_Date" in classification and not classification.empty
+        else pd.Series(dtype=int)
+    )
+    accepted_entry_dates = (
+        entries.groupby("Entry_Date").size()
+        if "Entry_Date" in entries and not entries.empty
+        else pd.Series(dtype=int)
+    )
+    qualified_distribution = (
+        {str(int(count)): int((qualified_counts == count).sum()) for count in sorted(qualified_counts.unique())}
+        if not qualified_counts.empty
+        else {}
+    )
+
+    risk = _numeric(entries, "Initial_Risk")
+    entry_open = _numeric(entries, "Entry_Open")
+    risk_fraction = risk / entry_open
+    implied_weight = 0.01 / risk_fraction
+
+    mapping = sector_mapping.copy()
+    if {"Stock", "Sector_Key"}.issubset(mapping.columns):
+        mapping = mapping.drop_duplicates("Stock").set_index("Stock")
+        mapped_mask = entries.get("Symbol", pd.Series(dtype=str)).astype(str).isin(mapping.index.astype(str))
+        mapped_entries = entries.loc[mapped_mask].copy()
+        mapped_entries["Sector_Key"] = mapped_entries["Symbol"].astype(str).map(
+            {str(index): value for index, value in mapping["Sector_Key"].items()}
+        )
+    else:
+        mapped_entries = entries.iloc[0:0].copy()
+        mapped_mask = pd.Series(False, index=entries.index)
+
+    metrics = {
+        "ENABLED_ACCEPTED_ENTRIES": float(len(accepted_ids)),
+        "ENABLED_COMPLETED_TRADES": float(completed_count),
+        "ENABLED_INCOMPLETE_ACCEPTED": float(len(accepted_ids - completed_ids)),
+        "MAX_SIMULTANEOUS_COMPLETED_LIFECYCLES": float(max_simultaneous),
+        "SIMULTANEOUS_LIFECYCLE_COVERAGE_PERCENT": float(100.0 * known_lifecycles / completed_count) if completed_count else np.nan,
+        "MAX_SAME_DAY_ENABLED_QUALIFIED_SIGNALS": float(qualified_counts.max()) if not qualified_counts.empty else 0.0,
+        "MAX_SAME_DAY_ENABLED_ACCEPTED_ENTRIES": float(accepted_entry_dates.max()) if not accepted_entry_dates.empty else 0.0,
+        "SAME_DAY_ENABLED_QUALIFIED_DISTRIBUTION_JSON": json.dumps(qualified_distribution, sort_keys=True),
+        "MEDIAN_INITIAL_RISK_FRACTION": float(risk_fraction.median()) if risk_fraction.notna().any() else np.nan,
+        "MEDIAN_IMPLIED_POSITION_WEIGHT": float(implied_weight.median()) if implied_weight.notna().any() else np.nan,
+        "MAX_IMPLIED_POSITION_WEIGHT": float(implied_weight.max()) if implied_weight.notna().any() else np.nan,
+        "MAPPED_ACCEPTED_ENTRIES": float(mapped_mask.sum()),
+        "UNMAPPED_ACCEPTED_ENTRIES": float((~mapped_mask).sum()),
+        "MAPPING_COVERAGE_PERCENT": float(100.0 * mapped_mask.mean()) if len(mapped_mask) else np.nan,
+    }
+    rows = _metric_rows(metrics)
+    if not mapped_entries.empty:
+        for sector, count in mapped_entries["Sector_Key"].astype(str).value_counts().sort_index().items():
+            rows.append({"Metric": "SECTOR_ENTRY_COUNT", "Dimension": sector, "Value": float(count)})
+    return pd.DataFrame(rows, columns=["Metric", "Dimension", "Value"])
+
+
+def _value_from_frame(frame: pd.DataFrame, column: str) -> object:
+    if frame.empty or column not in frame.columns:
+        return np.nan
+    return frame.iloc[0].get(column, np.nan)
+
+
+def _available(value: object) -> bool:
+    return pd.notna(value)
+
+
+def evaluate_gates(
+    setup_metrics: dict[str, float],
+    practical_metrics: dict[str, float],
+    comparison: pd.DataFrame,
+    temporal: pd.DataFrame,
+    top_five: pd.DataFrame,
+    loso: pd.DataFrame,
+    completed_enabled: int,
+    integrity_violations: int,
+) -> tuple[str, pd.DataFrame]:
+    """Evaluate only the predeclared strategy gates in their frozen order."""
+
+    comparison_available = (
+        not comparison.empty
+        and all(
+            _available(_value_from_frame(comparison, column))
+            for column in (
+                "Enabled_Base_Mean_Net_R",
+                "Disabled_Base_Mean_Net_R",
+                "Enabled_Base_R_PF",
+                "Disabled_Base_R_PF",
+            )
+        )
+    )
+    first = temporal.loc[temporal.get("Period", pd.Series(dtype=str)).eq("FIRST_HALF")] if not temporal.empty else pd.DataFrame()
+    second = temporal.loc[temporal.get("Period", pd.Series(dtype=str)).eq("SECOND_HALF")] if not temporal.empty else pd.DataFrame()
+    top = top_five.iloc[0] if not top_five.empty else pd.Series(dtype=object)
+
+    checks: list[tuple[str, bool, object, str]] = [
+        ("INTEGRITY_ZERO", integrity_violations == 0, integrity_violations, "== 0"),
+        ("SAMPLE_SUFFICIENCY", completed_enabled >= 300, completed_enabled, ">= 300"),
+        ("BASE_SETUP_MEAN", setup_metrics.get("Base_Mean_Net_Return", np.nan) > 0, setup_metrics.get("Base_Mean_Net_Return", np.nan), "> 0"),
+        ("BASE_SETUP_PF", setup_metrics.get("Base_Net_Return_PF", np.nan) >= 1.20, setup_metrics.get("Base_Net_Return_PF", np.nan), ">= 1.20"),
+        ("BASE_PRACTICAL_MEAN_R", practical_metrics.get("Base_Mean_Net_R", np.nan) >= 0.15, practical_metrics.get("Base_Mean_Net_R", np.nan), ">= 0.15"),
+        ("BASE_PRACTICAL_R_PF", practical_metrics.get("Base_Net_R_PF", np.nan) >= 1.20, practical_metrics.get("Base_Net_R_PF", np.nan), ">= 1.20"),
+        ("STRESS_PRACTICAL_MEAN_R", practical_metrics.get("Stress_Mean_Net_R", np.nan) > 0, practical_metrics.get("Stress_Mean_Net_R", np.nan), "> 0"),
+        ("STRESS_PRACTICAL_R_PF", practical_metrics.get("Stress_Net_R_PF", np.nan) > 1.00, practical_metrics.get("Stress_Net_R_PF", np.nan), "> 1.00"),
+        ("REGIME_MEAN_DISCRIMINATION", bool(_value_from_frame(comparison, "Enabled_Beats_Disabled_Mean")) if comparison_available else False, _value_from_frame(comparison, "Enabled_Base_Mean_Net_R"), "enabled > disabled"),
+        ("REGIME_RPF_DISCRIMINATION", bool(_value_from_frame(comparison, "Enabled_Beats_Disabled_R_PF")) if comparison_available else False, _value_from_frame(comparison, "Enabled_Base_R_PF"), "enabled > disabled"),
+        ("TEMPORAL_FIRST_MEAN_R", bool(not first.empty and first.iloc[0].get("Mean_Base_Net_R", np.nan) > 0), _value_from_frame(first, "Mean_Base_Net_R"), "> 0"),
+        ("TEMPORAL_FIRST_R_PF", bool(not first.empty and first.iloc[0].get("Base_R_PF", np.nan) > 1.00), _value_from_frame(first, "Base_R_PF"), "> 1.00"),
+        ("TEMPORAL_SECOND_MEAN_R", bool(not second.empty and second.iloc[0].get("Mean_Base_Net_R", np.nan) > 0), _value_from_frame(second, "Mean_Base_Net_R"), "> 0"),
+        ("TEMPORAL_SECOND_R_PF", bool(not second.empty and second.iloc[0].get("Base_R_PF", np.nan) > 1.00), _value_from_frame(second, "Base_R_PF"), "> 1.00"),
+        ("TOP_FIVE_REMOVED_MEAN_R", bool(not top.empty and top.get("Remaining_Mean_Base_Net_R", np.nan) > 0), top.get("Remaining_Mean_Base_Net_R", np.nan), "> 0"),
+        ("TOP_FIVE_REMOVED_R_PF", bool(not top.empty and top.get("Remaining_Base_R_PF", np.nan) > 1.00), top.get("Remaining_Base_R_PF", np.nan), "> 1.00"),
+        ("LOSO_ALL_MEAN_R", bool(not loso.empty and pd.to_numeric(loso.get("Mean_Base_Net_R"), errors="coerce").gt(0).all()), len(loso), "> 0 for every omission"),
+        ("LOSO_ALL_R_PF", bool(not loso.empty and pd.to_numeric(loso.get("Base_R_PF"), errors="coerce").gt(1.00).all()), len(loso), "> 1.00 for every omission"),
+    ]
+    rows = [
+        {
+            "Gate": gate,
+            "Pass": bool(passed) if pd.notna(passed) else False,
+            "Mandatory": True,
+            "Value": value,
+            "Threshold": threshold,
+            "Status": "PASS" if bool(passed) else "FAIL",
+        }
+        for gate, passed, value, threshold in checks
+    ]
+    strategy_gates_pass = all(row["Pass"] for row in rows[1:])
+    if integrity_violations > 0:
+        status = "INVALID_RESEARCH_RUN"
+    elif completed_enabled < 300 or not comparison_available:
+        status = "INSUFFICIENT_EVIDENCE"
+    elif strategy_gates_pass:
+        status = "PASS"
+    else:
+        status = "FAIL"
+    rows.append(
+        {
+            "Gate": "FINAL_STATUS",
+            "Pass": status == "PASS",
+            "Mandatory": False,
+            "Value": status,
+            "Threshold": "status precedence",
+            "Status": status,
+        }
+    )
+    return status, pd.DataFrame(rows, columns=["Gate", "Pass", "Mandatory", "Value", "Threshold", "Status"])

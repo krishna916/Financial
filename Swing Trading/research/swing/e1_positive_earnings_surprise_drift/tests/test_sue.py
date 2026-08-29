@@ -1,0 +1,119 @@
+from __future__ import annotations
+
+import sys
+from pathlib import Path
+
+import numpy as np
+import pandas as pd
+import pytest
+
+MODULE_ROOT = Path(__file__).resolve().parents[1]
+sys.path.insert(0, str(MODULE_ROOT))
+
+from compute_e1_sue import (  # noqa: E402
+    _sue_from_changes,
+    adjust_historical_eps_for_actions,
+    classify_sue,
+    compute_sue_for_event,
+)
+
+
+def test_sue_uses_exactly_eight_prior_seasonal_changes_and_ddof_one():
+    seasonal = pd.Series([1.0, 2.0, 3.0, 4.0, 5.0, 6.0, 7.0, 8.0])
+    current = 10.0
+    expected = (current - seasonal.mean()) / seasonal.std(ddof=1)
+    row = _sue_from_changes(current, seasonal)
+    assert row["Historical_Mean"] == pytest.approx(seasonal.mean())
+    assert row["Historical_SD"] == pytest.approx(seasonal.std(ddof=1))
+    assert row["SUE"] == pytest.approx(expected)
+
+
+def _eps_history(public_dates: list[str]) -> pd.DataFrame:
+    periods = pd.date_range("2020-03-31", periods=len(public_dates), freq="QE-MAR")
+    quarter_labels = (["Q4", "Q1", "Q2", "Q3"] * ((len(periods) + 3) // 4))[: len(periods)]
+    return pd.DataFrame(
+        {
+            "Symbol": ["AAA"] * len(periods),
+            "Fiscal_Period_End": periods,
+            "Fiscal_Quarter": quarter_labels,
+            "Reporting_Basis": ["CONSOLIDATED"] * len(periods),
+            "Original_or_Revised": ["ORIGINAL"] * len(periods),
+            "Public_Timestamp": public_dates,
+            "EPS": np.arange(1.0, len(periods) + 1.0),
+        }
+    )
+
+
+def test_future_public_historical_eps_makes_sue_unavailable():
+    public_dates = ["2020-05-15 10:00:00+05:30"] * 13
+    public_dates[0] = "2023-08-11 10:00:00+05:30"
+    public_dates[-1] = "2023-08-10 10:00:00+05:30"
+    history = _eps_history(public_dates)
+    event = pd.Series(
+        {
+            "Event_ID": "AAA-20230331-CONSOLIDATED",
+            "Symbol": "AAA",
+            "Fiscal_Period_End": pd.Timestamp("2023-03-31"),
+            "Event_Public_Timestamp": pd.Timestamp("2023-08-10 10:00:00", tz="Asia/Kolkata"),
+            "Reporting_Basis": "CONSOLIDATED",
+        }
+    )
+    row, reason = compute_sue_for_event(event, history, pd.DataFrame())
+    assert row is None
+    assert reason in {"INSUFFICIENT_EPS_HISTORY", "FUTURE_EPS_USED"}
+
+
+def test_split_adjusts_only_pre_split_history():
+    history = pd.DataFrame(
+        {
+            "Symbol": ["AAA", "AAA"],
+            "Fiscal_Period_End": pd.to_datetime(["2023-03-31", "2024-03-31"]),
+            "EPS": [10.0, 5.0],
+        }
+    )
+    actions = pd.DataFrame(
+        {
+            "Symbol": ["AAA"],
+            "Action_Type": ["SPLIT"],
+            "Ratio_Numerator": [1.0],
+            "Ratio_Denominator": [2.0],
+            "Ex_Date": [pd.Timestamp("2023-06-01")],
+        }
+    )
+    adjusted = adjust_historical_eps_for_actions(history, actions, pd.Timestamp("2024-06-30"))
+    assert adjusted.loc[0, "EPS"] == pytest.approx(5.0)
+
+    after_event = adjust_historical_eps_for_actions(history, actions, pd.Timestamp("2023-05-31"))
+    assert after_event.loc[0, "EPS"] == pytest.approx(10.0)
+
+
+def test_unparseable_relevant_action_is_not_silently_ignored():
+    history = pd.DataFrame({"Symbol": ["AAA"], "Fiscal_Period_End": [pd.Timestamp("2023-03-31")], "EPS": [10.0]})
+    actions = pd.DataFrame(
+        {
+            "Symbol": ["AAA"],
+            "Action_Type": ["SPLIT"],
+            "Ratio_Numerator": [np.nan],
+            "Ratio_Denominator": [2.0],
+            "Ex_Date": [pd.Timestamp("2023-06-01")],
+        }
+    )
+    with pytest.raises(ValueError, match="EPS_HISTORY_NOT_COMPARABLE"):
+        adjust_historical_eps_for_actions(history, actions, pd.Timestamp("2024-06-30"))
+
+
+@pytest.mark.parametrize(
+    ("value", "expected"),
+    [
+        (1.0, "POSITIVE_SURPRISE"),
+        (0.5, "POSITIVE_BUFFER"),
+        (-0.5, "NEGATIVE_BUFFER"),
+        (-1.0, "NEGATIVE_CONTROL"),
+        (1.0 - 1e-9, "POSITIVE_BUFFER"),
+        (0.5 - 1e-9, "NEUTRAL_CONTROL"),
+        (-0.5 + 1e-9, "NEUTRAL_CONTROL"),
+        (-1.0 + 1e-9, "NEGATIVE_BUFFER"),
+    ],
+)
+def test_sue_cohort_boundaries_are_exact(value: float, expected: str):
+    assert classify_sue(value) == expected

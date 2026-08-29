@@ -54,7 +54,11 @@ def select_first_public_filings(filings: pd.DataFrame) -> tuple[pd.DataFrame, pd
     }
     missing = required.difference(filings.columns)
     if missing:
-        raise ValueError(f"filings missing columns: {sorted(missing)}")
+        if not filings.empty:
+            raise ValueError(f"filings missing columns: {sorted(missing)}")
+        filings = filings.copy()
+        for column in sorted(missing):
+            filings[column] = pd.Series(dtype="object")
     frame = filings.copy()
     if "Source_Record_ID" not in frame.columns:
         frame["Source_Record_ID"] = ""

@@ -135,7 +135,7 @@ def year_summary(positive: pd.DataFrame) -> pd.DataFrame:
 
 def leave_one_year_out(positive: pd.DataFrame) -> pd.DataFrame:
     if positive.empty:
-        return pd.DataFrame(columns=["Year", "Mandatory_Gate", "Pass"])
+        return pd.DataFrame(columns=["Year_Removed", "Mandatory_Gate", "Remaining_Count", "Mean_Net_Return", "Return_PF", "Mean_Net_Excess_Return", "Pass"])
     frame = positive.copy()
     frame["_Year"] = frame["Event_Public_Date"].map(_date).dt.year
     rows: list[dict[str, object]] = []
@@ -183,7 +183,18 @@ def leave_one_symbol_out(positive: pd.DataFrame) -> pd.DataFrame:
                 "Pass": bool(metrics["Mean_Net_Return"] > 0 and metrics["Return_PF"] > 1 and metrics["Mean_Net_Excess_Return"] > 0),
             }
         )
-    return pd.DataFrame(rows)
+    return pd.DataFrame(
+        rows,
+        columns=[
+            "Symbol_Removed",
+            "Mandatory_Gate",
+            "Remaining_Count",
+            "Mean_Net_Return",
+            "Return_PF",
+            "Mean_Net_Excess_Return",
+            "Pass",
+        ],
+    )
 
 
 def downside_diagnostic(positive: pd.DataFrame) -> pd.DataFrame:

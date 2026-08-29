@@ -136,4 +136,7 @@ def test_formal_validator_is_offline_against_frozen_fixture_inputs(tmp_path: Pat
     status, _ = run_validation(input_dir, output_dir, membership_path=membership)
     assert status == "INVALID_RESEARCH_RUN"
     assert (output_dir / "e1_integrity_audit.csv").exists()
+    integrity = pd.read_csv(output_dir / "e1_integrity_audit.csv")
+    assert not integrity.get("Violation", pd.Series(dtype=str)).eq("MISSING_FINAL_EVIDENCE").any()
+    assert (output_dir / "e1_data_validation.csv").exists()
     assert (output_dir / "research_report.md").read_text(encoding="utf-8").strip()

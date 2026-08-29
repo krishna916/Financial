@@ -10,6 +10,16 @@ import pandas as pd
 from constants import BASE_FRICTION, SEVERE_FRICTION, STRESS_FRICTION
 
 
+TRADE_OUTPUT_COLUMNS = [
+    "Event_ID", "Symbol", "Cohort", "SUE", "Event_Public_Date", "Entry_Date", "Entry_Open",
+    "Exit_Date", "Exit_Open", "Exit_Reason", "Holding_Sessions", "Gross_Return",
+    "Base_Net_Return", "Stress_Net_Return", "Severe_Net_Return", "Nifty500_Entry_Open",
+    "Nifty500_Exit_Open", "Benchmark_Return", "Base_Net_Excess_Return",
+    "Stress_Net_Excess_Return", "Previous_Close", "Entry_Gap", "MAE", "MFE",
+    "Max_Trade_Drawdown",
+]
+
+
 def _date(value: object) -> pd.Timestamp:
     parsed = pd.to_datetime(value, errors="coerce")
     if pd.isna(parsed):
@@ -240,4 +250,5 @@ def write_trade_outputs(output_dir: Path, frames: dict[str, pd.DataFrame]) -> No
         "NEGATIVE_CONTROL": "e1_negative_control.csv",
     }
     for cohort, name in names.items():
-        frames.get(cohort, pd.DataFrame()).to_csv(output_dir / name, index=False, date_format="%Y-%m-%d")
+        frame = frames.get(cohort, pd.DataFrame()).reindex(columns=TRADE_OUTPUT_COLUMNS)
+        frame.to_csv(output_dir / name, index=False, date_format="%Y-%m-%d")

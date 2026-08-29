@@ -358,7 +358,7 @@ def run_validation(
     event_schema = OUTPUT_SCHEMAS["e1_event_master.csv"] + ("Event_Public_Timestamp", "Fiscal_Period_End", "Reporting_Basis", "Selected_Basis", "Fiscal_Quarter", "Timely_Result", "PIT_Membership_OK", "EPS_Source_Status", "EPS_Source_Resolved", "Machine_Readable_URL", "Source_Exchanges", "Original_or_Revised", "Original_Record_Count")
     exclusion_schema = OUTPUT_SCHEMAS["e1_event_exclusions.csv"] + ("Symbol", "Fiscal_Period_End", "Event_Public_Date")
     write_event_outputs(output_root, _ensure_frame(event_master, event_schema), _ensure_frame(exclusions, exclusion_schema), coverage)
-    sue_schema = OUTPUT_SCHEMAS["e1_sue_events.csv"] + ("Symbol", "Fiscal_Period_End", "Event_Public_Date", "Reporting_Basis", "EPS_t_minus_4", "D_t", "D_t_minus_1", "D_t_minus_2", "D_t_minus_3", "D_t_minus_4", "D_t_minus_5", "D_t_minus_6", "D_t_minus_7", "D_t_minus_8", "Historical_Mean", "Historical_SD")
+    sue_schema = OUTPUT_SCHEMAS["e1_sue_events.csv"] + ("Symbol", "Fiscal_Period_End", "Event_Public_Date", "Reporting_Basis", "Current_EPS", "EPS_t_minus_4", "D_t", "D_t_minus_1", "D_t_minus_2", "D_t_minus_3", "D_t_minus_4", "D_t_minus_5", "D_t_minus_6", "D_t_minus_7", "D_t_minus_8", "Historical_Mean", "Historical_SD")
     write_sue_outputs(output_root, _ensure_frame(sue_events, sue_schema), _ensure_frame(sue_events, sue_schema), _ensure_frame(classified, sue_schema))
     write_trade_outputs(output_root, trade_frames)
     positive = trade_frames.get("POSITIVE_SURPRISE", pd.DataFrame())
@@ -386,6 +386,8 @@ def run_validation(
     gates.to_csv(output_root / "e1_validation_gates.csv", index=False)
     report_evidence = {"coverage": coverage, "gates": gates, "integrity": integrity}
     write_research_report(output_root / "research_report.md", status, report_evidence)
+    data_validation = pd.concat([manifest_audit, integrity], ignore_index=True) if not manifest_audit.empty or not integrity.empty else _empty_frame(OUTPUT_SCHEMAS["e1_data_validation.csv"])
+    _ensure_frame(data_validation, OUTPUT_SCHEMAS["e1_data_validation.csv"]).to_csv(output_root / "e1_data_validation.csv", index=False)
     final_issues = _final_package_issues(output_root)
     if final_issues:
         integrity = pd.concat([integrity, build_integrity_audit(final_package_issues=final_issues)], ignore_index=True)
@@ -404,7 +406,6 @@ def run_validation(
         gates.to_csv(output_root / "e1_validation_gates.csv", index=False)
         write_research_report(output_root / "research_report.md", status, {"coverage": coverage, "gates": gates, "integrity": integrity})
     data_validation = pd.concat([manifest_audit, integrity], ignore_index=True) if not manifest_audit.empty or not integrity.empty else _empty_frame(OUTPUT_SCHEMAS["e1_data_validation.csv"])
-    data_validation = data_validation.rename(columns={"Check": "Check", "Violation": "Violation", "Count": "Count", "Detail": "Detail"})
     _ensure_frame(data_validation, OUTPUT_SCHEMAS["e1_data_validation.csv"]).to_csv(output_root / "e1_data_validation.csv", index=False)
     return status, gates
 

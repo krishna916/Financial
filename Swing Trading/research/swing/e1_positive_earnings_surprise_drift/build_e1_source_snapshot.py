@@ -401,13 +401,18 @@ def _write_stage_a(input_dir: Path, membership: pd.DataFrame, symbols: list[str]
     input_dir.mkdir(parents=True, exist_ok=True)
     filings, eps, audit = build_filing_snapshot(symbols, SOURCE_CUTOFF)
     actions = build_corporate_action_snapshot(symbols, SOURCE_CUTOFF)
+    action_audit = actions.attrs.get("audit", pd.DataFrame())
+    if isinstance(action_audit, pd.DataFrame) and not action_audit.empty:
+        audit = pd.concat([audit, action_audit], ignore_index=True)
     market, benchmark = build_market_snapshot(membership)
     filings.to_csv(input_dir / "e1_exchange_filings_snapshot.csv", index=False, date_format="%Y-%m-%d")
     eps.to_csv(input_dir / "e1_eps_snapshot.csv", index=False, date_format="%Y-%m-%d")
     actions.to_csv(input_dir / "e1_corporate_actions_snapshot.csv", index=False, date_format="%Y-%m-%d")
     market.to_csv(input_dir / "e1_stock_prices_snapshot.csv", index=False, date_format="%Y-%m-%d")
     benchmark.to_csv(input_dir / "e1_nifty500_prices_snapshot.csv", index=False, date_format="%Y-%m-%d")
-    audit.to_csv(input_dir / "e1_source_build_audit.csv", index=False)
+    audit.reindex(columns=["Symbol", "Source_Record_ID", "Violation", "Detail"]).to_csv(
+        input_dir / "e1_source_build_audit.csv", index=False
+    )
     write_manifest(input_dir, {"Source": "official NSE/BSE and adjusted Yahoo price snapshot"})
 
 

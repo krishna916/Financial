@@ -88,3 +88,24 @@ def test_market_snapshot_keeps_symbol_and_benchmark_dates_separate(monkeypatch):
 
 def test_repository_root_for_cli_resolves_financial_checkout():
     assert snapshot.repository_root() == Path(__file__).resolve().parents[5]
+
+
+def test_stage_a_exports_corporate_action_parse_audit(monkeypatch, tmp_path):
+    action_audit = pd.DataFrame(
+        [{"Symbol": "AAA", "Violation": "UNPARSEABLE_CORPORATE_ACTION_RATIO", "Detail": "split"}]
+    )
+
+    monkeypatch.setattr(
+        snapshot,
+        "build_filing_snapshot",
+        lambda symbols, cutoff: (pd.DataFrame(), pd.DataFrame(), pd.DataFrame()),
+    )
+    actions = pd.DataFrame(columns=snapshot.ACTION_COLUMNS)
+    actions.attrs["audit"] = action_audit
+    monkeypatch.setattr(snapshot, "build_corporate_action_snapshot", lambda symbols, cutoff: actions)
+    monkeypatch.setattr(snapshot, "build_market_snapshot", lambda membership: (pd.DataFrame(), pd.DataFrame()))
+    monkeypatch.setattr(snapshot, "write_manifest", lambda input_dir, provenance: pd.DataFrame())
+
+    snapshot._write_stage_a(tmp_path, pd.DataFrame(), [])
+    written = pd.read_csv(tmp_path / "e1_source_build_audit.csv")
+    assert written.iloc[0]["Violation"] == "UNPARSEABLE_CORPORATE_ACTION_RATIO"

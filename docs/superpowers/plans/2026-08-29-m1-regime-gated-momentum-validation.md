@@ -4,7 +4,7 @@
 
 **Goal:** Build one focused, auditable M1 validator that partitions the already-frozen V3 opportunity set by the independently predeclared M1 market regime and mechanically reports `PASS`, `FAIL`, `INSUFFICIENT_EVIDENCE`, or `INVALID_RESEARCH_RUN` without changing V3 or tuning M1 after outcomes.
 
-**Architecture:** Add one new research module under `Swing Trading/research/swing/m1_regime_gated_momentum/`. The module must treat closed V3 artifacts as read-only stock-strategy evidence, recompute only the new M1 regime from existing PIT breadth + Nifty 500 index data, partition frozen V3 signals/entries/outcomes into enabled and disabled cohorts, apply M1 friction/robustness/gates, and write a concise evidence package. It must not download market data, rebuild V3 signals, modify V3 outputs, create a generic strategy framework, or add dashboards.
+**Architecture:** Add one new research module under `Swing Trading/research/swing/m1_regime_gated_momentum/`. The module must treat closed V3 artifacts as read-only stock-strategy evidence, recompute only the new M1 regime from existing PIT breadth + Nifty 500 index data, partition frozen V3 signals/entries/outcomes into enabled and disabled cohorts, apply M1 friction/robustness/gates, and write the exact minimum evidence package frozen in the spec. It must not download market data, rebuild V3 signals, modify V3 outputs, create a generic strategy framework, or add dashboards.
 
 **Tech Stack:** Python 3, pandas, numpy, pytest.
 
@@ -32,7 +32,7 @@
 - If M1 passes, stop signal-family research and move to portfolio/execution finalization.
 - If M1 fails, close it and move to Candidate 2; do not rescue M1.
 
-## File Map
+## File Map — exact minimum evidence package from the approved spec
 
 ```text
 Swing Trading/research/swing/m1_regime_gated_momentum/
@@ -50,24 +50,25 @@ Swing Trading/research/swing/m1_regime_gated_momentum/
 │   ├── test_m1_analysis.py
 │   └── test_m1_end_to_end.py
 └── output/
-    ├── m1_source_integrity.csv
+    ├── m1_data_validation.csv
     ├── m1_regime_daily.csv
-    ├── m1_signal_partition.csv
+    ├── m1_regime_audit.csv
+    ├── m1_signal_classification.csv
     ├── m1_enabled_entries.csv
     ├── m1_enabled_cancellations.csv
     ├── m1_disabled_shadow_entries.csv
     ├── m1_disabled_shadow_cancellations.csv
-    ├── m1_enabled_setup_trades.csv
-    ├── m1_enabled_practical_trades.csv
+    ├── m1_setup_quality_trades.csv
+    ├── m1_practical_trades.csv
     ├── m1_disabled_setup_control.csv
     ├── m1_disabled_practical_control.csv
     ├── m1_validation_summary.csv
     ├── m1_regime_comparison.csv
     ├── m1_temporal_summary.csv
     ├── m1_year_summary.csv
-    ├── m1_outlier_robustness.csv
+    ├── m1_top_five_robustness.csv
     ├── m1_leave_one_symbol_out.csv
-    ├── m1_overlap_diagnostic.csv
+    ├── m1_overlap_capacity_diagnostic.csv
     ├── m1_integrity_audit.csv
     ├── m1_validation_gates.csv
     └── research_report.md
@@ -91,6 +92,7 @@ V3_OUTPUT_ROOT: Path
 BREADTH_PATH: Path
 INDEX_PATH: Path
 MEMBERSHIP_PATH: Path
+SECTOR_MAP_PATH: Path
 
 load_required_csv(
     path: Path,
@@ -106,7 +108,8 @@ load_market_sources(
     breadth_path: Path = BREADTH_PATH,
     index_path: Path = INDEX_PATH,
     membership_path: Path = MEMBERSHIP_PATH,
-) -> tuple[pd.DataFrame, pd.DataFrame, pd.DataFrame, pd.DataFrame]
+    sector_map_path: Path = SECTOR_MAP_PATH,
+) -> tuple[pd.DataFrame, pd.DataFrame, pd.DataFrame, pd.DataFrame, pd.DataFrame]
 
 validate_frozen_v3_accounting(
     artifacts: dict[str, pd.DataFrame],
@@ -132,7 +135,7 @@ V3_REQUIRED_COLUMNS = {
     "v3_entries.csv": ("Entry_ID", "Symbol", "Signal_Date", "Entry_Date", "Entry_Open", "Structural_Stop", "Initial_Risk"),
     "v3_entry_cancellations.csv": ("Entry_ID", "Symbol", "Signal_Date", "Cancellation_Reason"),
     "v3_setup_quality_trades.csv": ("Entry_ID", "Symbol", "Signal_Date", "Entry_Date", "Entry_Open", "Structural_Stop", "Initial_Risk", "Exit_Date", "Exit_Price", "Return"),
-    "v3_practical_trades.csv": ("Entry_ID", "Symbol", "Signal_Date", "Entry_Date", "Entry_Open", "Structural_Stop", "Initial_Risk", "Exit_Date", "Exit_Price", "R_Multiple"),
+    "v3_practical_trades.csv": ("Entry_ID", "Symbol", "Signal_Date", "Entry_Date", "Entry_Open", "Structural_Stop", "Initial_Risk", "Exit_Date", "Exit_Price", "R_Multiple", "Holding_Sessions", "Exit_Reason"),
     "v3_validation_gates.csv": ("Gate", "Passed", "Value", "Status"),
 }
 ```
@@ -143,11 +146,12 @@ Market sources:
 Swing Trading/research/swing/market_breadth/output/nifty500_breadth_daily.csv
 Swing Trading/nifty500_regime_daily.csv
 Swing Trading/research/swing/market_breadth/config/nifty500_membership.csv
+Swing Trading/research/swing/sector_leadership/stock_sector_map.csv  # diagnostic only; partial mapping is acceptable
 ```
 
 - [ ] **Step 1: Create deterministic frozen-V3 test fixtures**
 
-Put this helper shape in `tests/fixtures.py`; keep the literal IDs/dates so all later tests can reuse it:
+Put this helper in `tests/fixtures.py`:
 
 ```python
 from pathlib import Path
@@ -172,7 +176,7 @@ def write_minimal_v3_package(root: Path) -> None:
         {"Entry_ID": "AAA-2024-01-02", "Symbol": "AAA", "Signal_Date": "2024-01-02", "Entry_Date": "2024-01-03", "Entry_Open": 100.0, "Structural_Stop": 95.0, "Initial_Risk": 5.0, "Exit_Date": "2024-01-10", "Exit_Price": 110.0, "Return": 0.10},
     ])
     practical = pd.DataFrame([
-        {"Entry_ID": "AAA-2024-01-02", "Symbol": "AAA", "Signal_Date": "2024-01-02", "Entry_Date": "2024-01-03", "Entry_Open": 100.0, "Structural_Stop": 95.0, "Initial_Risk": 5.0, "Exit_Date": "2024-01-10", "Exit_Price": 110.0, "R_Multiple": 2.0},
+        {"Entry_ID": "AAA-2024-01-02", "Symbol": "AAA", "Signal_Date": "2024-01-02", "Entry_Date": "2024-01-03", "Entry_Open": 100.0, "Structural_Stop": 95.0, "Initial_Risk": 5.0, "Exit_Date": "2024-01-10", "Exit_Price": 110.0, "R_Multiple": 2.0, "Holding_Sessions": 5, "Exit_Reason": "SMA20"},
     ])
     gates = pd.DataFrame([
         {"Gate": "POINT_IN_TIME_INTEGRITY", "Passed": True, "Value": 0, "Status": "PASS"},
@@ -195,7 +199,7 @@ This fixture intentionally includes one accepted-but-incomplete entry (`BBB`) so
 
 - [ ] **Step 2: Write failing artifact-loader tests**
 
-Create these complete tests in `test_m1_sources.py`:
+Create these tests in `test_m1_sources.py`:
 
 ```python
 import pandas as pd
@@ -274,7 +278,7 @@ setup completed Entry_ID set = practical completed Entry_ID set
 completed Entry_ID set ⊆ accepted Entry_ID set
 ```
 
-`load_market_sources()` returns `(breadth, index_daily, membership, audit)`. Required market columns are:
+`load_market_sources()` returns `(breadth, index_daily, membership, sector_mapping, audit)`. Required market columns are:
 
 ```python
 BREADTH_COLUMNS = ("Date", "SMA50_Denominator", "Pct_Above_SMA50")
@@ -282,9 +286,7 @@ INDEX_COLUMNS = ("Date", "Close", "SMA50", "SMA200")
 MEMBERSHIP_COLUMNS = ("Symbol", "Member_From", "Member_To", "Method")
 ```
 
-Reject membership rows unless `Method == "POINT_IN_TIME"`.
-
-Do not interpret M1 performance if source-integrity rows exist.
+Reject membership rows unless `Method == "POINT_IN_TIME"`. Sector mapping is diagnostic only: if the file is absent or lacks `Stock`/`Sector_Key`, return an empty mapping without making the research run invalid.
 
 - [ ] **Step 5: Run tests and make them pass**
 
@@ -324,8 +326,10 @@ build_m1_regime(
 attach_exact_signal_regime(
     signals: pd.DataFrame,
     regime_daily: pd.DataFrame,
-) -> tuple[pd.DataFrame, pd.DataFrame]
+) -> tuple[pd.DataFrame, pd.DataFrame, pd.DataFrame]
 ```
+
+`attach_exact_signal_regime()` returns `(classified_signals, regime_audit, violations)`.
 
 `m1_regime_daily.csv` columns:
 
@@ -342,6 +346,28 @@ DATA_SAFE
 INDEX_TREND_OK
 BREADTH_OK
 M1_Regime
+```
+
+`m1_regime_audit.csv` columns:
+
+```text
+Entry_ID
+Symbol
+Signal_Date
+Regime_Context_Date
+Active_PIT_Member_Count
+SMA50_Denominator
+SMA50_Breadth_Coverage
+Pct_Above_SMA50
+Nifty500_Close
+Nifty500_SMA50
+Nifty500_SMA200
+DATA_SAFE
+INDEX_TREND_OK
+BREADTH_OK
+M1_Regime
+Exact_Date_Match
+PIT_Denominator_Match
 ```
 
 - [ ] **Step 1: Write exact threshold/timing tests**
@@ -415,11 +441,19 @@ def test_old_strong_momentum_label_is_ignored():
 
 
 def test_signal_regime_join_requires_exact_same_date():
-    signals = pd.DataFrame({"Entry_ID": ["AAA-2024-01-03"], "Signal_Date": pd.to_datetime(["2024-01-03"])})
-    regime = pd.DataFrame({"Date": pd.to_datetime(["2024-01-02"]), "M1_Regime": ["MOMENTUM_ENABLED"]})
-    joined, audit = attach_exact_signal_regime(signals, regime)
+    signals = pd.DataFrame({
+        "Entry_ID": ["AAA-2024-01-03"],
+        "Symbol": ["AAA"],
+        "Signal_Date": pd.to_datetime(["2024-01-03"]),
+    })
+    regime = pd.DataFrame({
+        "Date": pd.to_datetime(["2024-01-02"]),
+        "M1_Regime": ["MOMENTUM_ENABLED"],
+    })
+    joined, regime_audit, violations = attach_exact_signal_regime(signals, regime)
     assert pd.isna(joined.loc[0, "M1_Regime"])
-    assert "MISSING_EXACT_SIGNAL_REGIME" in audit["Violation"].tolist()
+    assert not bool(regime_audit.loc[0, "Exact_Date_Match"])
+    assert "MISSING_EXACT_SIGNAL_REGIME" in violations["Violation"].tolist()
 
 
 def test_membership_denominator_is_recomputed_from_pit_intervals():
@@ -474,18 +508,13 @@ git commit -m "research: compute predeclared M1 market regime"
 **Interfaces:**
 
 ```python
-partition_signals(
-    qualified_signals: pd.DataFrame,
-    signal_regime: pd.DataFrame,
-) -> pd.DataFrame
-
 partition_v3_evidence(
-    partition: pd.DataFrame,
+    classification: pd.DataFrame,
     artifacts: dict[str, pd.DataFrame],
 ) -> tuple[dict[str, pd.DataFrame], pd.DataFrame]
 ```
 
-`m1_signal_partition.csv` must retain at least:
+`m1_signal_classification.csv` must retain at least:
 
 ```text
 Entry_ID,Symbol,Signal_Date,M1_Regime,DATA_SAFE,INDEX_TREND_OK,BREADTH_OK,SMA50_Breadth_Coverage,Pct_Above_SMA50,Nifty500_Close,Nifty500_SMA50,Nifty500_SMA200,V3_Entry_Status,V3_Cancellation_Reason
@@ -493,7 +522,7 @@ Entry_ID,Symbol,Signal_Date,M1_Regime,DATA_SAFE,INDEX_TREND_OK,BREADTH_OK,SMA50_
 
 - [ ] **Step 1: Write partition/accounting tests**
 
-Use `write_minimal_v3_package()` from Task 1. Build a literal partition where `AAA` is enabled, `BBB` and `CCC` are disabled:
+Use `write_minimal_v3_package()` from Task 1. Build a literal classification where `AAA` is enabled, `BBB` and `CCC` are disabled:
 
 ```python
 import pandas as pd
@@ -502,7 +531,7 @@ from partition_m1_cohorts import partition_v3_evidence
 from fixtures import write_minimal_v3_package
 
 
-def partition_fixture():
+def classification_fixture():
     return pd.DataFrame([
         {"Entry_ID": "AAA-2024-01-02", "Symbol": "AAA", "Signal_Date": pd.Timestamp("2024-01-02"), "M1_Regime": "MOMENTUM_ENABLED"},
         {"Entry_ID": "BBB-2024-01-03", "Symbol": "BBB", "Signal_Date": pd.Timestamp("2024-01-03"), "M1_Regime": "MOMENTUM_DISABLED"},
@@ -514,7 +543,7 @@ def test_partition_preserves_frozen_v3_accepted_and_cancelled_sets(tmp_path):
     write_minimal_v3_package(tmp_path)
     artifacts, audit = load_v3_artifacts(tmp_path)
     assert audit.empty
-    cohorts, partition_audit = partition_v3_evidence(partition_fixture(), artifacts)
+    cohorts, partition_audit = partition_v3_evidence(classification_fixture(), artifacts)
     assert partition_audit.empty
     accepted = set(cohorts["enabled_entries"]["Entry_ID"]) | set(cohorts["disabled_shadow_entries"]["Entry_ID"])
     cancelled = set(cohorts["enabled_cancellations"]["Entry_ID"]) | set(cohorts["disabled_shadow_cancellations"]["Entry_ID"])
@@ -525,7 +554,7 @@ def test_partition_preserves_frozen_v3_accepted_and_cancelled_sets(tmp_path):
 def test_disabled_control_uses_frozen_v3_cancellation_instead_of_creating_trade(tmp_path):
     write_minimal_v3_package(tmp_path)
     artifacts, _ = load_v3_artifacts(tmp_path)
-    cohorts, _ = partition_v3_evidence(partition_fixture(), artifacts)
+    cohorts, _ = partition_v3_evidence(classification_fixture(), artifacts)
     assert "CCC-2024-01-04" not in set(cohorts["disabled_shadow_entries"]["Entry_ID"])
     row = cohorts["disabled_shadow_cancellations"].set_index("Entry_ID").loc["CCC-2024-01-04"]
     assert row["Cancellation_Reason"] == "STOP_TOO_WIDE"
@@ -534,7 +563,7 @@ def test_disabled_control_uses_frozen_v3_cancellation_instead_of_creating_trade(
 def test_completed_enabled_plus_disabled_equals_frozen_completed_sample(tmp_path):
     write_minimal_v3_package(tmp_path)
     artifacts, _ = load_v3_artifacts(tmp_path)
-    cohorts, _ = partition_v3_evidence(partition_fixture(), artifacts)
+    cohorts, _ = partition_v3_evidence(classification_fixture(), artifacts)
     enabled = set(cohorts["enabled_practical"]["Entry_ID"])
     disabled = set(cohorts["disabled_practical"]["Entry_ID"])
     frozen = set(artifacts["v3_practical_trades.csv"]["Entry_ID"])
@@ -545,12 +574,18 @@ def test_completed_enabled_plus_disabled_equals_frozen_completed_sample(tmp_path
 def test_incomplete_accepted_entry_is_not_promoted_to_completed_control(tmp_path):
     write_minimal_v3_package(tmp_path)
     artifacts, _ = load_v3_artifacts(tmp_path)
-    cohorts, _ = partition_v3_evidence(partition_fixture(), artifacts)
+    cohorts, _ = partition_v3_evidence(classification_fixture(), artifacts)
     assert "BBB-2024-01-03" in set(cohorts["disabled_shadow_entries"]["Entry_ID"])
     assert "BBB-2024-01-03" not in set(cohorts["disabled_practical"]["Entry_ID"])
-```
 
-Also add a test that duplicates an `Entry_ID` in the partition and assert `DUPLICATE_REGIME_CLASSIFICATION` is emitted.
+
+def test_duplicate_regime_classification_is_integrity_violation(tmp_path):
+    write_minimal_v3_package(tmp_path)
+    artifacts, _ = load_v3_artifacts(tmp_path)
+    classification = pd.concat([classification_fixture(), classification_fixture().iloc[[0]]], ignore_index=True)
+    _, audit = partition_v3_evidence(classification, artifacts)
+    assert "DUPLICATE_REGIME_CLASSIFICATION" in audit["Violation"].tolist()
+```
 
 - [ ] **Step 2: Run tests and verify failure**
 
@@ -581,6 +616,19 @@ enabled completed ∪ disabled completed = frozen completed
 ```
 
 All unions must be disjoint and exact.
+
+Output mapping:
+
+```text
+enabled_entries                -> m1_enabled_entries.csv
+enabled_cancellations          -> m1_enabled_cancellations.csv
+disabled_shadow_entries        -> m1_disabled_shadow_entries.csv
+disabled_shadow_cancellations  -> m1_disabled_shadow_cancellations.csv
+enabled_setup                  -> m1_setup_quality_trades.csv
+enabled_practical              -> m1_practical_trades.csv
+disabled_setup                 -> m1_disabled_setup_control.csv
+disabled_practical             -> m1_disabled_practical_control.csv
+```
 
 - [ ] **Step 4: Run tests and make them pass**
 
@@ -630,7 +678,13 @@ Use these literal tests:
 import numpy as np
 import pandas as pd
 import pytest
-from analyze_m1_results import add_setup_friction, add_practical_friction, safe_profit_factor, temporal_summary
+from analyze_m1_results import (
+    add_setup_friction,
+    add_practical_friction,
+    safe_profit_factor,
+    temporal_summary,
+    regime_comparison,
+)
 
 
 def test_setup_friction_is_gross_return_minus_round_trip_cost():
@@ -698,6 +752,14 @@ def test_temporal_split_uses_signal_date_not_entry_date():
     counts = dict(zip(out["Period"], out["Completed_Trades"]))
     assert counts["FIRST_HALF"] == 1
     assert counts["SECOND_HALF"] == 1
+
+
+def test_enabled_and_disabled_receive_identical_comparison_formula():
+    enabled = pd.DataFrame({"Base_Net_R": [1.0, -0.2]})
+    disabled = pd.DataFrame({"Base_Net_R": [0.1, -0.2]})
+    out = regime_comparison(enabled, disabled).iloc[0]
+    assert bool(out["Enabled_Beats_Disabled_Mean"])
+    assert bool(out["Enabled_Beats_Disabled_R_PF"])
 ```
 
 Use `np.isclose(..., rtol=1e-9, atol=1e-12)` inside implementation for persisted-vs-recomputed numeric evidence.
@@ -705,7 +767,7 @@ Use `np.isclose(..., rtol=1e-9, atol=1e-12)` inside implementation for persisted
 - [ ] **Step 2: Run tests and verify failure**
 
 ```bash
-python -m pytest -q "Swing Trading/research/swing/m1_regime_gated_momentum/tests/test_m1_analysis.py" -k "friction or temporal or profit"
+python -m pytest -q "Swing Trading/research/swing/m1_regime_gated_momentum/tests/test_m1_analysis.py" -k "friction or temporal or profit or comparison"
 ```
 
 - [ ] **Step 3: Implement frozen friction fields**
@@ -745,8 +807,6 @@ Enabled_Beats_Disabled_Mean
 Enabled_Beats_Disabled_R_PF
 ```
 
-Add one literal comparison test with enabled `Base_Net_R=[1.0,-0.2]` and disabled `Base_Net_R=[0.1,-0.2]`; assert both discrimination booleans are `True`.
-
 Temporal halves use `Signal_Date` exactly. Calendar-year summaries use `Signal_Date.dt.year` and are diagnostic only.
 
 - [ ] **Step 5: Run tests and make them pass**
@@ -764,7 +824,7 @@ git commit -m "research: calculate M1 friction and cohort metrics"
 
 ---
 
-### Task 5: Add robustness, overlap diagnostics, frozen gates and status precedence
+### Task 5: Add robustness, spec-required diagnostics, frozen gates and status precedence
 
 **Files:**
 - Modify: `Swing Trading/research/swing/m1_regime_gated_momentum/analyze_m1_results.py`
@@ -775,7 +835,14 @@ git commit -m "research: calculate M1 friction and cohort metrics"
 ```python
 top_five_robustness(enabled_practical: pd.DataFrame) -> pd.DataFrame
 leave_one_symbol_out(enabled_practical: pd.DataFrame) -> pd.DataFrame
-overlap_diagnostic(enabled_entries: pd.DataFrame) -> pd.DataFrame
+
+overlap_capacity_diagnostic(
+    enabled_classification: pd.DataFrame,
+    enabled_entries: pd.DataFrame,
+    enabled_practical: pd.DataFrame,
+    canonical_sessions: pd.DatetimeIndex,
+    sector_mapping: pd.DataFrame,
+) -> pd.DataFrame
 
 evaluate_gates(
     setup_metrics: dict[str, float],
@@ -795,7 +862,12 @@ Use these literal fixtures/assertions:
 
 ```python
 import pandas as pd
-from analyze_m1_results import top_five_robustness, leave_one_symbol_out, evaluate_gates
+from analyze_m1_results import (
+    top_five_robustness,
+    leave_one_symbol_out,
+    overlap_capacity_diagnostic,
+    evaluate_gates,
+)
 
 
 def passing_inputs(integrity_violations=0, completed_enabled=300):
@@ -850,11 +922,8 @@ def test_valid_sufficient_single_gate_failure_returns_fail():
     args[1]["Base_Mean_Net_R"] = 0.14
     status, _ = evaluate_gates(*args)
     assert status == "FAIL"
-```
 
-Also add:
 
-```python
 def test_top_five_removes_largest_gross_r_not_net_r():
     trades = pd.DataFrame({
         "Entry_ID": list("ABCDEFG"),
@@ -874,6 +943,39 @@ def test_loso_reports_every_symbol():
     out = leave_one_symbol_out(trades)
     assert set(out["Omitted_Symbol"]) == {"AAA", "BBB"}
 ```
+
+Add an exact 1%-risk diagnostic test:
+
+```python
+def test_overlap_capacity_uses_exact_one_percent_risk_weight_and_partial_sector_mapping():
+    classification = pd.DataFrame({
+        "Entry_ID": ["A", "B"],
+        "Symbol": ["AAA", "BBB"],
+        "Signal_Date": pd.to_datetime(["2024-01-02", "2024-01-02"]),
+    })
+    entries = pd.DataFrame({
+        "Entry_ID": ["A", "B"],
+        "Symbol": ["AAA", "BBB"],
+        "Entry_Date": pd.to_datetime(["2024-01-03", "2024-01-03"]),
+        "Entry_Open": [100.0, 200.0],
+        "Initial_Risk": [5.0, 20.0],
+    })
+    practical = pd.DataFrame({
+        "Entry_ID": ["A", "B"],
+        "Entry_Date": pd.to_datetime(["2024-01-03", "2024-01-03"]),
+        "Exit_Date": pd.to_datetime(["2024-01-05", "2024-01-04"]),
+    })
+    sector_mapping = pd.DataFrame({"Stock": ["AAA"], "Sector_Key": ["IT"]})
+    sessions = pd.DatetimeIndex(pd.to_datetime(["2024-01-03", "2024-01-04", "2024-01-05"]))
+    out = overlap_capacity_diagnostic(classification, entries, practical, sessions, sector_mapping)
+    metrics = out.set_index(["Metric", "Dimension"])["Value"]
+    assert float(metrics.loc[("MEDIAN_IMPLIED_POSITION_WEIGHT", "")]) == 0.15
+    assert float(metrics.loc[("MAPPED_ACCEPTED_ENTRIES", "")]) == 1.0
+    assert float(metrics.loc[("UNMAPPED_ACCEPTED_ENTRIES", "")]) == 1.0
+    assert float(metrics.loc[("SECTOR_ENTRY_COUNT", "IT")]) == 1.0
+```
+
+The two implied weights are `0.01/(5/100)=0.20` and `0.01/(20/200)=0.10`; median is `0.15`.
 
 - [ ] **Step 2: Implement frozen mandatory gate table**
 
@@ -913,35 +1015,47 @@ else:
     FAIL
 ```
 
+`evaluate_gates()` must not accept overlap/capacity/sector diagnostics as arguments. Add a test asserting the gate-name set contains none of `SECTOR`, `CAPACITY`, `SIMULTANEOUS`, `SAME_DAY`, or `RS_BAND`.
+
 - [ ] **Step 3: Implement top-five and LOSO exactly**
 
 Top-five ranking column is frozen gross `R_Multiple` / recomputed gross R.
 
 LOSO loops every symbol present in the enabled completed practical sample and calculates base-net mean R + base-net R-PF after omitting all that symbol's trades.
 
-- [ ] **Step 4: Implement minimal overlap diagnostic**
+- [ ] **Step 4: Implement the spec-required diagnostics without gating**
 
-Diagnostic only; do not gate M1 on portfolio capacity yet.
+`m1_overlap_capacity_diagnostic.csv` uses long-form columns:
+
+```text
+Metric,Dimension,Value
+```
 
 Report at minimum:
 
 ```text
-Enabled_Accepted_Entries
-Max_Same_Day_Entries
-Average_Same_Day_Entries_On_Active_Days
-Median_Initial_Risk_Fraction
-Median_Implied_Position_Weight_At_1Pct_Risk
-Max_Implied_Position_Weight_At_1Pct_Risk
+ENABLED_ACCEPTED_ENTRIES
+ENABLED_COMPLETED_TRADES
+ENABLED_INCOMPLETE_ACCEPTED
+MAX_SIMULTANEOUS_COMPLETED_LIFECYCLES
+SIMULTANEOUS_LIFECYCLE_COVERAGE_PERCENT
+MAX_SAME_DAY_ENABLED_QUALIFIED_SIGNALS
+MAX_SAME_DAY_ENABLED_ACCEPTED_ENTRIES
+SAME_DAY_ENABLED_QUALIFIED_DISTRIBUTION_JSON
+MEDIAN_INITIAL_RISK_FRACTION
+MEDIAN_IMPLIED_POSITION_WEIGHT
+MAX_IMPLIED_POSITION_WEIGHT
+MAPPED_ACCEPTED_ENTRIES
+UNMAPPED_ACCEPTED_ENTRIES
+MAPPING_COVERAGE_PERCENT
+SECTOR_ENTRY_COUNT,<Sector_Key>,<count>  # one row per mapped sector
 ```
 
-Where:
+For simultaneous-lifecycle calculation, use completed practical outcomes with known `Entry_Date` and `Exit_Date`; count active sessions from `Entry_Date` through the canonical session immediately before `Exit_Date`. If `Entry_Date == Exit_Date`, count that entry session once. Report coverage so incomplete accepted entries are not silently ignored.
 
-```python
-Risk_Fraction = Initial_Risk / Entry_Open
-Implied_Position_Weight = 0.01 / Risk_Fraction
-```
+For sector concentration, use only symbols present in the existing `stock_sector_map.csv`; do not infer or invent sectors for unmapped symbols.
 
-Use accepted enabled entries because capacity exists from entry until exit and incomplete accepted entries still consume real capital if this were live. Do not create a portfolio simulator yet.
+Also persist/report the spec diagnostics already present in enabled trade/classification files: win rate, gross/net return/R distributions, holding sessions, exit-reason distribution, breadth, index distance from SMA200, Composite RS, pullback age/depth, and entry extension. These are report summaries only and never eligibility/gate inputs.
 
 - [ ] **Step 5: Run tests and make them pass**
 
@@ -958,13 +1072,13 @@ git commit -m "research: add frozen M1 validation gates"
 
 ---
 
-### Task 6: Build the one-command evidence run, report, and regression verification
+### Task 6: Build the one-command evidence run, exact spec outputs, report, and regression verification
 
 **Files:**
 - Create: `Swing Trading/research/swing/m1_regime_gated_momentum/run_m1_validation.py`
 - Create: `Swing Trading/research/swing/m1_regime_gated_momentum/README.md`
 - Create: `Swing Trading/research/swing/m1_regime_gated_momentum/tests/test_m1_end_to_end.py`
-- Generate: all `output/` artifacts listed in the File Map
+- Generate: every `output/` artifact listed in the File Map
 
 **Interfaces:**
 
@@ -974,6 +1088,7 @@ run_validation(
     breadth_path: Path = BREADTH_PATH,
     index_path: Path = INDEX_PATH,
     membership_path: Path = MEMBERSHIP_PATH,
+    sector_map_path: Path = SECTOR_MAP_PATH,
     output_dir: Path = OUTPUT_ROOT,
 ) -> tuple[str, pd.DataFrame]
 
@@ -986,141 +1101,167 @@ write_research_report(
 
 - [ ] **Step 1: Write synthetic end-to-end status-precedence tests**
 
-Do not make these tests depend on the real repository data. Reuse `write_minimal_v3_package()` and write one-day market CSVs into `tmp_path`.
+Do not make these tests depend on the real repository data. Reuse `write_minimal_v3_package()` and write market CSVs into `tmp_path`.
 
-Create a helper in `test_m1_end_to_end.py`:
+Create this helper in `test_m1_end_to_end.py`:
 
 ```python
 from pathlib import Path
 import pandas as pd
 
 
-def write_market_package(root: Path) -> tuple[Path, Path, Path]:
+def write_market_package(root: Path) -> tuple[Path, Path, Path, Path]:
     breadth_path = root / "breadth.csv"
     index_path = root / "index.csv"
     membership_path = root / "membership.csv"
-    pd.DataFrame([{
-        "Date": "2024-01-02",
-        "SMA50_Denominator": 1,
-        "Pct_Above_SMA50": 100.0,
-        "Universe_Member_Count": 1,
-        "Regime": "HOSTILE",
-    }]).to_csv(breadth_path, index=False)
-    pd.DataFrame([{
-        "Date": "2024-01-02",
-        "Close": 120.0,
-        "SMA50": 110.0,
-        "SMA200": 100.0,
-        "Regime": "RISK_OFF",
-    }]).to_csv(index_path, index=False)
-    pd.DataFrame([{
-        "Symbol": "AAA",
-        "Member_From": "2023-01-01",
-        "Member_To": "2024-12-31",
-        "Method": "POINT_IN_TIME",
-    }]).to_csv(membership_path, index=False)
-    return breadth_path, index_path, membership_path
+    sector_path = root / "sector.csv"
+    dates = ["2024-01-02", "2024-01-03", "2024-01-04"]
+    pd.DataFrame({
+        "Date": dates,
+        "SMA50_Denominator": [3, 3, 3],
+        "Pct_Above_SMA50": [100.0, 100.0, 100.0],
+        "Universe_Member_Count": [3, 3, 3],
+        "Regime": ["HOSTILE", "HOSTILE", "HOSTILE"],
+    }).to_csv(breadth_path, index=False)
+    pd.DataFrame({
+        "Date": dates,
+        "Close": [120.0, 121.0, 122.0],
+        "SMA50": [110.0, 110.0, 110.0],
+        "SMA200": [100.0, 100.0, 100.0],
+        "Regime": ["RISK_OFF", "RISK_OFF", "RISK_OFF"],
+    }).to_csv(index_path, index=False)
+    pd.DataFrame({
+        "Symbol": ["AAA", "BBB", "CCC"],
+        "Member_From": ["2023-01-01"] * 3,
+        "Member_To": ["2024-12-31"] * 3,
+        "Method": ["POINT_IN_TIME"] * 3,
+    }).to_csv(membership_path, index=False)
+    pd.DataFrame({"Stock": ["AAA"], "Sector_Key": ["IT"]}).to_csv(sector_path, index=False)
+    return breadth_path, index_path, membership_path, sector_path
 ```
 
-Then write these tests with exact expected status:
+Then write:
 
 ```python
 def test_end_to_end_missing_source_is_invalid(tmp_path):
     v3_root = tmp_path / "v3"
     write_minimal_v3_package(v3_root)
     (v3_root / "v3_entries.csv").unlink()
-    breadth, index_daily, membership = write_market_package(tmp_path)
-    status, _ = run_validation(v3_root, breadth, index_daily, membership, tmp_path / "out")
+    breadth, index_daily, membership, sector = write_market_package(tmp_path)
+    status, _ = run_validation(v3_root, breadth, index_daily, membership, sector, tmp_path / "out")
     assert status == "INVALID_RESEARCH_RUN"
 
 
 def test_end_to_end_fixture_with_fewer_than_300_enabled_trades_is_insufficient(tmp_path):
     v3_root = tmp_path / "v3"
     write_minimal_v3_package(v3_root)
-    breadth, index_daily, membership = write_market_package(tmp_path)
-    status, _ = run_validation(v3_root, breadth, index_daily, membership, tmp_path / "out")
+    breadth, index_daily, membership, sector = write_market_package(tmp_path)
+    status, _ = run_validation(v3_root, breadth, index_daily, membership, sector, tmp_path / "out")
     assert status == "INSUFFICIENT_EVIDENCE"
 ```
 
-For `FAIL` and `PASS` precedence, use `evaluate_gates()` unit tests from Task 5 rather than fabricating 300 CSV trades. End-to-end here only proves orchestration, missing-source invalidation, and insufficient-sample behavior.
+For `FAIL` and `PASS` precedence, use `evaluate_gates()` unit tests from Task 5 rather than fabricating 300 CSV trades. End-to-end here proves orchestration, missing-source invalidation, exact-date regime coverage, and insufficient-sample behavior.
 
 - [ ] **Step 2: Implement orchestration in this exact order**
 
 ```text
 1. load frozen V3 sources
 2. validate frozen V3 source accounting/PIT gate
-3. load breadth/index/membership sources
+3. load breadth/index/membership/optional-sector sources
 4. build independent M1 daily regime
-5. exact-date attach regime to all frozen qualified V3 signals
-6. partition accepted/cancelled/completed evidence
-7. recompute friction and integrity checks
+5. exact-date attach regime to all frozen qualified V3 signals and create m1_regime_audit
+6. create m1_signal_classification and partition accepted/cancelled/completed evidence
+7. recompute friction and numeric-integrity checks
 8. calculate enabled/control metrics
-9. calculate temporal/year/top-five/LOSO/overlap evidence
+9. calculate temporal/year/top-five/LOSO/diagnostic evidence
 10. merge all integrity rows
 11. evaluate frozen gates/status
-12. write every required CSV + research_report.md
-13. verify final required output package exists/readable
-14. if final package verification adds violations, rewrite audit/gates/report as INVALID_RESEARCH_RUN
+12. write exact minimum evidence package + research_report.md
+13. verify every final required output exists/readable/schema-valid
+14. if final package verification adds violations, rewrite integrity/gates/report as INVALID_RESEARCH_RUN
 ```
 
 Do not short-circuit output writing on invalid runs: write enough evidence to show why the run is invalid.
 
+`m1_data_validation.csv` uses columns `Metric,Value,Pass` and must include at least:
+
+```text
+V3_QUALIFIED_SIGNALS
+V3_ACCEPTED_ENTRIES
+V3_CANCELLED_ENTRIES
+V3_COMPLETED_PAIRED
+V3_POINT_IN_TIME_INTEGRITY
+BREADTH_SOURCE_ROWS
+INDEX_SOURCE_ROWS
+MEMBERSHIP_INTERVAL_ROWS
+QUALIFIED_SIGNALS_WITH_EXACT_REGIME
+FINAL_REQUIRED_EVIDENCE_PACKAGE
+```
+
 - [ ] **Step 3: Implement final required-output verification**
 
-The final verifier must require every artifact in the File Map. Missing/unreadable/required-column failure emits `MISSING_FINAL_EVIDENCE` or `INVALID_FINAL_EVIDENCE` and forces `INVALID_RESEARCH_RUN`.
+Missing/unreadable/required-column failure emits `MISSING_FINAL_EVIDENCE` or `INVALID_FINAL_EVIDENCE` and forces `INVALID_RESEARCH_RUN`.
 
 Required minimum columns:
 
 ```python
 FINAL_REQUIRED_COLUMNS = {
-    "m1_source_integrity.csv": ("Violation",),
+    "m1_data_validation.csv": ("Metric", "Value", "Pass"),
     "m1_regime_daily.csv": ("Date", "M1_Regime"),
-    "m1_signal_partition.csv": ("Entry_ID", "M1_Regime"),
+    "m1_regime_audit.csv": ("Entry_ID", "Signal_Date", "Regime_Context_Date", "M1_Regime", "Exact_Date_Match"),
+    "m1_signal_classification.csv": ("Entry_ID", "M1_Regime", "V3_Entry_Status"),
     "m1_enabled_entries.csv": ("Entry_ID",),
     "m1_enabled_cancellations.csv": ("Entry_ID",),
     "m1_disabled_shadow_entries.csv": ("Entry_ID",),
     "m1_disabled_shadow_cancellations.csv": ("Entry_ID",),
-    "m1_enabled_setup_trades.csv": ("Entry_ID", "Base_Net_Return"),
-    "m1_enabled_practical_trades.csv": ("Entry_ID", "Base_Net_R"),
+    "m1_setup_quality_trades.csv": ("Entry_ID", "Base_Net_Return"),
+    "m1_practical_trades.csv": ("Entry_ID", "Base_Net_R"),
     "m1_disabled_setup_control.csv": ("Entry_ID", "Base_Net_Return"),
     "m1_disabled_practical_control.csv": ("Entry_ID", "Base_Net_R"),
     "m1_validation_summary.csv": ("Metric", "Value"),
     "m1_regime_comparison.csv": ("Enabled_Base_Mean_Net_R", "Disabled_Base_Mean_Net_R"),
     "m1_temporal_summary.csv": ("Period",),
     "m1_year_summary.csv": ("Signal_Year",),
-    "m1_outlier_robustness.csv": ("Remaining_Mean_Base_Net_R", "Remaining_Base_R_PF"),
+    "m1_top_five_robustness.csv": ("Remaining_Mean_Base_Net_R", "Remaining_Base_R_PF"),
     "m1_leave_one_symbol_out.csv": ("Omitted_Symbol",),
-    "m1_overlap_diagnostic.csv": ("Enabled_Accepted_Entries",),
+    "m1_overlap_capacity_diagnostic.csv": ("Metric", "Dimension", "Value"),
     "m1_integrity_audit.csv": ("Violation",),
     "m1_validation_gates.csv": ("Gate", "Pass", "Mandatory"),
 }
 ```
 
-`research_report.md` must exist and be non-empty.
+`research_report.md` must exist and be non-empty. CSV writers must preserve required headers even when a cohort is empty.
 
-- [ ] **Step 4: Keep the report decision-focused**
+- [ ] **Step 4: Keep the report decision-focused and spec-complete**
 
-`research_report.md` must contain only:
+`research_report.md` must conclude with exactly these sections:
 
 ```text
-1. Frozen hypothesis and regime rule
-2. Frozen V3 source-evidence provenance/accounting
-3. Regime coverage: enabled vs disabled days/signals
-4. Enabled accepted/cancelled/completed counts
-5. Disabled shadow accepted/cancelled/completed counts
-6. Base/stress/severe setup + practical metrics
-7. Enabled-vs-disabled discrimination
-8. Fixed temporal halves + calendar-year diagnostics
-9. Top-five and LOSO robustness
-10. Overlap/capital diagnostic
-11. Integrity audit count
-12. Mandatory gate table
-13. Formal final status
-14. Explicit next action:
-    PASS -> portfolio/execution validation
-    FAIL -> close M1, Candidate 2
-    INSUFFICIENT -> close/no loosening, Candidate 2
-    INVALID -> fix only research integrity and rerun
+1. Frozen M1 hypothesis and rules
+2. Source-artifact and PIT coverage/integrity
+3. M1 regime distribution
+4. Signal/cohort accounting
+5. Base setup-quality results
+6. Base practical results
+7. Stress/severe friction results
+8. Enabled-vs-disabled regime comparison
+9. Temporal halves
+10. Calendar-year diagnostics
+11. Top-five-winner robustness
+12. Leave-one-symbol-out robustness
+13. Overlap/capacity diagnostics including clustering, partial-sector coverage and 1%-risk sizing
+14. Integrity audit
+15. Mandatory gate table
+16. One formal final status and explicit next action
+```
+
+Next action text is frozen:
+
+```text
+PASS -> portfolio/execution validation
+FAIL -> close M1 and proceed to Candidate 2
+INSUFFICIENT_EVIDENCE -> do not loosen M1; proceed to Candidate 2
+INVALID_RESEARCH_RUN -> fix only research integrity and rerun unchanged
 ```
 
 Do not include rescue suggestions or alternate thresholds.
@@ -1184,6 +1325,7 @@ enabled setup completed Entry_ID set = enabled practical completed Entry_ID set
 disabled setup completed Entry_ID set = disabled practical completed Entry_ID set
 integrity violations = 0 for any valid interpreted run
 all gate thresholds exactly match the spec
+no old Regime/Momentum_Regime field participates in eligibility
 ```
 
 - [ ] **Step 11: Commit the completed validator + generated evidence**
@@ -1205,6 +1347,7 @@ Report only:
 - base/stress practical metrics;
 - enabled-vs-disabled comparison;
 - temporal/top-five/LOSO gate results;
+- diagnostic regime/clustering/sector-mapping/capital coverage;
 - final formal M1 status;
 - paths to `m1_validation_gates.csv` and `research_report.md`;
 - whether any V3 file changed (expected: **no**).

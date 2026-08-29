@@ -97,6 +97,7 @@ FINAL_REQUIRED_COLUMNS: dict[str, tuple[str, ...]] = {
     "m1_integrity_audit.csv": ("Violation",),
     "m1_validation_gates.csv": ("Gate", "Pass", "Mandatory"),
 }
+FINAL_REQUIRED_TEXT_FILES = ("research_report.md",)
 
 
 def _empty_audit() -> pd.DataFrame:
@@ -137,6 +138,39 @@ def _qualified_signals(signals: pd.DataFrame) -> pd.DataFrame:
     return result.loc[mask].copy().reset_index(drop=True)
 
 
+def _signal_window_audit(qualified: pd.DataFrame) -> pd.DataFrame:
+    """Return one integrity row for every qualified signal outside the frozen M1 window."""
+
+    if qualified.empty:
+        return _empty_audit()
+
+    rows: list[dict[str, object]] = []
+    signal_dates = pd.to_datetime(
+        qualified.get("Signal_Date", pd.Series(pd.NaT, index=qualified.index)),
+        errors="coerce",
+    )
+    outside = (
+        signal_dates.isna()
+        | signal_dates.lt(PRIMARY_START)
+        | signal_dates.gt(PRIMARY_END)
+    )
+
+    for index in qualified.index[outside.fillna(True)]:
+        row = qualified.loc[index]
+        observed_date = signal_dates.loc[index]
+        rows.append(
+            {
+                "Entry_ID": row.get("Entry_ID", ""),
+                "Symbol": row.get("Symbol", ""),
+                "Violation": "SIGNAL_DATE_OUTSIDE_PRIMARY_WINDOW",
+                "Observed": "NaT" if pd.isna(observed_date) else str(observed_date.date()),
+                "Expected": "2023-08-01 <= Signal_Date <= 2026-08-25",
+            }
+        )
+
+    return _audit_rows(rows, "signal_window")
+
+
 def _classification_base() -> pd.DataFrame:
     return pd.DataFrame(columns=["Entry_ID", "Symbol", "Signal_Date"])
 
@@ -170,20 +204,46 @@ def _write_csv(frame: pd.DataFrame, path: Path, required_columns: tuple[str, ...
 
 def _final_package_issues(output_dir: Path) -> list[dict[str, object]]:
     issues: list[dict[str, object]] = []
-    for filename, required in FINAL_REQUIRED_COLUMNS.items():
-        if filename == "research_report.md":
-            path = output_dir / filename
-            if not path.exists() or not path.read_text(encoding="utf-8").strip():
-                issues.append(
-                    {
-                        "Entry_ID": "",
-                        "Symbol": "",
-                        "Violation": "MISSING_FINAL_EVIDENCE",
-                        "Observed": filename,
-                        "Expected": "non-empty research_report.md",
-                    }
-                )
+    for filename in FINAL_REQUIRED_TEXT_FILES:
+        path = output_dir / filename
+        if not path.exists():
+            issues.append(
+                {
+                    "Entry_ID": "",
+                    "Symbol": "",
+                    "Violation": "MISSING_FINAL_EVIDENCE",
+                    "Observed": filename,
+                    "Expected": "readable non-empty UTF-8 text file",
+                }
+            )
             continue
+
+        try:
+            content = path.read_text(encoding="utf-8")
+        except (OSError, UnicodeDecodeError) as exc:
+            issues.append(
+                {
+                    "Entry_ID": "",
+                    "Symbol": "",
+                    "Violation": "INVALID_FINAL_EVIDENCE",
+                    "Observed": f"{filename}: {exc}",
+                    "Expected": "readable non-empty UTF-8 text file",
+                }
+            )
+            continue
+
+        if not content.strip():
+            issues.append(
+                {
+                    "Entry_ID": "",
+                    "Symbol": "",
+                    "Violation": "INVALID_FINAL_EVIDENCE",
+                    "Observed": f"{filename}: blank content",
+                    "Expected": "readable non-empty UTF-8 text file",
+                }
+            )
+
+    for filename, required in FINAL_REQUIRED_COLUMNS.items():
         path = output_dir / filename
         try:
             frame = pd.read_csv(path)
@@ -477,6 +537,7 @@ def run_validation(
 
     regime_daily, regime_build_audit = build_m1_regime(breadth, index_daily, membership)
     qualified = _qualified_signals(artifacts.get("v3_signal_candidates.csv", pd.DataFrame()))
+    signal_window_audit = _signal_window_audit(qualified)
     if qualified.empty and not {"Entry_ID", "Symbol", "Signal_Date"}.issubset(qualified.columns):
         qualified = _classification_base()
     classified, regime_audit, regime_violations = attach_exact_signal_regime(qualified, regime_daily)
@@ -544,6 +605,7 @@ def run_validation(
     all_integrity = _merge_audits(
         _tag_audit(v3_loader_audit, "v3_loader"),
         _tag_audit(v3_accounting_audit, "v3_accounting"),
+        signal_window_audit,
         _tag_audit(market_audit, "market_sources"),
         _tag_audit(regime_build_audit, "m1_regime"),
         _tag_audit(regime_violations, "regime_join"),

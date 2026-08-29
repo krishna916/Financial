@@ -171,6 +171,16 @@ def _eps_key(frame: pd.DataFrame) -> pd.Series:
     )
 
 
+def eps_values_match(a: float, b: float) -> bool:
+    """Apply the frozen cross-exchange EPS equality tolerance."""
+
+    absolute = abs(float(a) - float(b))
+    if absolute <= 0.01:
+        return True
+    scale = max(abs(float(a)), abs(float(b)))
+    return scale > 0 and absolute / scale <= 0.005
+
+
 def select_reporting_basis(
     events: pd.DataFrame,
     eps: pd.DataFrame,
@@ -264,8 +274,9 @@ def _coverage_row(event_master: pd.DataFrame) -> pd.DataFrame:
         event_master["Event_Public_Date"].map(_date).between(PRIMARY_START, PRIMARY_END, inclusive="both")
         & event_master["PIT_Membership_OK"].map(_flag)
         & event_master["Timely_Result"].map(_flag)
-        & event_master["Selected_Basis"].notna()
-        & event_master["Machine_Readable_URL"].notna()
+        & event_master["Selected_Basis"].fillna("").astype(str).str.strip().ne("")
+        & event_master["Machine_Readable_URL"].fillna("").astype(str).str.strip().ne("")
+        & event_master["Original_or_Revised"].fillna("").astype(str).str.upper().eq("ORIGINAL")
     ]
     resolved = technical["EPS_Source_Resolved"].astype(bool)
     exchanges = event_master["Source_Exchanges"].fillna("").astype(str)
@@ -324,7 +335,7 @@ def build_event_master(
             & eps_frame["Original_or_Revised"].fillna("").astype(str).str.upper().eq("ORIGINAL")
         ] if not eps_frame.empty else pd.DataFrame()
         values = pd.to_numeric(matching.get("EPS", pd.Series(dtype=float)), errors="coerce").dropna()
-        mismatch = len(values) > 1 and not np.isclose(values.max(), values.min())
+        mismatch = len(values) > 1 and not eps_values_match(values.max(), values.min())
         resolved = bool(len(values) and not mismatch)
         machine_url = str(event.get("Machine_Readable_URL") or "").strip()
         if not machine_url and not matching.empty:

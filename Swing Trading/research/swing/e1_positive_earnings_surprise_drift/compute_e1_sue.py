@@ -8,7 +8,7 @@ import numpy as np
 import pandas as pd
 
 from constants import PRIMARY_END, PRIMARY_START
-from build_e1_events import formal_event_eligibility
+from build_e1_events import eps_values_match, formal_event_eligibility
 
 
 def _date(value: object) -> pd.Timestamp:
@@ -135,7 +135,11 @@ def _history_for_event(
     duplicate_periods = history["Fiscal_Period_End"].duplicated(keep=False)
     if duplicate_periods.any():
         duplicate_values = history.loc[duplicate_periods].groupby("Fiscal_Period_End")["EPS"].agg(["min", "max"])
-        if (duplicate_values["max"] - duplicate_values["min"] > 1e-12).any():
+        if (
+            ~duplicate_values.apply(
+                lambda row: eps_values_match(row["max"], row["min"]), axis=1
+            )
+        ).any():
             return pd.DataFrame(), "CROSS_EXCHANGE_EPS_MISMATCH"
         history = history.drop_duplicates("Fiscal_Period_End", keep="first")
     try:

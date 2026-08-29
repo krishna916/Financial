@@ -78,6 +78,36 @@ def test_insufficient_sample_beats_strategy_fail():
     assert status == "INSUFFICIENT_EVIDENCE"
 
 
+def test_temporal_sample_insufficiency_precedes_strategy_fail():
+    temporal = pd.DataFrame(
+        [
+            {"Period": "FIRST", "Completed_Count": 99},
+            {"Period": "SECOND", "Completed_Count": 100},
+        ]
+    )
+    status, _ = evaluate_gates(
+        temporal=temporal,
+        integrity_count=0,
+        technical_coverage=1.0,
+        positive_count=500,
+        neutral_count=500,
+        negative_count=500,
+    )
+    assert status == "INSUFFICIENT_EVIDENCE"
+
+    temporal.loc[0, "Completed_Count"] = 100
+    temporal.loc[1, "Completed_Count"] = 99
+    status, _ = evaluate_gates(
+        temporal=temporal,
+        integrity_count=0,
+        technical_coverage=1.0,
+        positive_count=500,
+        neutral_count=500,
+        negative_count=500,
+    )
+    assert status == "INSUFFICIENT_EVIDENCE"
+
+
 def test_technical_coverage_boundary_is_frozen():
     below, _ = evaluate_gates(
         integrity_count=0,

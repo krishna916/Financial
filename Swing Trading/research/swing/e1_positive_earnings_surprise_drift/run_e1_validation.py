@@ -154,9 +154,11 @@ def evaluate_gates(
     _gate(rows, "POSITIVE_PF_GT_NEGATIVE_PF", p_pf > negpf, True, np.isfinite([p_pf, negpf]).all() and p_pf > negpf)
 
     temporal = temporal if isinstance(temporal, pd.DataFrame) else pd.DataFrame()
+    temporal_counts: dict[str, int] = {}
     for period in ("FIRST", "SECOND"):
         row = temporal.loc[temporal.get("Period", pd.Series(dtype=object)).eq(period)] if not temporal.empty else pd.DataFrame()
         count = int(row.iloc[0].get("Completed_Count", 0)) if not row.empty else 0
+        temporal_counts[period] = count
         mean = float(row.iloc[0].get("Base_Mean_Net_Return", np.nan)) if not row.empty else np.nan
         pf = float(row.iloc[0].get("Base_Return_PF", np.nan)) if not row.empty else np.nan
         excess = float(row.iloc[0].get("Base_Mean_Net_Excess_Return", np.nan)) if not row.empty else np.nan
@@ -175,7 +177,12 @@ def evaluate_gates(
     preliminary = pd.DataFrame(rows)
     if integrity_count > 0 or not coverage_pass:
         status = "INVALID_RESEARCH_RUN"
-    elif p_count < PRIMARY_POSITIVE_MIN or n_count < PRIMARY_NEUTRAL_MIN or neg_count < PRIMARY_NEGATIVE_MIN:
+    elif (
+        p_count < PRIMARY_POSITIVE_MIN
+        or n_count < PRIMARY_NEUTRAL_MIN
+        or neg_count < PRIMARY_NEGATIVE_MIN
+        or any(temporal_counts.get(period, 0) < TEMPORAL_POSITIVE_MIN for period in ("FIRST", "SECOND"))
+    ):
         status = "INSUFFICIENT_EVIDENCE"
     elif not preliminary.loc[preliminary["Mandatory"], "Pass"].astype(bool).all():
         status = "FAIL"
@@ -403,6 +410,7 @@ def run_validation(
         loaded.get("e1_exchange_filings_snapshot.csv", pd.DataFrame()),
         loaded.get("e1_eps_snapshot.csv", pd.DataFrame()),
         membership,
+        loaded.get("e1_corporate_actions_snapshot.csv", pd.DataFrame()),
     )
     _, sue_events, classified, sue_exclusions = build_sue_events(
         event_master,

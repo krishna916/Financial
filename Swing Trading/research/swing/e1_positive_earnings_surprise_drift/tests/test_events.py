@@ -9,7 +9,9 @@ MODULE_ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(MODULE_ROOT))
 
 from build_e1_events import (  # noqa: E402
+    _coverage_row,
     build_event_master,
+    eps_values_match,
     is_timely_result,
     select_first_public_filings,
 )
@@ -185,3 +187,37 @@ def test_standalone_basis_fallback_requires_complete_sue_chain():
     master, _, _, _ = build_event_master(filings, eps, membership)
 
     assert master.iloc[0]["Selected_Basis"] == "STANDALONE"
+
+
+def test_cross_exchange_eps_tolerance_matches_frozen_boundaries():
+    assert eps_values_match(10.00, 10.01)
+    assert eps_values_match(100.0, 100.5)
+    assert not eps_values_match(10.00, 10.20)
+    assert eps_values_match(0.0, 0.0)
+
+
+def test_technical_coverage_denominator_contains_only_primary_candidates():
+    common = {
+        "PIT_Membership_OK": True,
+        "Timely_Result": True,
+        "Selected_Basis": "CONSOLIDATED",
+        "Machine_Readable_URL": "https://example.test/result.xml",
+        "Original_or_Revised": "ORIGINAL",
+        "EPS_Source_Resolved": True,
+        "Source_Exchanges": "NSE",
+        "Original_Record_Count": 1,
+        "EPS_Source_Status": "RESOLVED",
+        "Primary_Event": True,
+    }
+    events = pd.DataFrame(
+        [
+            {**common, "Event_ID": "HISTORY", "Event_Public_Date": "2022-07-31"},
+            {**common, "Event_ID": "PRIMARY", "Event_Public_Date": "2024-07-31"},
+            {**common, "Event_ID": "FORWARD", "Event_Public_Date": "2026-07-01"},
+        ]
+    )
+
+    coverage = _coverage_row(events)
+
+    assert int(coverage.iloc[0]["Technical_EPS_Candidates"]) == 1
+    assert int(coverage.iloc[0]["Resolved_EPS_Candidates"]) == 1

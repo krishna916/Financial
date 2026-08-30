@@ -33,6 +33,7 @@ REQUIRED_INPUT_ARTIFACTS = (
     "e1_corporate_actions_snapshot.csv",
     "e1_stock_prices_snapshot.csv",
     "e1_nifty500_prices_snapshot.csv",
+    "e1_price_identity_audit.csv",
     "e1_source_manifest.csv",
     "e1_source_build_audit.csv",
 )

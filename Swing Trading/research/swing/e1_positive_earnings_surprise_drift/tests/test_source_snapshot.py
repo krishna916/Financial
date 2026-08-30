@@ -12,6 +12,7 @@ MODULE_ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(MODULE_ROOT))
 
 import build_e1_source_snapshot as snapshot  # noqa: E402
+from price_identity import ALIAS_COLUMNS, load_price_aliases  # noqa: E402
 
 
 class _FakeResponse:
@@ -187,13 +188,231 @@ def test_market_snapshot_keeps_symbol_and_benchmark_dates_separate(monkeypatch):
         )
         return frame
 
+    aliases = pd.DataFrame(columns=ALIAS_COLUMNS)
     monkeypatch.setattr(snapshot, "download_adjusted_prices", fake_download)
-    stocks, index = snapshot.build_market_snapshot(membership)
+    stocks, index, audit = snapshot.build_market_snapshot(
+        membership, aliases, downloader=fake_download
+    )
     assert stocks["Symbol"].unique().tolist() == ["AAA"]
-    assert stocks["Yahoo_Ticker"].unique().tolist() == ["AAA.NS"]
+    assert stocks["Membership_Yahoo_Ticker"].unique().tolist() == ["AAA.NS"]
+    assert stocks["Provider_Ticker"].unique().tolist() == ["AAA.NS"]
     assert set(index.columns) == {"Date", "Open", "High", "Low", "Close"}
     assert stocks["Date"].is_unique
     assert index["Date"].is_unique
+    assert audit["Coverage_Status"].eq("OK").all()
+
+
+def _price_identity_membership(overlap: bool = False) -> pd.DataFrame:
+    alivus_from = "2024-09-29" if overlap else "2025-03-28"
+    return pd.DataFrame(
+        {
+            "Symbol": ["GLS", "ALIVUS"],
+            "Yahoo_Ticker": ["GLS.NS", "ALIVUS.NS"],
+            "Downloadable": [True, True],
+            "Member_From": ["2023-09-29", alivus_from],
+            "Member_To": ["2024-09-29", "2025-09-29"],
+        }
+    )
+
+
+def _price_aliases() -> pd.DataFrame:
+    return load_price_aliases(MODULE_ROOT / "price_provider_aliases.csv")
+
+
+def _provider_frame() -> pd.DataFrame:
+    dates = pd.to_datetime(["2023-09-29", "2025-03-28"])
+    return pd.DataFrame(
+        {
+            "Date": dates,
+            "Open": [100.0, 110.0],
+            "High": [101.0, 111.0],
+            "Low": [99.0, 109.0],
+            "Close": [100.5, 110.5],
+            "Volume": [1000, 1100],
+        }
+    )
+
+
+def test_market_snapshot_resolves_shared_provider_once_and_preserves_research_identity():
+    calls: list[str] = []
+
+    def fake_download(ticker: str, start: str, end_exclusive: str) -> pd.DataFrame:
+        calls.append(ticker)
+        return _provider_frame()
+
+    stocks, _, audit = snapshot.build_market_snapshot(
+        _price_identity_membership(), _price_aliases(), downloader=fake_download
+    )
+
+    assert calls.count("ALIVUS.NS") == 1
+    assert "GLS.NS" not in calls
+    assert "GLS.BO" not in calls
+    assert set(stocks.loc[stocks["Provider_Ticker"].eq("ALIVUS.NS"), "Symbol"]) == {"GLS", "ALIVUS"}
+    gls = stocks.loc[stocks["Symbol"].eq("GLS")].iloc[0]
+    assert gls["Membership_Yahoo_Ticker"] == "GLS.NS"
+    assert bool(gls["Alias_Applied"])
+    alivus = stocks.loc[stocks["Symbol"].eq("ALIVUS")].iloc[0]
+    assert alivus["Membership_Yahoo_Ticker"] == "ALIVUS.NS"
+    assert not bool(alivus["Alias_Applied"])
+    assert audit["Violation"].eq("").all()
+    gls_audit = audit.loc[audit["Research_Symbol"].eq("GLS")].iloc[0]
+    assert gls_audit["Provider_Ticker"] == "ALIVUS.NS"
+    assert bool(gls_audit["Alias_Applied"])
+    assert gls_audit["Security_ISIN"] == "INE03Q201024"
+    assert gls_audit["Identity_Source_URL"].endswith("CML66114.pdf")
+    assert gls_audit["Coverage_Status"] == "OK"
+    assert gls_audit["Violation"] == ""
+
+
+def test_market_snapshot_rejects_shared_provider_interval_overlap_before_download():
+    calls: list[str] = []
+
+    def fake_download(ticker: str, start: str, end_exclusive: str) -> pd.DataFrame:
+        calls.append(ticker)
+        return _provider_frame()
+
+    with pytest.raises(ValueError, match="PROVIDER_ALIAS_MEMBERSHIP_OVERLAP"):
+        snapshot.build_market_snapshot(
+            _price_identity_membership(overlap=True), _price_aliases(), downloader=fake_download
+        )
+    assert calls == []
+
+
+def test_stage_a_writes_price_audit_and_fails_before_manifest_on_empty_active_interval(
+    monkeypatch, tmp_path
+):
+    monkeypatch.setattr(
+        snapshot,
+        "build_filing_snapshot",
+        lambda symbols, cutoff: (pd.DataFrame(), pd.DataFrame(), pd.DataFrame()),
+    )
+    actions = pd.DataFrame(columns=snapshot.ACTION_COLUMNS)
+    actions.attrs["audit"] = pd.DataFrame()
+    monkeypatch.setattr(
+        snapshot, "build_corporate_action_snapshot", lambda symbols, cutoff: actions
+    )
+    empty_active_audit = pd.DataFrame(
+        [
+            {
+                "Research_Symbol": "GLS",
+                "Membership_Yahoo_Ticker": "GLS.NS",
+                "Provider": "YAHOO",
+                "Provider_Ticker": "ALIVUS.NS",
+                "Alias_Applied": True,
+                "Security_ISIN": "INE03Q201024",
+                "Identity_Effective_Date": pd.Timestamp("2025-01-20"),
+                "Identity_Source_URL": "https://example.test/CML66114.pdf",
+                "Reason": "same listed security",
+                "Member_From": pd.Timestamp("2023-09-29"),
+                "Member_To": pd.Timestamp("2024-09-29"),
+                "Provider_Data_Min": pd.Timestamp("2025-03-28"),
+                "Provider_Data_Max": pd.Timestamp("2025-03-28"),
+                "Provider_Row_Count": 1,
+                "Active_Interval_Row_Count": 0,
+                "Coverage_Status": "NO_PROVIDER_DATA_IN_ACTIVE_INTERVAL",
+                "Violation": "PRICE_PROVIDER_ACTIVE_INTERVAL_EMPTY",
+            }
+        ],
+        columns=snapshot.PRICE_IDENTITY_AUDIT_COLUMNS,
+    )
+    monkeypatch.setattr(
+        snapshot,
+        "build_market_snapshot",
+        lambda membership, aliases: (pd.DataFrame(), pd.DataFrame(), empty_active_audit),
+    )
+    monkeypatch.setattr(
+        snapshot, "write_manifest", lambda *args, **kwargs: pytest.fail("manifest must not be written")
+    )
+
+    with pytest.raises(ValueError, match="PRICE_IDENTITY_INTEGRITY_FAILURE"):
+        snapshot._write_stage_a(tmp_path, pd.DataFrame(), [])
+    assert (tmp_path / "e1_price_identity_audit.csv").is_file()
+
+
+def test_manifest_fingerprints_alias_registry_with_acquisition_only_note(tmp_path):
+    manifest = snapshot.write_manifest(tmp_path, {})
+    alias = manifest.loc[manifest["Artifact"].eq("../price_provider_aliases.csv")].iloc[0]
+    assert alias["SHA256"] == snapshot.sha256_file(snapshot.ALIAS_REGISTRY_PATH)
+    assert alias["Notes"] == "provider identity registry; acquisition provenance only"
+
+
+def test_price_identity_smoke_passes_with_one_shared_provider_download(monkeypatch, tmp_path):
+    monkeypatch.setattr(snapshot, "load_membership", lambda path: _price_identity_membership())
+    monkeypatch.setattr(snapshot, "load_price_aliases", lambda path: _price_aliases())
+
+    result = snapshot.run_price_identity_smoke(
+        tmp_path,
+        downloader=lambda ticker, start, end_exclusive: _provider_frame(),
+    )
+
+    assert result["Price_Smoke_Status"] == "PASS"
+    assert result["Requested_Tickers"] == ["ALIVUS.NS"]
+    validation = pd.read_csv(tmp_path / "price_identity_smoke.csv")
+    assert validation["Status"].eq("PASS").all()
+
+
+def test_price_identity_smoke_fails_when_gls_interval_has_no_provider_rows(monkeypatch, tmp_path):
+    monkeypatch.setattr(snapshot, "load_membership", lambda path: _price_identity_membership())
+    monkeypatch.setattr(snapshot, "load_price_aliases", lambda path: _price_aliases())
+
+    result = snapshot.run_price_identity_smoke(
+        tmp_path,
+        downloader=lambda ticker, start, end_exclusive: pd.DataFrame(
+            {
+                "Date": [pd.Timestamp("2025-03-28")],
+                "Open": [110.0],
+                "High": [111.0],
+                "Low": [109.0],
+                "Close": [110.5],
+                "Volume": [1100],
+            }
+        ),
+    )
+
+    assert result["Price_Smoke_Status"] == "FAIL"
+    validation = pd.read_csv(tmp_path / "price_identity_smoke.csv")
+    gls_gate = validation.loc[validation["Gate"].eq("GLS_ACTIVE_INTERVAL_DATA")].iloc[0]
+    assert gls_gate["Status"] == "FAIL"
+
+
+def test_price_identity_smoke_fails_invalid_alias_provenance(monkeypatch, tmp_path):
+    monkeypatch.setattr(snapshot, "load_membership", lambda path: _price_identity_membership())
+
+    def invalid_aliases(path):
+        raise ValueError("PRICE_ALIAS_INVALID_ROW: Identity_Source_URL must be HTTPS")
+
+    monkeypatch.setattr(snapshot, "load_price_aliases", invalid_aliases)
+    result = snapshot.run_price_identity_smoke(
+        tmp_path,
+        downloader=lambda ticker, start, end_exclusive: _provider_frame(),
+    )
+
+    assert result["Price_Smoke_Status"] == "FAIL"
+    validation = pd.read_csv(tmp_path / "price_identity_smoke.csv")
+    registry_gate = validation.loc[validation["Gate"].eq("ALIAS_REGISTRY_VALID")].iloc[0]
+    assert registry_gate["Status"] == "FAIL"
+
+
+def test_price_identity_smoke_fails_overlapping_pit_intervals_before_download(monkeypatch, tmp_path):
+    monkeypatch.setattr(
+        snapshot, "load_membership", lambda path: _price_identity_membership(overlap=True)
+    )
+    monkeypatch.setattr(snapshot, "load_price_aliases", lambda path: _price_aliases())
+    calls: list[str] = []
+
+    def fake_download(ticker, start, end_exclusive):
+        calls.append(ticker)
+        return _provider_frame()
+
+    result = snapshot.run_price_identity_smoke(tmp_path, downloader=fake_download)
+
+    assert result["Price_Smoke_Status"] == "FAIL"
+    assert calls == []
+    validation = pd.read_csv(tmp_path / "price_identity_smoke.csv")
+    interval_gate = validation.loc[
+        validation["Gate"].eq("PIT_INTERVALS_NON_OVERLAPPING")
+    ].iloc[0]
+    assert interval_gate["Status"] == "FAIL"
 
 
 def test_repository_root_for_cli_resolves_financial_checkout():
@@ -213,7 +432,15 @@ def test_stage_a_exports_corporate_action_parse_audit(monkeypatch, tmp_path):
     actions = pd.DataFrame(columns=snapshot.ACTION_COLUMNS)
     actions.attrs["audit"] = action_audit
     monkeypatch.setattr(snapshot, "build_corporate_action_snapshot", lambda symbols, cutoff: actions)
-    monkeypatch.setattr(snapshot, "build_market_snapshot", lambda membership: (pd.DataFrame(), pd.DataFrame()))
+    monkeypatch.setattr(
+        snapshot,
+        "build_market_snapshot",
+        lambda membership, aliases: (
+            pd.DataFrame(),
+            pd.DataFrame(),
+            pd.DataFrame(columns=snapshot.PRICE_IDENTITY_AUDIT_COLUMNS),
+        ),
+    )
     monkeypatch.setattr(snapshot, "write_manifest", lambda input_dir, provenance: pd.DataFrame())
 
     snapshot._write_stage_a(tmp_path, pd.DataFrame(), [])

@@ -18,6 +18,7 @@ from build_e1_events import build_event_master
 from compute_e1_sue import build_sue_events
 from load_e1_inputs import active_members_on, verify_manifest
 from run_e1_validation import build_integrity_audit, evaluate_gates, run_validation
+import build_e1_source_snapshot as source_snapshot  # noqa: E402
 
 
 def test_frozen_windows_are_exact():
@@ -224,6 +225,7 @@ def test_formal_validator_is_offline_against_frozen_fixture_inputs(tmp_path: Pat
         "e1_corporate_actions_snapshot.csv": ["Symbol", "Action_Type"],
         "e1_stock_prices_snapshot.csv": ["Symbol", "Date", "Open", "High", "Low", "Close", "Volume"],
         "e1_nifty500_prices_snapshot.csv": ["Date", "Open", "High", "Low", "Close"],
+        "e1_price_identity_audit.csv": ["Research_Symbol", "Provider_Ticker", "Violation"],
         "e1_source_build_audit.csv": ["Violation", "Detail"],
     }
     manifest_rows = []
@@ -252,8 +254,11 @@ def test_formal_validator_is_offline_against_frozen_fixture_inputs(tmp_path: Pat
 
     monkeypatch.setattr("requests.Session.get", network_called)
     monkeypatch.setattr("requests.get", network_called)
+    monkeypatch.setattr(source_snapshot, "download_adjusted_prices", network_called)
+    monkeypatch.setattr(source_snapshot, "resolve_price_identity", network_called)
     status, _ = run_validation(input_dir, output_dir, membership_path=membership)
     assert status == "INVALID_RESEARCH_RUN"
+    assert (output_dir / "e1_price_identity_audit.csv").exists() is False
     assert (output_dir / "e1_integrity_audit.csv").exists()
     integrity = pd.read_csv(output_dir / "e1_integrity_audit.csv")
     assert not integrity.get("Violation", pd.Series(dtype=str)).eq("MISSING_FINAL_EVIDENCE").any()

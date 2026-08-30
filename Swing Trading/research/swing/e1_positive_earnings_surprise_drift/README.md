@@ -45,7 +45,24 @@ Smoke mode writes filing, EPS, corporate-action, and source-audit snapshots
 plus `smoke_validation.csv`. It does not download prices or calculate SUE,
 trades, or returns. The command exits 2 unless every fixed-symbol filing, EPS,
 13-quarter basis-chain, BSE-identity, transient-error, and RELIANCE bonus
-sentinel gate passes. Do not start full Stage A while smoke is failing.
+  sentinel gate passes. Do not start full Stage A while smoke is failing.
+
+The remaining Stage A market acquisition has a separate frozen price-identity
+smoke gate for the historical `GLS` to `ALIVUS` continuity. It resolves the
+PIT research symbols without changing them, verifies the official NSE alias,
+downloads `ALIVUS.NS` once, and checks that both active intervals contain
+provider data. It does not acquire filings or inspect E1 returns:
+
+```text
+python "Swing Trading/research/swing/e1_positive_earnings_surprise_drift/build_e1_source_snapshot.py" \
+  --price-smoke \
+  --work-dir .e1-price-identity-smoke
+```
+
+The command writes `price_identity_smoke.csv` and exits 2 unless every
+provider-identity gate passes. `price_provider_aliases.csv` is acquisition
+provenance only; Stage B consumes the frozen price snapshot and never resolves
+aliases or accesses the network.
 
 The formal status is the `FINAL_STATUS` value in
 `output/e1_validation_gates.csv`.

@@ -7,7 +7,7 @@ import re
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Any
+from typing import Any, Callable
 from urllib.parse import urljoin, urlparse
 
 import numpy as np
@@ -37,9 +37,56 @@ from source_clients import (
     normalize_nse_record,
 )
 from xbrl_eps import extract_basic_eps_continuing
+from price_identity import load_price_aliases, resolve_price_identity, validate_shared_provider_intervals
 
 
 PRICE_COLUMNS = ["Date", "Open", "High", "Low", "Close", "Volume"]
+PRICE_IDENTITY_COLUMNS = [
+    "Research_Symbol",
+    "Membership_Yahoo_Ticker",
+    "Provider",
+    "Provider_Ticker",
+    "Alias_Applied",
+    "Security_ISIN",
+    "Identity_Effective_Date",
+    "Identity_Source_URL",
+    "Reason",
+    "Member_From",
+    "Member_To",
+]
+PRICE_SNAPSHOT_COLUMNS = [
+    "Symbol",
+    "Yahoo_Ticker",
+    "Membership_Yahoo_Ticker",
+    "Provider",
+    "Provider_Ticker",
+    "Alias_Applied",
+    "Security_ISIN",
+    "Identity_Effective_Date",
+    "Identity_Source_URL",
+    "Reason",
+    *PRICE_COLUMNS,
+]
+PRICE_IDENTITY_AUDIT_COLUMNS = [
+    "Research_Symbol",
+    "Membership_Yahoo_Ticker",
+    "Provider",
+    "Provider_Ticker",
+    "Alias_Applied",
+    "Security_ISIN",
+    "Identity_Effective_Date",
+    "Identity_Source_URL",
+    "Reason",
+    "Member_From",
+    "Member_To",
+    "Provider_Data_Min",
+    "Provider_Data_Max",
+    "Provider_Row_Count",
+    "Active_Interval_Row_Count",
+    "Coverage_Status",
+    "Violation",
+]
+ALIAS_REGISTRY_PATH = Path(__file__).resolve().with_name("price_provider_aliases.csv")
 SOURCE_COLUMNS = [
     "Symbol",
     "Exchange",
@@ -689,38 +736,187 @@ def download_adjusted_prices(ticker: str, start: str, end_exclusive: str) -> pd.
 
 
 def _symbols_active_in_window(membership: pd.DataFrame) -> pd.DataFrame:
-    overlap = membership.loc[
-        membership["Member_From"].le(PRIMARY_END) & membership["Member_To"].ge(PRIMARY_START)
+    normalized = membership.copy()
+    normalized["Member_From"] = pd.to_datetime(normalized["Member_From"], errors="coerce")
+    normalized["Member_To"] = pd.to_datetime(normalized["Member_To"], errors="coerce")
+    normalized["Downloadable"] = normalized["Downloadable"].map(
+        lambda value: value
+        if isinstance(value, bool)
+        else str(value).strip().lower() in {"true", "1", "yes", "y"}
+    )
+    overlap = normalized.loc[
+        normalized["Member_From"].le(PRIMARY_END) & normalized["Member_To"].ge(PRIMARY_START)
     ]
     return (
-        overlap.loc[overlap["Downloadable"] & overlap["Yahoo_Ticker"].ne(""), ["Symbol", "Yahoo_Ticker"]]
-        .drop_duplicates()
-        .sort_values("Symbol")
+        overlap.loc[
+            overlap["Downloadable"] & overlap["Yahoo_Ticker"].ne(""),
+            ["Symbol", "Yahoo_Ticker", "Member_From", "Member_To", "Downloadable"],
+        ]
+        .sort_values(["Symbol", "Member_From", "Member_To"])
         .reset_index(drop=True)
     )
 
 
-def build_market_snapshot(membership: pd.DataFrame) -> tuple[pd.DataFrame, pd.DataFrame]:
-    """Freeze adjusted stock OHLCV and the Nifty 500 benchmark OHLC frame."""
+def build_price_identity_table(
+    membership: pd.DataFrame, aliases: pd.DataFrame
+) -> pd.DataFrame:
+    """Resolve every active PIT membership row to an explicit provider identity."""
 
+    required = {"Symbol", "Yahoo_Ticker", "Member_From", "Member_To", "Downloadable"}
+    missing = required.difference(membership.columns)
+    if missing:
+        raise ValueError(f"membership missing columns: {sorted(missing)}")
+    active = _symbols_active_in_window(membership).copy()
+    if active.empty:
+        return pd.DataFrame(columns=PRICE_IDENTITY_COLUMNS)
+
+    cache: dict[tuple[str, str], object] = {}
+    rows: list[dict[str, object]] = []
+    for item in active.itertuples(index=False):
+        symbol = str(item.Symbol).strip().upper()
+        membership_ticker = str(item.Yahoo_Ticker).strip()
+        key = (symbol, membership_ticker)
+        identity = cache.get(key)
+        if identity is None:
+            identity = resolve_price_identity(symbol, membership_ticker, aliases)
+            cache[key] = identity
+        rows.append(
+            {
+                "Research_Symbol": identity.research_symbol,
+                "Membership_Yahoo_Ticker": identity.membership_ticker,
+                "Provider": identity.provider,
+                "Provider_Ticker": identity.provider_ticker,
+                "Alias_Applied": identity.alias_applied,
+                "Security_ISIN": identity.security_isin,
+                "Identity_Effective_Date": identity.identity_effective_date,
+                "Identity_Source_URL": identity.identity_source_url,
+                "Reason": identity.reason,
+                "Member_From": pd.Timestamp(item.Member_From),
+                "Member_To": pd.Timestamp(item.Member_To),
+            }
+        )
+    table = pd.DataFrame(rows, columns=PRICE_IDENTITY_COLUMNS)
+    violations = validate_shared_provider_intervals(table)
+    if not violations.empty:
+        detail = violations.iloc[0]["Detail"]
+        raise ValueError(f"PROVIDER_ALIAS_MEMBERSHIP_OVERLAP: {detail}")
+    return table.sort_values(
+        ["Research_Symbol", "Member_From", "Member_To"]
+    ).reset_index(drop=True)
+
+
+def _validate_provider_price_frame(frame: pd.DataFrame, ticker: str) -> pd.DataFrame:
+    if frame is None or frame.empty:
+        raise ValueError(f"PRICE_PROVIDER_DATA_EMPTY: {ticker}")
+    missing = set(PRICE_COLUMNS).difference(frame.columns)
+    if missing:
+        raise ValueError(f"PRICE_PROVIDER_SCHEMA_INVALID: {ticker}: {sorted(missing)}")
+    result = frame.loc[:, PRICE_COLUMNS].copy()
+    dates = pd.DatetimeIndex(pd.to_datetime(result["Date"], errors="coerce"))
+    if dates.tz is not None:
+        dates = dates.tz_localize(None)
+    if dates.isna().any() or dates.duplicated().any():
+        raise ValueError(f"PRICE_PROVIDER_DATES_INVALID: {ticker}")
+    start_date = pd.Timestamp(PRICE_START)
+    end_date = pd.Timestamp(PRICE_END_EXCLUSIVE)
+    if (dates < start_date).any() or (dates >= end_date).any():
+        raise ValueError(f"PRICE_PROVIDER_DATES_OUT_OF_RANGE: {ticker}")
+    result["Date"] = dates.to_numpy()
+    return result.sort_values("Date").reset_index(drop=True)
+
+
+def _download_provider_frames(
+    identity_table: pd.DataFrame,
+    downloader: Callable[[str, str, str], pd.DataFrame],
+) -> dict[tuple[str, str], pd.DataFrame]:
+    frames: dict[tuple[str, str], pd.DataFrame] = {}
+    provider_groups = identity_table.loc[:, ["Provider", "Provider_Ticker"]].drop_duplicates()
+    for provider, ticker in provider_groups.sort_values(["Provider", "Provider_Ticker"]).itertuples(index=False):
+        if str(provider).upper() != "YAHOO":
+            raise ValueError(f"PRICE_PROVIDER_UNSUPPORTED: {provider}")
+        provider_ticker = str(ticker).strip()
+        if not provider_ticker:
+            raise ValueError("PRICE_PROVIDER_TICKER_BLANK")
+        frames[(str(provider), provider_ticker)] = _validate_provider_price_frame(
+            downloader(provider_ticker, PRICE_START, PRICE_END_EXCLUSIVE), provider_ticker
+        )
+    return frames
+
+
+def _build_price_identity_audit(
+    identity_table: pd.DataFrame,
+    provider_frames: dict[tuple[str, str], pd.DataFrame],
+) -> pd.DataFrame:
+    rows: list[dict[str, object]] = []
+    for identity in identity_table.itertuples(index=False):
+        provider_frame = provider_frames[(str(identity.Provider), str(identity.Provider_Ticker))]
+        dates = provider_frame["Date"]
+        active = provider_frame.loc[
+            dates.ge(pd.Timestamp(identity.Member_From))
+            & dates.le(pd.Timestamp(identity.Member_To))
+        ]
+        active_count = len(active)
+        rows.append(
+            {
+                **{column: getattr(identity, column) for column in PRICE_IDENTITY_COLUMNS},
+                "Provider_Data_Min": dates.min() if not provider_frame.empty else pd.NaT,
+                "Provider_Data_Max": dates.max() if not provider_frame.empty else pd.NaT,
+                "Provider_Row_Count": len(provider_frame),
+                "Active_Interval_Row_Count": active_count,
+                "Coverage_Status": "OK" if active_count else "NO_PROVIDER_DATA_IN_ACTIVE_INTERVAL",
+                "Violation": "" if active_count else "PRICE_PROVIDER_ACTIVE_INTERVAL_EMPTY",
+            }
+        )
+    return pd.DataFrame(rows, columns=PRICE_IDENTITY_AUDIT_COLUMNS)
+
+
+def _identity_stock_rows(
+    identity_table: pd.DataFrame,
+    provider_frames: dict[tuple[str, str], pd.DataFrame],
+) -> pd.DataFrame:
     stock_rows: list[pd.DataFrame] = []
-    for item in _symbols_active_in_window(membership).itertuples(index=False):
-        frame = download_adjusted_prices(str(item.Yahoo_Ticker), PRICE_START, PRICE_END_EXCLUSIVE)
-        copy = frame.copy()
-        copy.insert(0, "Yahoo_Ticker", str(item.Yahoo_Ticker))
-        copy.insert(0, "Symbol", str(item.Symbol))
-        stock_rows.append(copy[["Symbol", "Yahoo_Ticker", *PRICE_COLUMNS]])
-    stock = pd.concat(stock_rows, ignore_index=True) if stock_rows else pd.DataFrame(
-        columns=["Symbol", "Yahoo_Ticker", *PRICE_COLUMNS]
-    )
+    descriptors = PRICE_IDENTITY_COLUMNS[:9]
+    unique_identities = identity_table.drop_duplicates(descriptors)
+    for identity in unique_identities.itertuples(index=False):
+        provider_frame = provider_frames[(str(identity.Provider), str(identity.Provider_Ticker))]
+        copy = provider_frame.copy()
+        copy.insert(0, "Reason", str(identity.Reason))
+        copy.insert(0, "Identity_Source_URL", str(identity.Identity_Source_URL))
+        copy.insert(0, "Identity_Effective_Date", identity.Identity_Effective_Date)
+        copy.insert(0, "Security_ISIN", str(identity.Security_ISIN))
+        copy.insert(0, "Alias_Applied", bool(identity.Alias_Applied))
+        copy.insert(0, "Provider_Ticker", str(identity.Provider_Ticker))
+        copy.insert(0, "Provider", str(identity.Provider))
+        copy.insert(0, "Membership_Yahoo_Ticker", str(identity.Membership_Yahoo_Ticker))
+        copy.insert(0, "Yahoo_Ticker", str(identity.Membership_Yahoo_Ticker))
+        copy.insert(0, "Symbol", str(identity.Research_Symbol))
+        stock_rows.append(copy.loc[:, PRICE_SNAPSHOT_COLUMNS])
+    stock = pd.concat(stock_rows, ignore_index=True) if stock_rows else pd.DataFrame(columns=PRICE_SNAPSHOT_COLUMNS)
     if not stock.empty and stock.duplicated(["Symbol", "Date"]).any():
         raise ValueError("stock snapshot contains duplicate symbol dates")
+    return stock
 
-    benchmark = download_adjusted_prices(NIFTY500_YAHOO_TICKER, PRICE_START, PRICE_END_EXCLUSIVE)
+
+def build_market_snapshot(
+    membership: pd.DataFrame,
+    aliases: pd.DataFrame,
+    downloader: Callable[[str, str, str], pd.DataFrame] = download_adjusted_prices,
+) -> tuple[pd.DataFrame, pd.DataFrame, pd.DataFrame]:
+    """Freeze adjusted prices after resolving and validating provider identities."""
+
+    identity_table = build_price_identity_table(membership, aliases)
+    provider_frames = _download_provider_frames(identity_table, downloader)
+    audit = _build_price_identity_audit(identity_table, provider_frames)
+    stock = _identity_stock_rows(identity_table, provider_frames)
+
+    benchmark = _validate_provider_price_frame(
+        downloader(NIFTY500_YAHOO_TICKER, PRICE_START, PRICE_END_EXCLUSIVE),
+        NIFTY500_YAHOO_TICKER,
+    )
     benchmark = benchmark[["Date", "Open", "High", "Low", "Close"]]
     if benchmark["Date"].duplicated().any():
         raise ValueError("benchmark snapshot contains duplicate dates")
-    return stock, benchmark
+    return stock, benchmark, audit
 
 
 def write_manifest(input_dir: Path, provenance: dict[str, str]) -> pd.DataFrame:
@@ -751,6 +947,25 @@ def write_manifest(input_dir: Path, provenance: dict[str, str]) -> pd.DataFrame:
                 "Notes": provenance.get(f"notes:{path.name}", ""),
             }
         )
+    alias_path = ALIAS_REGISTRY_PATH
+    if alias_path.is_file():
+        alias_row_count = len(pd.read_csv(alias_path))
+        alias_hash = sha256_file(alias_path)
+    else:
+        alias_row_count = np.nan
+        alias_hash = ""
+    rows.append(
+        {
+            "Artifact": "../price_provider_aliases.csv",
+            "Source": "official NSE identity-continuity evidence",
+            "Retrieved_At": retrieved,
+            "Row_Count": alias_row_count,
+            "SHA256": alias_hash,
+            "Primary_Window": f"{PRIMARY_START.date()}..{PRIMARY_END.date()}",
+            "Source_Cutoff": str(SOURCE_CUTOFF.date()),
+            "Notes": "provider identity registry; acquisition provenance only",
+        }
+    )
     membership_path = Path(__file__).resolve().parents[1] / "market_breadth/config/nifty500_membership.csv"
     if membership_path.is_file():
         rows.append(
@@ -784,6 +999,7 @@ def write_manifest(input_dir: Path, provenance: dict[str, str]) -> pd.DataFrame:
 
 SMOKE_SYMBOLS = ("RELIANCE", "TCS", "INFY")
 SMOKE_VALIDATION_COLUMNS = ["Symbol", "Gate", "Status", "Detail"]
+PRICE_SMOKE_SYMBOLS = ("GLS", "ALIVUS")
 
 
 def _frame_symbol(frame: pd.DataFrame, symbol: str) -> pd.DataFrame:
@@ -926,6 +1142,148 @@ def run_source_smoke(
     }
 
 
+def _price_smoke_gate(gate: str, passed: bool, detail: str) -> dict[str, object]:
+    return _smoke_gate("PRICE_IDENTITY", gate, passed, detail)
+
+
+def run_price_identity_smoke(
+    work_dir: Path | str,
+    downloader: Callable[[str, str, str], pd.DataFrame] = download_adjusted_prices,
+) -> dict[str, object]:
+    """Run the fixed GLS/ALIVUS provider-identity acquisition gate only."""
+
+    root = Path(work_dir)
+    root.mkdir(parents=True, exist_ok=True)
+    rows: list[dict[str, object]] = []
+    calls: list[str] = []
+    identities = pd.DataFrame(columns=PRICE_IDENTITY_COLUMNS)
+    provider_frames: dict[tuple[str, str], pd.DataFrame] = {}
+
+    try:
+        aliases = load_price_aliases(ALIAS_REGISTRY_PATH)
+        rows.append(_price_smoke_gate("ALIAS_REGISTRY_VALID", True, str(ALIAS_REGISTRY_PATH)))
+    except Exception as exc:  # noqa: BLE001 - smoke output must record invalid provenance
+        aliases = pd.DataFrame()
+        rows.append(_price_smoke_gate("ALIAS_REGISTRY_VALID", False, str(exc)))
+
+    membership_path = repository_root() / "Swing Trading/research/swing/market_breadth/config/nifty500_membership.csv"
+    try:
+        membership = load_membership(membership_path)
+        membership = membership.loc[membership["Symbol"].isin(PRICE_SMOKE_SYMBOLS)].copy()
+    except Exception as exc:  # noqa: BLE001 - smoke output must fail closed
+        membership = pd.DataFrame()
+        rows.append(_price_smoke_gate("PIT_MEMBERSHIP_VALID", False, str(exc)))
+    else:
+        rows.append(_price_smoke_gate("PIT_MEMBERSHIP_VALID", True, f"rows={len(membership)}"))
+
+    resolved: dict[str, object] = {}
+    if not aliases.empty:
+        for symbol in PRICE_SMOKE_SYMBOLS:
+            matching = membership.loc[membership["Symbol"].eq(symbol)] if not membership.empty else pd.DataFrame()
+            if matching.empty:
+                rows.append(_price_smoke_gate(f"{symbol}_MEMBERSHIP_PRESENT", False, "no PIT rows"))
+                continue
+            ticker = str(matching.iloc[0]["Yahoo_Ticker"])
+            try:
+                resolved[symbol] = resolve_price_identity(symbol, ticker, aliases)
+                rows.append(_price_smoke_gate(f"{symbol}_MEMBERSHIP_PRESENT", True, f"ticker={ticker}"))
+            except Exception as exc:  # noqa: BLE001 - preserve resolver failure
+                rows.append(_price_smoke_gate(f"{symbol}_MEMBERSHIP_PRESENT", False, str(exc)))
+    else:
+        for symbol in PRICE_SMOKE_SYMBOLS:
+            rows.append(_price_smoke_gate(f"{symbol}_MEMBERSHIP_PRESENT", False, "alias registry invalid"))
+
+    gls = resolved.get("GLS")
+    alivus = resolved.get("ALIVUS")
+    rows.append(
+        _price_smoke_gate(
+            "GLS_PROVIDER_TICKER",
+            gls is not None and gls.provider_ticker == "ALIVUS.NS",
+            getattr(gls, "provider_ticker", ""),
+        )
+    )
+    rows.append(
+        _price_smoke_gate(
+            "GLS_ISIN",
+            gls is not None and gls.security_isin == "INE03Q201024",
+            getattr(gls, "security_isin", ""),
+        )
+    )
+    rows.append(
+        _price_smoke_gate(
+            "GLS_OFFICIAL_PROVENANCE",
+            gls is not None
+            and gls.identity_source_url
+            == "https://nsearchives.nseindia.com/content/circulars/CML66114.pdf",
+            getattr(gls, "identity_source_url", ""),
+        )
+    )
+    rows.append(
+        _price_smoke_gate(
+            "ALIVUS_NO_ALIAS",
+            alivus is not None and alivus.provider_ticker == "ALIVUS.NS" and not alivus.alias_applied,
+            getattr(alivus, "provider_ticker", ""),
+        )
+    )
+
+    try:
+        if aliases.empty:
+            raise ValueError("PRICE_ALIAS_INVALID_ROW: alias registry invalid")
+        identities = build_price_identity_table(membership, aliases)
+        interval_violations = validate_shared_provider_intervals(identities)
+        rows.append(
+            _price_smoke_gate(
+                "PIT_INTERVALS_NON_OVERLAPPING",
+                interval_violations.empty,
+                "none" if interval_violations.empty else interval_violations.to_dict("records"),
+            )
+        )
+    except Exception as exc:  # noqa: BLE001 - retain stable fail-closed smoke evidence
+        rows.append(_price_smoke_gate("PIT_INTERVALS_NON_OVERLAPPING", False, str(exc)))
+
+    def recording_downloader(ticker: str, start: str, end_exclusive: str) -> pd.DataFrame:
+        calls.append(ticker)
+        return downloader(ticker, start, end_exclusive)
+
+    if not identities.empty:
+        try:
+            provider_frames = _download_provider_frames(identities, recording_downloader)
+            rows.append(_price_smoke_gate("ALIVUS_DOWNLOAD_SUCCEEDED", ("YAHOO", "ALIVUS.NS") in provider_frames, "ALIVUS.NS"))
+        except Exception as exc:  # noqa: BLE001 - smoke output must retain provider failure
+            rows.append(_price_smoke_gate("ALIVUS_DOWNLOAD_SUCCEEDED", False, str(exc)))
+    else:
+        rows.append(_price_smoke_gate("ALIVUS_DOWNLOAD_SUCCEEDED", False, "identity table unavailable"))
+
+    if provider_frames and not identities.empty:
+        audit = _build_price_identity_audit(identities, provider_frames)
+        for symbol in PRICE_SMOKE_SYMBOLS:
+            active_count = int(audit.loc[audit["Research_Symbol"].eq(symbol), "Active_Interval_Row_Count"].sum())
+            rows.append(
+                _price_smoke_gate(
+                    f"{symbol}_ACTIVE_INTERVAL_DATA",
+                    active_count > 0,
+                    f"rows={active_count}",
+                )
+            )
+    else:
+        for symbol in PRICE_SMOKE_SYMBOLS:
+            rows.append(_price_smoke_gate(f"{symbol}_ACTIVE_INTERVAL_DATA", False, "provider data unavailable"))
+
+    rows.append(_price_smoke_gate("ALIVUS_DOWNLOADED_ONCE", calls.count("ALIVUS.NS") == 1, f"calls={calls.count('ALIVUS.NS')}"))
+    rows.append(_price_smoke_gate("GLS_NS_NOT_REQUESTED", "GLS.NS" not in calls, f"calls={calls.count('GLS.NS')}"))
+    rows.append(_price_smoke_gate("GLS_BO_NOT_REQUESTED", "GLS.BO" not in calls, f"calls={calls.count('GLS.BO')}"))
+
+    validation = pd.DataFrame(rows, columns=SMOKE_VALIDATION_COLUMNS)
+    status = "PASS" if not validation.empty and validation["Status"].eq("PASS").all() else "FAIL"
+    validation.to_csv(root / "price_identity_smoke.csv", index=False)
+    return {
+        "Symbols": list(PRICE_SMOKE_SYMBOLS),
+        "Requested_Tickers": calls,
+        "Price_Smoke_Status": status,
+        "Output_Directory": str(root),
+    }
+
+
 def _write_stage_a(
     input_dir: Path,
     membership: pd.DataFrame,
@@ -944,15 +1302,27 @@ def _write_stage_a(
     action_audit = actions.attrs.get("audit", pd.DataFrame())
     if isinstance(action_audit, pd.DataFrame) and not action_audit.empty:
         audit = pd.concat([audit, action_audit], ignore_index=True)
-    market, benchmark = build_market_snapshot(membership)
+    aliases = load_price_aliases(ALIAS_REGISTRY_PATH)
+    market, benchmark, price_identity_audit = build_market_snapshot(membership, aliases)
     filings.to_csv(input_dir / "e1_exchange_filings_snapshot.csv", index=False, date_format="%Y-%m-%d")
     eps.to_csv(input_dir / "e1_eps_snapshot.csv", index=False, date_format="%Y-%m-%d")
     actions.to_csv(input_dir / "e1_corporate_actions_snapshot.csv", index=False, date_format="%Y-%m-%d")
     market.to_csv(input_dir / "e1_stock_prices_snapshot.csv", index=False, date_format="%Y-%m-%d")
     benchmark.to_csv(input_dir / "e1_nifty500_prices_snapshot.csv", index=False, date_format="%Y-%m-%d")
+    price_identity_audit.to_csv(
+        input_dir / "e1_price_identity_audit.csv", index=False, date_format="%Y-%m-%d"
+    )
     audit.reindex(columns=["Symbol", "Source_Record_ID", "Violation", "Detail"]).to_csv(
         input_dir / "e1_source_build_audit.csv", index=False
     )
+    price_violations = price_identity_audit.loc[
+        price_identity_audit["Violation"].fillna("").astype(str).str.strip().ne("")
+    ]
+    if not price_violations.empty:
+        raise ValueError(
+            "PRICE_IDENTITY_INTEGRITY_FAILURE: "
+            + "; ".join(price_violations["Violation"].astype(str).unique())
+        )
     write_manifest(input_dir, {"Source": "official NSE/BSE and adjusted Yahoo price snapshot"})
 
 
@@ -966,10 +1336,21 @@ if __name__ == "__main__":
     import argparse
 
     parser = argparse.ArgumentParser(description="Build the immutable E1 Stage A source snapshot")
-    parser.add_argument("--smoke", action="store_true", help="validate a fixed small official-source symbol set only")
+    mode = parser.add_mutually_exclusive_group()
+    mode.add_argument("--smoke", action="store_true", help="validate a fixed small official-source symbol set only")
+    mode.add_argument(
+        "--price-smoke",
+        action="store_true",
+        help="validate the fixed GLS/ALIVUS provider-identity path only",
+    )
     parser.add_argument("--work-dir", type=Path, help="temporary directory for resumable source checkpoints")
     args = parser.parse_args()
     module_root = Path(__file__).resolve().parent
+    if args.price_smoke:
+        smoke_root = args.work_dir or module_root / "price-identity-smoke-work"
+        result = run_price_identity_smoke(smoke_root)
+        print(result)
+        raise SystemExit(0 if result["Price_Smoke_Status"] == "PASS" else 2)
     if args.smoke:
         smoke_root = args.work_dir or module_root / "smoke-work"
         result = run_source_smoke(smoke_root)

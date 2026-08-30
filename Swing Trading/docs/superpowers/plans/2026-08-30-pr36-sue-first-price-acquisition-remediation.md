@@ -109,7 +109,7 @@ python -m pytest -q research/swing/e1_positive_earnings_surprise_drift/tests/tes
 
 ```bash
 git add research/swing/e1_positive_earnings_surprise_drift
- git commit -m "fix: derive E1 price needs after SUE"
+git commit -m "fix: derive E1 price needs after SUE"
 ```
 
 ---
@@ -121,16 +121,15 @@ git add research/swing/e1_positive_earnings_surprise_drift
 - Modify: `tests/test_source_snapshot.py`
 - Keep: `price_identity.py`, `price_provider_aliases.csv`
 
-**Change exact signature:**
+**Change `build_market_snapshot` contract to:**
 
-```python
-def build_market_snapshot(
-    membership: pd.DataFrame,
-    aliases: pd.DataFrame,
+```text
+build_market_snapshot(
+    membership: pandas.DataFrame,
+    aliases: pandas.DataFrame,
     required_symbols: set[str],
-    downloader: Callable[[str, str, str], pd.DataFrame] = download_adjusted_prices,
-) -> tuple[pd.DataFrame, pd.DataFrame, pd.DataFrame]:
-    ...
+    downloader: Callable[[str, str, str], pandas.DataFrame] = download_adjusted_prices,
+) -> tuple[pandas.DataFrame, pandas.DataFrame, pandas.DataFrame]
 ```
 
 Add helper:
@@ -153,7 +152,7 @@ def membership_for_required_symbols(
     ].copy()
 ```
 
-`build_price_identity_table()` must operate on this filtered membership frame. It must not resolve or download provider identities for unrelated symbols.
+`build_price_identity_table()` must receive the filtered membership frame. It must not resolve or download provider identities for unrelated symbols.
 
 - [ ] **Write RED regression using a dead irrelevant ticker**
 
@@ -203,7 +202,7 @@ python -m pytest -q \
   research/swing/e1_positive_earnings_surprise_drift/tests/test_source_snapshot.py
 
 git add research/swing/e1_positive_earnings_surprise_drift
- git commit -m "fix: limit E1 prices to required SUE symbols"
+git commit -m "fix: limit E1 prices to required SUE symbols"
 ```
 
 ---
@@ -221,10 +220,10 @@ Change `_write_stage_a()` to this exact sequence:
 1. build/reuse filings + EPS checkpoints
 2. build corporate actions
 3. write filing/EPS/action/source-audit CSVs
-4. build_price_requirements(...) using those exact in-memory frames
+4. build_price_requirements using those exact in-memory frames
 5. write e1_price_requirements.csv
 6. required_symbols = unique requirement Symbol values
-7. build_market_snapshot(..., required_symbols)
+7. call build_market_snapshot(membership, aliases, required_symbols)
 8. write stock/index/price-identity CSVs
 9. fail on price-identity violations for required symbols only
 10. write final manifest
@@ -243,22 +242,25 @@ expected_price_ids = set(
 actual_price_ids = set(
     loaded["e1_price_requirements.csv"]["Event_ID"].astype(str)
 )
+differing_price_ids = expected_price_ids.symmetric_difference(actual_price_ids)
 ```
 
-If unequal, add one systemic violation:
+When `differing_price_ids` is non-empty, add exactly:
 
-```text
-Check=PRICE_REQUIREMENTS
-Violation=PRICE_REQUIREMENT_SET_MISMATCH
-Count=<symmetric difference count>
-Detail=<sorted differing Event_IDs>
+```python
+{
+    "Check": "PRICE_REQUIREMENTS",
+    "Violation": "PRICE_REQUIREMENT_SET_MISMATCH",
+    "Count": len(differing_price_ids),
+    "Detail": "|".join(sorted(differing_price_ids)),
+}
 ```
 
-This must force `INVALID_RESEARCH_RUN` through the existing integrity precedence.
+This must force `INVALID_RESEARCH_RUN` through existing integrity precedence.
 
 - [ ] **Write RED end-to-end mismatch test**
 
-Create a frozen fixture where classified primary Event_ID is `A`, but `e1_price_requirements.csv` contains `B`. Assert final status is `INVALID_RESEARCH_RUN` and integrity audit contains `PRICE_REQUIREMENT_SET_MISMATCH`.
+Create a frozen fixture where classified primary Event_ID is `A`, but `e1_price_requirements.csv` contains `B`. Assert final status is `INVALID_RESEARCH_RUN` and integrity audit contains `PRICE_REQUIREMENT_SET_MISMATCH` with count `2` and detail `A|B`.
 
 - [ ] **Write passing fixture where requirement set matches classified primary events**
 
@@ -271,7 +273,7 @@ cd "Swing Trading"
 python -m pytest -q research/swing/e1_positive_earnings_surprise_drift/tests
 
 git add research/swing/e1_positive_earnings_surprise_drift
- git commit -m "research: freeze E1 price requirement evidence"
+git commit -m "research: freeze E1 price requirement evidence"
 ```
 
 ---
@@ -307,25 +309,19 @@ python research/swing/e1_positive_earnings_surprise_drift/build_e1_source_snapsh
   --work-dir .e1-stage-a-work-v2
 ```
 
-Before doing any new ticker investigation, inspect only:
-
-```text
-input/e1_price_requirements.csv
-```
-
-and the set of provider failures among those required symbols.
+Before doing any new ticker investigation, inspect only `input/e1_price_requirements.csv` and provider failures among those required symbols.
 
 ### Required failure policy
 
-If an old Yahoo-dead symbol such as `GSPL`, `IDFC`, `ISEC`, etc. is **not present** in `e1_price_requirements.csv`, do nothing. It is irrelevant to E1 and must not block the run.
+If an old Yahoo-dead symbol such as `GSPL`, `IDFC`, `ISEC`, `PEL`, `TATAMTRDVR`, `TCNSBRANDS`, or `TV18BRDCST` is **not present** in `e1_price_requirements.csv`, do nothing. It is irrelevant to E1 and must not block the run.
 
 If a required symbol fails price acquisition:
 
 ```text
-1. print/report its exact required Event_ID(s) and Cohort(s);
-2. if official evidence proves same-security ticker continuity, use the existing provenance-backed alias mechanism;
-3. otherwise stop on that concrete required observation and report it as the only remaining market-data integrity issue;
-4. do not build generic merger/delisting handling unless a required event actually needs it.
+1. report its exact required Event_ID(s) and Cohort(s)
+2. if official evidence proves same-security ticker continuity, use the existing provenance-backed alias mechanism
+3. otherwise stop on that concrete required observation and report it as the only remaining market-data integrity issue
+4. do not build generic merger/delisting handling unless a required event actually needs it
 ```
 
 No `.BO` guessing, universe exclusion, membership edits, or strategy changes.
@@ -335,12 +331,13 @@ No `.BO` guessing, universe exclusion, membership edits, or strategy changes.
 Require:
 
 ```text
-e1_price_requirements.csv exists and is non-ambiguous
+e1_price_requirements.csv exists
 manifest hashes/row counts verify
 price identity audit has no violation for required symbols
-stock snapshot contains every required symbol and no duplicate Symbol+Date
+stock snapshot contains every unique Symbol in e1_price_requirements.csv
+stock snapshot has no duplicate Symbol+Date
 benchmark dates are unique
-technical EPS coverage remains >=95% or Stage B must return INVALID
+technical EPS coverage remains >=95% or Stage B must return INVALID_RESEARCH_RUN
 ```
 
 - [ ] **Run Stage B offline unchanged**
@@ -367,7 +364,7 @@ fresh full research test count
 source smoke status
 number of finite-SUE primary events
 number of unique required price symbols
-any required price failures (if any)
+required price failures, if any
 technical EPS coverage
 FINAL_STATUS if Stage B completed
 ```

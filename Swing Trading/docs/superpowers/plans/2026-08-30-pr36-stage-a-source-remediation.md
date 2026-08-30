@@ -4,9 +4,9 @@
 
 **Goal:** Make E1 Stage A reliably acquire and parse the official NSE/BSE earnings and corporate-action data required by the frozen experiment, invalidate stale failed checkpoints, pass a hard real-source smoke gate, and only then complete the full frozen Stage A -> unchanged Stage B validation.
 
-**Architecture:** Keep the approved two-stage design unchanged. Fix only Stage A transport/normalization/parser/checkpoint behavior and its source-only acceptance gates; Stage B strategy logic remains frozen and offline. Treat the current smoke result (`493 filings, 0 EPS, 0 corporate actions, 282 audit rows`) as a failed source preflight, not as usable research evidence. Capture small real official-source payload fixtures so parser behavior is regression-tested against the formats that actually failed.
+**Architecture:** Keep the approved two-stage design unchanged. Stage A remains the only networked layer; Stage B remains fully offline. Fix only transport, official-response normalization, EPS/iXBRL parsing, corporate-action parsing, checkpoint validity, and source-only acceptance gates. Treat the current smoke result (`493 filings, 0 EPS, 0 corporate actions, 282 audit rows`) as a failed source preflight, never as usable E1 evidence.
 
-**Tech Stack:** Python 3, pandas, numpy, requests, yfinance, standard-library XML/HTML parsing unless a narrowly justified parser dependency is required, pytest.
+**Tech Stack:** Python 3, pandas, numpy, requests, yfinance, `xml.etree.ElementTree`, `html.parser`, pytest. **Do not add a new parsing dependency in this remediation.**
 
 **Spec:** `Swing Trading/docs/superpowers/specs/2026-08-29-e1-positive-earnings-surprise-drift-design.md`
 
@@ -23,36 +23,36 @@
 - Official NSE/BSE filings remain the earnings/event source of truth.
 - Stage A must not inspect post-event returns, SUE, cohorts, or profitability while deciding whether source data is valid.
 - Stage B must remain network-free and consume only the final frozen snapshot/manifest.
-- A smoke command returning exit code 0 is **not** sufficient. Smoke must satisfy explicit semantic acceptance assertions below.
+- A smoke command returning exit code 0 is **not** sufficient. Smoke must satisfy the exact semantic gates in Task 6.
 - Existing checkpoint format/version `1` is untrusted because failed acquisitions/parses were persisted as `Complete: true`; it must never be reused after this remediation.
-- Do not resume the old 158 symbol checkpoints after parser/source changes unless they are explicitly rejected and rebuilt under the new checkpoint contract.
-- Known source sentinel: RELIANCE has an official `1:1` bonus with ex-date `2024-10-28`; the smoke source layer must recover that action with share-count factor `2.0`.
-- No generic data warehouse, crawler framework, browser automation, OCR, analyst-consensus data, or third-party earnings database.
+- Do not resume the old 158 symbol checkpoints. Rebuild them under checkpoint schema v2 after source/parser fixes.
+- Known source sentinel: RELIANCE has an official `1:1` bonus with ex-date `2024-10-28`; smoke must recover it with `Share_Count_Factor == 2.0`.
+- No browser automation, OCR, third-party earnings database, analyst consensus, or generic financial-data platform.
 
 ## Files
 
 ```text
 Swing Trading/research/swing/e1_positive_earnings_surprise_drift/
-├── source_clients.py                 # official catalog/identity/transport only
-├── xbrl_eps.py                       # XML + real NSE inline-XBRL EPS extraction
-├── build_e1_source_snapshot.py       # Stage A orchestration/checkpoints/smoke gates
-├── README.md                         # exact source preflight/full-run commands
+├── source_clients.py
+├── xbrl_eps.py
+├── build_e1_source_snapshot.py
+├── README.md
 ├── tests/
 │   ├── fixtures/
-│   │   ├── nse_integrated_real_ixbrl.html       # small captured official payload
-│   │   ├── nse_corporate_actions_reliance.json  # captured official action payload
-│   │   └── bse_security_master_sample.json      # minimal official identity payload
+│   │   ├── nse_integrated_real_ixbrl.html
+│   │   ├── nse_corporate_actions_reliance.json
+│   │   └── bse_security_master_sample.json
 │   ├── test_xbrl_eps.py
 │   ├── test_source_clients.py
 │   └── test_source_snapshot.py
-└── input/                            # write only after all source preflight gates pass
+└── input/              # written only by a completed full Stage A run
 ```
 
-Keep real-source fixtures minimal: only enough official rows/facts to prove the parser/normalizer contract. Do not commit bulk source downloads or temporary checkpoint directories.
+Real-source fixtures must be minimal extracts of actual official responses. Do not commit bulk downloads, temporary raw bodies, or checkpoint directories.
 
 ---
 
-### Task 1: Turn the failing smoke into inspectable source evidence
+### Task 1: Separate transport failures, unsupported payloads, and missing EPS facts
 
 **Files:**
 - Modify: `build_e1_source_snapshot.py`
@@ -60,58 +60,84 @@ Keep real-source fixtures minimal: only enough official rows/facts to prove the 
 - Modify: `tests/test_source_snapshot.py`
 
 **Interfaces:**
-- Add `SourceFetchResult`-equivalent structured metadata (dataclass or dict) containing at least `requested_url`, `final_url`, `status_code`, `content_type`, `payload_kind`, and `body_bytes` for machine-readable payload fetches.
-- Add `classify_source_failure(exc_or_response) -> str` with stable audit codes: `SOURCE_HTTP_ERROR`, `SOURCE_NON_JSON`, `EPS_PAYLOAD_HTTP_ERROR`, `EPS_PAYLOAD_UNSUPPORTED_FORMAT`, `EPS_FACT_NOT_FOUND`.
-- Smoke work directory may retain raw diagnostic payloads; final Stage A `input/` may not.
 
-- [ ] **Step 1: Add a regression that distinguishes transport failure from a parser miss**
-
-In `test_source_snapshot.py`, add a fake HTTP 200 HTML/iXBRL response and a fake HTTP 403 response. Assert the first reaches the EPS parser while the second produces `EPS_PAYLOAD_HTTP_ERROR`, not a generic `EPS_PARSE_ERROR`.
+Add exactly this immutable payload type in `build_e1_source_snapshot.py`:
 
 ```python
-assert success.status_code == 200
-assert success.payload_kind in {"xml", "ixbrl_html"}
-assert forbidden_audit_code not in audit_codes
-assert "EPS_PAYLOAD_HTTP_ERROR" in failure_audit_codes
+from dataclasses import dataclass
+
+@dataclass(frozen=True)
+class SourcePayload:
+    requested_url: str
+    final_url: str
+    status_code: int
+    content_type: str
+    payload_kind: str  # "xml", "ixbrl_html", or "unsupported"
+    body_bytes: bytes
 ```
 
-- [ ] **Step 2: Run RED**
-
-```bash
-python -m pytest -q "Swing Trading/research/swing/e1_positive_earnings_surprise_drift/tests/test_source_snapshot.py" -k "payload or transport"
-```
-
-Expected: FAIL because current `_fetch_eps()` collapses HTTP/format/parser failures into one generic exception path.
-
-- [ ] **Step 3: Implement content-aware payload acquisition**
-
-Before parsing EPS, normalize the machine-readable URL and record the actual response metadata. Support absolute official `https://` URLs and official relative links by resolving them only against the known NSE/BSE origin that produced the filing; reject unknown/missing schemes instead of guessing.
-
-Pseudo-contract:
+Add:
 
 ```python
-payload = fetch_machine_payload(record, session)
-if payload.status_code != 200:
-    audit("EPS_PAYLOAD_HTTP_ERROR", ...)
-elif payload.payload_kind not in {"xml", "ixbrl_html"}:
-    audit("EPS_PAYLOAD_UNSUPPORTED_FORMAT", ...)
-else:
-    value = extract_basic_eps_continuing(payload.body_bytes, period_end, basis)
+def fetch_machine_payload(record: dict[str, object], session: requests.Session, timeout: float = 30.0) -> SourcePayload:
+    ...
 ```
 
-Do not write raw body content to the final audit CSV; store only URL/status/content-type/error detail there.
-
-- [ ] **Step 4: Add source-error aggregation to smoke output**
-
-`run_source_smoke()` must return and persist counts grouped by violation code, so `0 EPS` cannot hide behind one aggregate count.
+Stable audit codes introduced by this task:
 
 ```text
 EPS_PAYLOAD_HTTP_ERROR
 EPS_PAYLOAD_UNSUPPORTED_FORMAT
 EPS_FACT_NOT_FOUND
-BSE_IDENTIFIER_UNRESOLVED
-BSE_SOURCE_ERROR
-CORPORATE_ACTION_SOURCE_ERROR
+BSE_SOURCE_NON_JSON
+```
+
+- [ ] **Step 1: Write RED transport-vs-parser regressions**
+
+Use fake responses in `test_source_snapshot.py`:
+
+```python
+payload = fetch_machine_payload(record_with_valid_ixbrl_url, fake_200_html_session)
+assert payload.status_code == 200
+assert payload.payload_kind == "ixbrl_html"
+
+with pytest.raises(ValueError, match="EPS_PAYLOAD_HTTP_ERROR"):
+    fetch_machine_payload(record_with_valid_ixbrl_url, fake_403_session)
+```
+
+Also assert a 200 plain-text/non-XBRL body produces `payload_kind == "unsupported"`.
+
+- [ ] **Step 2: Run RED**
+
+```bash
+python -m pytest -q "Swing Trading/research/swing/e1_positive_earnings_surprise_drift/tests/test_source_snapshot.py" -k "payload"
+```
+
+- [ ] **Step 3: Implement URL normalization and payload classification**
+
+Rules:
+
+```text
+absolute https NSE/BSE URL -> use unchanged
+relative NSE filing URL -> resolve only against https://www.nseindia.com or https://nsearchives.nseindia.com according to the source URL/origin
+relative BSE filing URL -> resolve only against https://www.bseindia.com or https://api.bseindia.com according to the source URL/origin
+unknown/non-http scheme -> EPS_PAYLOAD_UNSUPPORTED_FORMAT
+HTTP status != 200 -> EPS_PAYLOAD_HTTP_ERROR
+XML/XBRL content -> payload_kind="xml"
+HTML/XHTML containing ix:* facts -> payload_kind="ixbrl_html"
+otherwise -> payload_kind="unsupported"
+```
+
+Do not write `body_bytes` into final CSV evidence.
+
+- [ ] **Step 4: Replace generic `EPS_PARSE_ERROR` aggregation**
+
+When `_fetch_eps` cannot produce a value:
+
+```text
+transport failure -> EPS_PAYLOAD_HTTP_ERROR
+unsupported body -> EPS_PAYLOAD_UNSUPPORTED_FORMAT
+successfully parsed XBRL/iXBRL but target fact absent -> EPS_FACT_NOT_FOUND
 ```
 
 - [ ] **Step 5: Verify and commit**
@@ -120,43 +146,69 @@ CORPORATE_ACTION_SOURCE_ERROR
 python -m pytest -q "Swing Trading/research/swing/e1_positive_earnings_surprise_drift/tests/test_source_snapshot.py" \
   "Swing Trading/research/swing/e1_positive_earnings_surprise_drift/tests/test_source_clients.py"
 git add "Swing Trading/research/swing/e1_positive_earnings_surprise_drift"
-git commit -m "fix: classify E1 official-source acquisition failures"
+git commit -m "fix: classify E1 source acquisition failures"
 ```
 
 ---
 
-### Task 2: Parse the real NSE integrated/iXBRL earnings format
+### Task 2: Parse the actual NSE integrated/iXBRL EPS representation
 
 **Files:**
 - Modify: `xbrl_eps.py`
 - Modify: `build_e1_source_snapshot.py`
-- Create fixture: `tests/fixtures/nse_integrated_real_ixbrl.html`
+- Create: `tests/fixtures/nse_integrated_real_ixbrl.html`
 - Modify: `tests/test_xbrl_eps.py`
 
 **Interfaces:**
-- Keep public API: `extract_basic_eps_continuing(payload: bytes, period_end: pd.Timestamp, basis: str) -> float | None`.
-- Add internal parsing paths for classic XBRL instance XML and inline-XBRL/XHTML without changing the caller.
-- The extractor must still return only **Basic EPS from continuing operations**, current quarter, exact period end, exact reporting basis; annual/YTD/diluted facts remain invalid.
 
-- [ ] **Step 1: Capture one minimal real official NSE integrated filing fixture from the failing smoke path**
+Keep the existing public signature unchanged:
 
-Use the exact official response body that Stage A receives for one RELIANCE/TCS/INFY integrated financial filing containing the target basic continuing-operation EPS fact. Reduce the fixture only by removing unrelated facts/markup while preserving namespaces, contexts, dimensions, fact element/attributes, and document structure required for parsing. Record the original official source URL in a fixture comment or adjacent test constant.
+```python
+def extract_basic_eps_continuing(payload: bytes, period_end: pd.Timestamp, basis: str) -> float | None:
+    ...
+```
 
-Do **not** fabricate an XML shape from the existing synthetic fixture.
+Add internal helpers with these exact responsibilities:
 
-- [ ] **Step 2: Write a RED regression against that real-format fixture**
+```python
+def _extract_contexts_from_xml(payload: bytes) -> dict[str, dict[str, object]]: ...
+def _extract_contexts_from_ixbrl(payload: bytes) -> dict[str, dict[str, object]]: ...
+def _extract_eps_candidates(payload: bytes, payload_kind: str) -> list[dict[str, object]]: ...
+```
+
+- [ ] **Step 1: Capture one minimal real NSE integrated filing fixture**
+
+From a RELIANCE/TCS/INFY filing that currently fails in smoke, save the smallest official inline-XBRL/XHTML fragment that still contains:
+
+```text
+target Basic EPS continuing-operations fact
+its context
+period start/end
+reporting-basis dimension/member
+fact numeric value
+namespace declarations required to interpret the above
+```
+
+Record the original official filing URL in `test_xbrl_eps.py` as `REAL_FIXTURE_SOURCE_URL`.
+
+- [ ] **Step 2: Write RED real-format tests**
 
 ```python
 def test_extract_basic_eps_from_real_nse_integrated_ixbrl():
     value = extract_basic_eps_continuing(
         (FIXTURES / "nse_integrated_real_ixbrl.html").read_bytes(),
-        EXPECTED_PERIOD_END,
-        EXPECTED_BASIS,
+        REAL_PERIOD_END,
+        REAL_BASIS,
     )
-    assert value == pytest.approx(EXPECTED_BASIC_CONTINUING_EPS)
+    assert value == pytest.approx(REAL_BASIC_CONTINUING_EPS)
 ```
 
-Add companion assertions proving a wrong basis and a wrong/YTD period return `None`.
+Add two negative cases:
+
+```text
+wrong reporting basis -> None
+YTD/annual context for same end date -> not selected
+```
 
 - [ ] **Step 3: Run RED**
 
@@ -164,30 +216,22 @@ Add companion assertions proving a wrong basis and a wrong/YTD period return `No
 python -m pytest -q "Swing Trading/research/swing/e1_positive_earnings_surprise_drift/tests/test_xbrl_eps.py" -k "real_nse"
 ```
 
-Expected: FAIL using the current parser against the real provider format.
+- [ ] **Step 4: Implement dual XML/inline-XBRL extraction**
 
-- [ ] **Step 4: Implement the minimum dual-format parser**
-
-Handle the actual inline-XBRL fact/context representation observed in the fixture. Normalize namespace/local names and context references rather than relying on one tag casing. Basis detection must inspect the actual dimension/member semantics present in the real filing; do not infer consolidated/standalone from company name or from price data.
-
-Maintain these selection predicates:
+Selection must remain exactly:
 
 ```text
-fact concept ∈ approved Basic-EPS-continuing aliases
+approved Basic-EPS-continuing concept
 AND not diluted
 AND context end == requested period end
-AND context duration is one quarter, not YTD/year
-AND context reporting basis == requested basis
-AND numeric value finite
+AND one-quarter duration, not YTD/year
+AND context basis == requested CONSOLIDATED/STANDALONE
+AND finite numeric value
 ```
 
-If multiple valid facts remain with materially different values, fail closed with an explicit ambiguity signal rather than choosing lexicographically.
+If multiple remaining candidates disagree beyond the frozen EPS tolerance (`Rs 0.01 OR 0.5%`), return no value and surface `EPS_FACT_AMBIGUOUS` from the caller. Do not select the first candidate arbitrarily.
 
-- [ ] **Step 5: Convert parser `None` into an explicit source audit reason**
-
-When an advertised machine-readable payload is fetched successfully but no valid target fact is found, emit `EPS_FACT_NOT_FOUND`. Reserve `EPS_PAYLOAD_UNSUPPORTED_FORMAT` for an unparseable/non-XBRL payload.
-
-- [ ] **Step 6: Verify and commit**
+- [ ] **Step 5: Verify and commit**
 
 ```bash
 python -m pytest -q "Swing Trading/research/swing/e1_positive_earnings_surprise_drift/tests/test_xbrl_eps.py" \
@@ -195,44 +239,61 @@ python -m pytest -q "Swing Trading/research/swing/e1_positive_earnings_surprise_
 git add "Swing Trading/research/swing/e1_positive_earnings_surprise_drift/xbrl_eps.py" \
         "Swing Trading/research/swing/e1_positive_earnings_surprise_drift/build_e1_source_snapshot.py" \
         "Swing Trading/research/swing/e1_positive_earnings_surprise_drift/tests"
-git commit -m "fix: parse official NSE integrated EPS payloads"
+git commit -m "fix: parse real NSE integrated EPS filings"
 ```
 
 ---
 
-### Task 3: Make BSE identity/result acquisition verifiable instead of best-effort
+### Task 3: Make BSE identifier/result acquisition fail explicitly and reproducibly
 
 **Files:**
 - Modify: `source_clients.py`
-- Create fixture: `tests/fixtures/bse_security_master_sample.json`
+- Create: `tests/fixtures/bse_security_master_sample.json`
 - Modify: `tests/test_source_clients.py`
 - Modify: `tests/test_source_snapshot.py`
 
 **Interfaces:**
-- Preserve `BseResultsClient.resolve_identifier(symbol) -> dict[str, str]` and `list_results(symbol) -> list[dict[str, object]]`.
-- Add explicit response validation before calling `.json()`; a 200 HTML/challenge response must become `BSE_SOURCE_NON_JSON`, not an opaque JSON exception.
-- BSE mapping provenance must remain `BSE_Scrip_Code`, `BSE_Scrip_ID`, `BSE_Mapping_Source_URL`.
 
-- [ ] **Step 1: Capture the actual BSE security-master/result response shape used by a smoke symbol**
-
-Create a minimal official fixture containing one known symbol mapping and the exact top-level nesting/field names returned by the live source. Write a regression that resolves the exact BSE scrip code from that fixture.
-
-- [ ] **Step 2: Add non-JSON/blocked-response regressions**
+Keep:
 
 ```python
-with pytest.raises(BseIdentifierError, match="BSE_SOURCE_NON_JSON"):
-    client.resolve_identifier("RELIANCE")
+BseResultsClient.resolve_identifier(symbol: str) -> dict[str, str]
+BseResultsClient.list_results(symbol: str) -> list[dict[str, object]]
 ```
 
-Use a fake 200 HTML response and a fake 403/429 response. Preserve retry behavior only for the already-declared transient statuses.
+Add to `_OfficialResultsClient`:
 
-- [ ] **Step 3: Implement request/response handling from observed official behavior**
+```python
+def _get_json_checked(self, url: str, params: dict[str, object] | None = None) -> object:
+    ...
+```
 
-Set only the minimum headers/cookies/referrer flow actually required by the observed official BSE endpoint. Do not add browser automation or undocumented scraping services. Validate `Content-Type`/body before JSON decoding and emit stable audit codes.
+`_get_json_checked` must raise `BseIdentifierError("BSE_SOURCE_NON_JSON", symbol)` through the BSE call path when an HTTP-200 response is HTML/non-JSON.
 
-- [ ] **Step 4: Add a live-smoke assertion for BSE mapping**
+- [ ] **Step 1: Capture a minimal actual BSE security-master fixture**
 
-For each of `RELIANCE`, `TCS`, `INFY`, smoke must either resolve one unambiguous official BSE identity or fail the smoke gate with the explicit reason. A source exception cannot be treated as an acceptable warning.
+Use one smoke symbol. Preserve exact top-level nesting plus the fields containing BSE scrip code and scrip ID/symbol.
+
+- [ ] **Step 2: Write RED identity and blocked-response tests**
+
+```python
+identity = resolve_bse_identifier("RELIANCE", fixture_records, source_url="official-fixture")
+assert identity["BSE_Scrip_Code"].isdigit()
+assert identity["BSE_Scrip_ID"]
+
+with pytest.raises(BseIdentifierError, match="BSE_SOURCE_NON_JSON"):
+    client_with_html_200.resolve_identifier("RELIANCE")
+```
+
+Also test HTTP 429 is retried according to the existing retry limit and ultimately fails visibly if retries exhaust.
+
+- [ ] **Step 3: Implement only the request flow required by the observed official endpoint**
+
+Set the minimum normal browser headers/referrer/cookie bootstrap demonstrated necessary by the live BSE request. No Selenium/browser automation. Validate response type before `.json()`.
+
+- [ ] **Step 4: Make BSE resolution a smoke gate**
+
+For each smoke symbol, exactly one BSE identifier must resolve. Any `BSE_SOURCE_ERROR`, `BSE_SOURCE_NON_JSON`, `BSE_IDENTIFIER_UNRESOLVED`, or `BSE_IDENTIFIER_AMBIGUOUS` makes smoke FAIL.
 
 - [ ] **Step 5: Verify and commit**
 
@@ -241,69 +302,85 @@ python -m pytest -q "Swing Trading/research/swing/e1_positive_earnings_surprise_
   "Swing Trading/research/swing/e1_positive_earnings_surprise_drift/tests/test_source_snapshot.py"
 git add "Swing Trading/research/swing/e1_positive_earnings_surprise_drift/source_clients.py" \
         "Swing Trading/research/swing/e1_positive_earnings_surprise_drift/tests"
-git commit -m "fix: harden official BSE source acquisition"
+git commit -m "fix: harden E1 BSE source acquisition"
 ```
 
 ---
 
-### Task 4: Prove corporate-action acquisition with the RELIANCE bonus sentinel
+### Task 4: Prove corporate-action acquisition using RELIANCE's 2024 bonus
 
 **Files:**
-- Modify: `source_clients.py` only if the live action transport belongs there
+- Modify: `source_clients.py`
 - Modify: `build_e1_source_snapshot.py`
-- Create fixture: `tests/fixtures/nse_corporate_actions_reliance.json`
+- Create: `tests/fixtures/nse_corporate_actions_reliance.json`
 - Modify: `tests/test_source_snapshot.py`
 
 **Interfaces:**
-- Keep `_normalize_action(record, symbol) -> dict | None` semantics.
-- Add source-normalization support for the **actual NSE corporate-action field names** observed in the official RELIANCE payload.
-- A normalized `1:1 bonus` must persist `Old_Shares=1`, `Bonus_Shares=1`, `New_Shares=2`, `Share_Count_Factor=2.0`.
 
-- [ ] **Step 1: Capture a minimal official RELIANCE corporate-action fixture containing the 2024 bonus record**
-
-The regression must assert:
+Keep:
 
 ```python
-assert action["Symbol"] == "RELIANCE"
-assert action["Action_Type"] == "BONUS"
+def _normalize_action(record: dict[str, object], symbol: str) -> dict[str, object] | None:
+    ...
+```
+
+The normalized sentinel must be:
+
+```python
+{
+    "Symbol": "RELIANCE",
+    "Action_Type": "BONUS",
+    "Old_Shares": 1.0,
+    "Bonus_Shares": 1.0,
+    "New_Shares": 2.0,
+    "Share_Count_Factor": 2.0,
+    "Ex_Date": pd.Timestamp("2024-10-28"),
+}
+```
+
+- [ ] **Step 1: Capture a minimal actual NSE corporate-action response fixture**
+
+Preserve the real top-level nesting and exact field names for the RELIANCE bonus record.
+
+- [ ] **Step 2: Write RED fixture regression**
+
+```python
+rows = records_from_fixture(...)
+action = next(_normalize_action(row, "RELIANCE") for row in rows if is_target_bonus(row))
 assert action["Ex_Date"] == pd.Timestamp("2024-10-28")
 assert action["Share_Count_Factor"] == pytest.approx(2.0)
 ```
 
-- [ ] **Step 2: Run RED against the real field names**
+- [ ] **Step 3: Run RED**
 
 ```bash
 python -m pytest -q "Swing Trading/research/swing/e1_positive_earnings_surprise_drift/tests/test_source_snapshot.py" -k "reliance and bonus"
 ```
 
-Expected: FAIL if the current `_records()`/field mapping cannot see the real action row.
+- [ ] **Step 4: Map the observed official fields**
 
-- [ ] **Step 3: Implement the minimal real-source normalization**
-
-Map only observed official fields for purpose/action text, ex-date, record date, source id, and ratio. Keep the already-correct share-count semantics:
+Retain these share-count formulas:
 
 ```text
-split/consolidation factor = new_shares / old_shares
-bonus B:A -> old=A, bonus=B, new=A+B, factor=(A+B)/A
+split/consolidation: factor = new_shares / old_shares
+bonus B:A: old=A, bonus=B, new=A+B, factor=(A+B)/A
 ```
 
-- [ ] **Step 4: Make the known sentinel a smoke acceptance condition**
-
-`run_source_smoke()` must fail (`Smoke_Status = FAIL`) if the RELIANCE 2024-10-28 bonus is absent or does not normalize to factor 2.0. This is a source-integrity sentinel, not a strategy filter.
+Do not infer a ratio if official action text cannot be parsed; emit `UNPARSEABLE_CORPORATE_ACTION_RATIO`.
 
 - [ ] **Step 5: Verify and commit**
 
 ```bash
-python -m pytest -q "Swing Trading/research/swing/e1_positive_earnings_surprise_drift/tests/test_source_snapshot.py" -k "action or bonus or smoke"
+python -m pytest -q "Swing Trading/research/swing/e1_positive_earnings_surprise_drift/tests/test_source_snapshot.py" -k "action or bonus"
 git add "Swing Trading/research/swing/e1_positive_earnings_surprise_drift/build_e1_source_snapshot.py" \
         "Swing Trading/research/swing/e1_positive_earnings_surprise_drift/source_clients.py" \
         "Swing Trading/research/swing/e1_positive_earnings_surprise_drift/tests"
-git commit -m "fix: validate E1 corporate-action acquisition"
+git commit -m "fix: validate E1 corporate actions from official data"
 ```
 
 ---
 
-### Task 5: Invalidate failed v1 checkpoints and make reuse parser/source-version aware
+### Task 5: Reject stale v1 checkpoints and version parser/source semantics
 
 **Files:**
 - Modify: `build_e1_source_snapshot.py`
@@ -311,36 +388,24 @@ git commit -m "fix: validate E1 corporate-action acquisition"
 - Modify: `README.md`
 
 **Interfaces:**
-- Add constants such as:
+
+Add exactly:
 
 ```python
 CHECKPOINT_SCHEMA_VERSION = 2
 SOURCE_NORMALIZER_VERSION = 2
 EPS_PARSER_VERSION = 2
+
+TRANSIENT_CHECKPOINT_VIOLATIONS = {
+    "NSE_SOURCE_ERROR",
+    "BSE_SOURCE_ERROR",
+    "BSE_SOURCE_NON_JSON",
+    "EPS_PAYLOAD_HTTP_ERROR",
+    "CORPORATE_ACTION_SOURCE_ERROR",
+}
 ```
 
-- Checkpoint metadata must include all three versions plus `Reusable`.
-- `_read_symbol_checkpoint()` must return `None` for any v1 checkpoint, version mismatch, hash mismatch, cutoff mismatch, or `Reusable is not True`.
-
-- [ ] **Step 1: Write a RED regression proving current v1 failed checkpoints cannot be reused**
-
-Create a synthetic metadata file with:
-
-```json
-{"Checkpoint_Version": 1, "Complete": true}
-```
-
-and valid artifact hashes. Assert `_read_symbol_checkpoint(...) is None`.
-
-- [ ] **Step 2: Add a transient-source-error reuse regression**
-
-A newly written checkpoint whose audit contains `NSE_SOURCE_ERROR`, `BSE_SOURCE_ERROR`, `SOURCE_HTTP_ERROR`, `EPS_PAYLOAD_HTTP_ERROR`, or `CORPORATE_ACTION_SOURCE_ERROR` must have `Reusable=false` and must be reacquired on the next run.
-
-Parser-level deterministic misses may be cached only under the exact current `EPS_PARSER_VERSION`; bumping the parser version invalidates them.
-
-- [ ] **Step 3: Implement the versioned checkpoint contract**
-
-Metadata shape:
+Checkpoint metadata must contain:
 
 ```json
 {
@@ -351,15 +416,43 @@ Metadata shape:
   "Source_Cutoff": "2026-08-25",
   "Acquisition_Complete": true,
   "Reusable": true,
-  "Artifacts": {"filings": {}, "eps": {}, "audit": {}}
+  "Artifacts": {}
 }
 ```
 
-Do not migrate old v1 checkpoints. Reject and rebuild them.
+- [ ] **Step 1: Write RED stale-version test**
 
-- [ ] **Step 4: Document the required clean restart**
+Construct a hash-valid old metadata file with `Checkpoint_Version: 1` and `Complete: true`. Assert `_read_symbol_checkpoint(...) is None`.
 
-README must explicitly tell Luna/user to use a new work directory (for example `.e1-stage-a-work-v2`) or delete the prior v1 checkpoint directory before the next live run.
+- [ ] **Step 2: Write RED transient-error test**
+
+Write a v2 checkpoint with `NSE_SOURCE_ERROR` in the audit. Assert metadata has `Reusable: false` and the next call reacquires rather than reuses it.
+
+- [ ] **Step 3: Implement exact reuse rules**
+
+A checkpoint is reusable only when all are true:
+
+```text
+schema/source-normalizer/EPS-parser versions match current constants
+Symbol and Source_Cutoff match
+Acquisition_Complete == true
+Reusable == true
+all artifact hashes and row counts match
+no TRANSIENT_CHECKPOINT_VIOLATIONS are present
+```
+
+Deterministic `EPS_FACT_NOT_FOUND` rows may be cached only under the matching current `EPS_PARSER_VERSION`.
+
+- [ ] **Step 4: Document clean v2 work directories**
+
+README commands must use:
+
+```text
+.e1-stage-a-smoke-v2
+.e1-stage-a-work-v2
+```
+
+and explicitly state that the previous checkpoint directory must not be reused.
 
 - [ ] **Step 5: Verify and commit**
 
@@ -373,7 +466,7 @@ git commit -m "fix: invalidate stale E1 Stage A checkpoints"
 
 ---
 
-### Task 6: Make the three-symbol smoke a hard semantic gate
+### Task 6: Turn the three-symbol live smoke into a hard semantic acceptance gate
 
 **Files:**
 - Modify: `build_e1_source_snapshot.py`
@@ -381,47 +474,49 @@ git commit -m "fix: invalidate stale E1 Stage A checkpoints"
 - Modify: `README.md`
 
 **Interfaces:**
-- Add `evaluate_source_smoke(filings, eps, actions, audit, symbols) -> tuple[str, pd.DataFrame]`.
-- `run_source_smoke()` must return `Smoke_Status` and write `smoke_validation.csv`.
-- CLI `--smoke` must exit non-zero when `Smoke_Status != PASS`.
+
+Add:
+
+```python
+def evaluate_source_smoke(
+    filings: pd.DataFrame,
+    eps: pd.DataFrame,
+    actions: pd.DataFrame,
+    audit: pd.DataFrame,
+    symbols: tuple[str, ...] = ("RELIANCE", "TCS", "INFY"),
+) -> tuple[str, pd.DataFrame]:
+    ...
+```
+
+`run_source_smoke()` must write `smoke_validation.csv` and return `Smoke_Status`. CLI `--smoke` must exit `2` when status is not PASS.
 
 - [ ] **Step 1: Encode these mandatory smoke gates exactly**
 
-For `RELIANCE`, `TCS`, `INFY`:
-
 ```text
-FILINGS_PRESENT_PER_SYMBOL                 > 0
-EPS_ROWS_PRESENT_PER_SYMBOL                > 0
-AT_LEAST_ONE_13_QUARTER_BASIS_CHAIN        == true per symbol
-BSE_IDENTITY_RESOLVED                      == true per symbol
-NO_TRANSIENT_SOURCE_ERRORS                 == true
-RELIANCE_2024_10_28_BONUS_FACTOR           == 2.0
+for each RELIANCE/TCS/INFY:
+  filing rows > 0
+  resolved EPS rows > 0
+  at least one reporting basis has 13 consecutive quarterly EPS observations usable by basis_chain_status
+  exactly one BSE identity resolved
+
+across smoke:
+  no TRANSIENT_CHECKPOINT_VIOLATIONS
+  RELIANCE action contains BONUS on 2024-10-28 with Share_Count_Factor == 2.0
 ```
 
-A smoke may still report deterministic `EPS_FACT_NOT_FOUND` rows for non-target/annual/malformed filings, but it cannot pass with zero EPS or missing the required 13-quarter chain.
+`EPS_FACT_NOT_FOUND` may remain for non-target/annual contexts; it is reported but is not itself a smoke failure if the 13-quarter chain gate passes.
 
-- [ ] **Step 2: Write PASS and FAIL fixture tests**
+- [ ] **Step 2: Write PASS and FAIL regressions**
 
-One fixture package must pass all gates. Another must reproduce the current failure shape (`filings>0, eps=0, actions=0`) and assert `Smoke_Status == "FAIL"`.
+One synthetic package satisfies every gate and returns PASS. Another reproduces the current shape (`filings > 0`, `eps == 0`, `actions == 0`) and returns FAIL.
 
-- [ ] **Step 3: Run RED**
+- [ ] **Step 3: Run tests**
 
 ```bash
 python -m pytest -q "Swing Trading/research/swing/e1_positive_earnings_surprise_drift/tests/test_source_snapshot.py" -k "smoke"
 ```
 
-- [ ] **Step 4: Implement gate evaluation and CLI exit code**
-
-```python
-status, gates = evaluate_source_smoke(...)
-gates.to_csv(work_dir / "smoke_validation.csv", index=False)
-if status != "PASS":
-    raise SystemExit(2)
-```
-
-Do not use `EPS_Rows > 0` alone as the acceptance criterion; complete historical-chain availability is the important E1 feasibility check.
-
-- [ ] **Step 5: Run the real smoke from a fresh v2 work directory**
+- [ ] **Step 4: Run the real smoke from a fresh v2 directory**
 
 ```bash
 python "Swing Trading/research/swing/e1_positive_earnings_surprise_drift/build_e1_source_snapshot.py" \
@@ -429,45 +524,30 @@ python "Swing Trading/research/swing/e1_positive_earnings_surprise_drift/build_e
   --work-dir .e1-stage-a-smoke-v2
 ```
 
-Required evidence before proceeding:
+Do not proceed unless the command exits `0` and `smoke_validation.csv` shows every mandatory gate PASS.
 
-```text
-Smoke_Status = PASS
-all mandatory smoke_validation.csv gates = true
-EPS rows > 0 for RELIANCE/TCS/INFY
-one complete 13-quarter basis chain per symbol
-RELIANCE bonus sentinel present with factor 2.0
-no transient source errors
-```
+- [ ] **Step 5: If live smoke fails, stop**
 
-If smoke fails, stop and repair only the failing source/parser contract with a regression test. **Do not start the full universe.**
+For each failed gate, add a regression from the actual failing official response and repair only that source contract. Do **not** start a full-universe acquisition while smoke is FAIL.
 
-- [ ] **Step 6: Commit smoke evidence summary, not bulk raw payloads**
-
-Update the PR body or a small text/CSV evidence artifact only with gate counts/status and audit-code counts. Temporary raw source bodies/checkpoints remain untracked.
-
-- [ ] **Step 7: Verify and commit**
+- [ ] **Step 6: Verify and commit**
 
 ```bash
 python -m pytest -q "Swing Trading/research/swing/e1_positive_earnings_surprise_drift/tests"
 git add "Swing Trading/research/swing/e1_positive_earnings_surprise_drift"
-git commit -m "test: gate E1 Stage A on real-source smoke"
+git commit -m "test: gate E1 Stage A on real official-source smoke"
 ```
 
 ---
 
-### Task 7: Complete the frozen Stage A package, then run Stage B unchanged
+### Task 7: Complete Stage A, verify source coverage, and run Stage B unchanged
 
 **Files:**
-- Generated: `research/swing/e1_positive_earnings_surprise_drift/input/*.csv`
-- Generated: `research/swing/e1_positive_earnings_surprise_drift/output/*`
-- Modify PR body/report evidence only as needed; do not change strategy code after outcomes are visible.
+- Generated: `Swing Trading/research/swing/e1_positive_earnings_surprise_drift/input/*.csv`
+- Generated: `Swing Trading/research/swing/e1_positive_earnings_surprise_drift/output/*`
+- Modify: PR description only after fresh verification evidence exists
 
-**Interfaces:**
-- Stage A final package remains the approved six frozen input artifacts plus manifest.
-- Stage B remains `python run_e1_validation.py` with no network calls.
-
-- [ ] **Step 1: Run fresh full tests before live acquisition**
+- [ ] **Step 1: Run fresh test suites after the final source-code commit**
 
 ```bash
 cd "Swing Trading"
@@ -475,41 +555,41 @@ python -m pytest -q "research/swing/e1_positive_earnings_surprise_drift/tests"
 python -m pytest -q research/swing
 ```
 
-Record exact pass/fail counts and exit codes. Do not reuse prior `64/310` claims after changing source code.
+Record exact exit codes and pass/fail counts. Previous `64/310` counts are stale after source changes.
 
-- [ ] **Step 2: Run full Stage A with a fresh v2 checkpoint directory and no arbitrary five-minute stop**
+- [ ] **Step 2: Run full Stage A with fresh v2 checkpoints**
 
 ```bash
 python "research/swing/e1_positive_earnings_surprise_drift/build_e1_source_snapshot.py" \
   --work-dir .e1-stage-a-work-v2
 ```
 
-The command may be resumed using only v2 reusable checkpoints. It is not complete until the final frozen `input/` files and manifest are written.
+Do not impose an arbitrary five-minute stop. Resume only hash-valid/reusable v2 checkpoints until final `input/` artifacts and manifest are produced.
 
-- [ ] **Step 3: Verify the frozen source package before Stage B**
+- [ ] **Step 3: Verify frozen Stage A before Stage B**
 
-Check and record:
+Required evidence:
 
 ```text
-all required input files exist and are non-empty where structurally expected
-manifest SHA256 verification = zero violations
-source-build audit contains no transient/systemic source acquisition failures
-technical primary-window machine-readable EPS resolution >= 95%
-PIT membership fingerprint matches the manifest
-known RELIANCE bonus sentinel survives into corporate-actions snapshot
+all required Stage A input artifacts exist
+manifest hash verification has zero violations
+no transient/systemic source errors remain in e1_source_build_audit.csv
+primary-window machine-readable EPS resolution >= 95%
+PIT membership fingerprint matches manifest
+RELIANCE 2024-10-28 bonus factor 2.0 exists in corporate-actions snapshot
 ```
 
-If technical coverage is `<95%`, the run is `INVALID_RESEARCH_RUN`; do not lower the threshold or substitute a third-party EPS source.
+If coverage is `<95%`, keep the frozen outcome `INVALID_RESEARCH_RUN`. Do not lower the gate or substitute third-party EPS data.
 
-- [ ] **Step 4: Run Stage B unchanged and offline**
+- [ ] **Step 4: Run Stage B offline and unchanged**
 
 ```bash
 python "research/swing/e1_positive_earnings_surprise_drift/run_e1_validation.py"
 ```
 
-No code, threshold, parser selection, event eligibility, or holding-period changes are permitted after seeing this output except a separately demonstrated integrity bug.
+Once outcomes are visible, do not change SUE, filters, holding period, friction, controls, benchmark, or strategy gates. A later code change is allowed only for a separately demonstrated integrity defect with a regression test.
 
-- [ ] **Step 5: Verify final evidence package and formal status**
+- [ ] **Step 5: Verify the formal evidence package**
 
 Inspect:
 
@@ -520,16 +600,20 @@ e1_validation_gates.csv
 research_report.md
 ```
 
-Required interpretation hierarchy remains:
+Status precedence remains:
 
 ```text
 systemic integrity/source failure -> INVALID_RESEARCH_RUN
-clean run but insufficient frozen sample -> INSUFFICIENT_EVIDENCE
-sufficient clean run + all gates -> PASS
+clean but insufficient frozen sample -> INSUFFICIENT_EVIDENCE
+sufficient clean run + all mandatory gates -> PASS
 sufficient clean run + any mandatory strategy gate fails -> FAIL
 ```
 
-- [ ] **Step 6: Commit final frozen evidence**
+- [ ] **Step 6: Commit reproducibility evidence**
+
+Commit the frozen inputs/outputs if repository size/policy permits. If bulk frozen inputs are intentionally stored outside Git, commit the manifest, hashes, source audit, validation outputs, and the exact immutable storage location; do not omit provenance silently.
+
+Suggested commit:
 
 ```bash
 git add "research/swing/e1_positive_earnings_surprise_drift/input" \
@@ -538,26 +622,22 @@ git add "research/swing/e1_positive_earnings_surprise_drift/input" \
 git commit -m "research: complete frozen E1 Stage A and validation"
 ```
 
-If bulk source inputs are intentionally excluded by repo policy/size, commit the approved reproducibility manifest/evidence and document the exact immutable storage path instead; do not silently omit the required frozen-data provenance.
-
 ---
 
 ## Final review checklist
 
-Before asking for another PR review, verify all of the following:
-
 ```text
-[ ] Existing v1 checkpoints are rejected; next run uses fresh v2 checkpoints.
-[ ] Real NSE integrated/iXBRL fixture parses the target quarterly basic continuing EPS.
-[ ] Live RELIANCE/TCS/INFY smoke has EPS rows and one complete 13-quarter basis chain per symbol.
-[ ] Live BSE identities resolve or smoke fails explicitly.
-[ ] RELIANCE 2024-10-28 1:1 bonus is present with factor 2.0.
-[ ] Smoke exits non-zero for the old 493-filings / 0-EPS / 0-actions failure shape.
-[ ] Full Stage A produces final frozen inputs and a verified manifest.
-[ ] Primary-window technical EPS coverage is >=95% or formal status is INVALID without threshold changes.
-[ ] Stage B is rerun offline and unchanged.
-[ ] Fresh E1 and full research test commands are recorded after the final source-code commit.
-[ ] No strategy parameter changed during this remediation.
+[ ] v1 checkpoints are rejected; smoke/full runs use fresh v2 directories.
+[ ] Real NSE integrated/iXBRL fixture resolves quarterly Basic EPS continuing operations.
+[ ] BSE identity/result source works for all three smoke symbols or smoke fails explicitly.
+[ ] RELIANCE 2024-10-28 1:1 bonus is recovered with factor 2.0.
+[ ] Old 493-filings / 0-EPS / 0-actions shape produces Smoke_Status=FAIL and non-zero CLI exit.
+[ ] Live smoke has a usable 13-quarter EPS basis chain for RELIANCE, TCS, and INFY.
+[ ] Full Stage A finishes and writes a verified manifest.
+[ ] Technical EPS coverage is >=95%, otherwise formal status is INVALID without threshold changes.
+[ ] Stage B is rerun offline with unchanged strategy logic.
+[ ] Fresh E1 and full-research test results are recorded after final source changes.
+[ ] No strategy parameter changed during remediation.
 ```
 
-If the first six source checks are not satisfied, do not run the full historical experiment and do not request merge.
+If the first six checks are not satisfied, do not run the full historical experiment and do not request merge.

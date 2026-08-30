@@ -77,6 +77,26 @@ def _action_factor(action: pd.Series) -> float:
     return float(new_shares / old_shares)
 
 
+def _prepare_action_index(actions: pd.DataFrame | None) -> pd.DataFrame:
+    """Prepare a symbol-indexed action view for repeated point-in-time lookups."""
+
+    if not isinstance(actions, pd.DataFrame) or actions.empty:
+        return actions if isinstance(actions, pd.DataFrame) else pd.DataFrame()
+    cached = actions.attrs.get("_e1_prepared_action_index")
+    if isinstance(cached, dict):
+        return actions
+    if not {"Symbol", "Ex_Date"}.issubset(actions.columns):
+        return actions
+    prepared = actions.copy()
+    prepared["Symbol"] = prepared["Symbol"].astype(str).str.upper().str.strip()
+    prepared["Ex_Date"] = prepared["Ex_Date"].map(_date)
+    actions.attrs["_e1_prepared_action_index"] = {
+        symbol: group
+        for symbol, group in prepared.groupby("Symbol", sort=False)
+    }
+    return actions
+
+
 def adjust_historical_eps_for_actions(
     eps_history: pd.DataFrame,
     actions: pd.DataFrame,
@@ -95,8 +115,13 @@ def adjust_historical_eps_for_actions(
     result["EPS"] = pd.to_numeric(result["EPS"], errors="coerce")
     event_day = _date(event_date)
     symbols = set(result["Symbol"].astype(str).str.upper())
-    relevant = actions.loc[actions["Symbol"].astype(str).str.upper().isin(symbols)].copy()
-    relevant["Ex_Date"] = relevant["Ex_Date"].map(_date)
+    action_index = actions.attrs.get("_e1_prepared_action_index")
+    if isinstance(action_index, dict):
+        matching = [action_index[symbol] for symbol in symbols if symbol in action_index]
+        relevant = pd.concat(matching, ignore_index=True) if matching else actions.iloc[0:0].copy()
+    else:
+        relevant = actions.loc[actions["Symbol"].astype(str).str.upper().isin(symbols)].copy()
+        relevant["Ex_Date"] = relevant["Ex_Date"].map(_date)
     relevant = relevant.loc[relevant["Ex_Date"].notna() & relevant["Ex_Date"].le(event_day)]
     for _, action in relevant.sort_values("Ex_Date").iterrows():
         action_type = str(action.get("Action_Type") or "").upper()
@@ -124,11 +149,13 @@ def _history_for_event(
     basis = str(event.get("Reporting_Basis") or event.get("Selected_Basis") or "").upper().strip()
     current_period = _date(event.get("Fiscal_Period_End"))
     current_public = _timestamp(event.get("Event_Public_Timestamp", event.get("Event_Public_Date")))
+    prepared = bool(eps_history.attrs.get("_e1_prepared_history"))
     history = eps_history.copy()
-    history["Symbol"] = history["Symbol"].astype(str).str.upper().str.strip()
-    history["Reporting_Basis"] = history["Reporting_Basis"].fillna("").astype(str).str.upper().str.strip()
-    history["Fiscal_Period_End"] = history["Fiscal_Period_End"].map(_date)
-    history["EPS"] = pd.to_numeric(history["EPS"], errors="coerce")
+    if not prepared:
+        history["Symbol"] = history["Symbol"].astype(str).str.upper().str.strip()
+        history["Reporting_Basis"] = history["Reporting_Basis"].fillna("").astype(str).str.upper().str.strip()
+        history["Fiscal_Period_End"] = history["Fiscal_Period_End"].map(_date)
+        history["EPS"] = pd.to_numeric(history["EPS"], errors="coerce")
     history = history.loc[
         history["Symbol"].eq(symbol)
         & history["Reporting_Basis"].eq(basis)
@@ -138,7 +165,8 @@ def _history_for_event(
     if "Original_or_Revised" in history:
         history = history.loc[history["Original_or_Revised"].fillna("").astype(str).str.upper().eq("ORIGINAL")]
     if "Public_Timestamp" in history:
-        history["_Public_Timestamp"] = history["Public_Timestamp"].map(_timestamp)
+        if "_Public_Timestamp" not in history:
+            history["_Public_Timestamp"] = history["Public_Timestamp"].map(_timestamp)
         future = history.loc[history["_Public_Timestamp"].gt(current_public)]
         history = history.loc[history["_Public_Timestamp"].le(current_public)]
     else:
@@ -174,6 +202,11 @@ def basis_chain_status(
 ) -> tuple[bool, str]:
     """Validate the complete point-in-time comparable SUE chain for one basis."""
 
+    prepared_rows = eps.attrs.get("_e1_prepared_basis_rows")
+    if prepared_rows is not None:
+        return _prepared_basis_chain_status(
+            symbol, period_end, basis, event_timestamp, eps, actions, prepared_rows
+        )
     if "Public_Timestamp" not in eps.columns:
         return False, "MISSING_EPS_PUBLIC_TIMESTAMP"
     event = pd.Series(
@@ -201,6 +234,83 @@ def basis_chain_status(
     if any(index not in by_index for index in required_indices):
         return False, "INSUFFICIENT_EPS_HISTORY"
     return True, ""
+
+
+def _prepared_basis_chain_status(
+    symbol: str,
+    period_end: pd.Timestamp,
+    basis: str,
+    event_timestamp: pd.Timestamp,
+    eps: pd.DataFrame,
+    actions: pd.DataFrame,
+    prepared_rows: tuple[tuple[pd.Timestamp, int | None, pd.Timestamp, float, bool], ...],
+) -> tuple[bool, str]:
+    """Validate a prepared EPS group without rebuilding intermediate DataFrames."""
+
+    del basis, eps
+    current_period = _date(period_end)
+    current_public = _timestamp(event_timestamp)
+    future_seen = False
+    eligible: dict[int, list[float]] = {}
+    for period, quarter_index, public, value, original in prepared_rows:
+        if not original or pd.isna(public) or pd.isna(period):
+            continue
+        if public > current_public:
+            future_seen = True
+            continue
+        if public <= current_public and period <= current_period and quarter_index is not None:
+            eligible.setdefault(quarter_index, []).append(value)
+    if not eligible:
+        return False, "FUTURE_EPS_USED" if future_seen else "MISSING_CURRENT_EPS"
+    if any(
+        not eps_values_match(max(values), min(values))
+        for values in eligible.values()
+        if len(values) > 1
+    ):
+        return False, "CROSS_EXCHANGE_EPS_MISMATCH"
+    action_error = _prepared_action_error(actions, symbol, _date(event_timestamp))
+    if action_error:
+        return False, action_error
+    current_idx = _quarter_index(current_period)
+    if current_idx is None:
+        return False, "INVALID_FISCAL_QUARTER"
+    required_indices = [current_idx - offset for offset in range(0, 13)]
+    if any(index not in eligible for index in required_indices):
+        return False, "INSUFFICIENT_EPS_HISTORY"
+    return True, ""
+
+
+def _prepared_action_error(
+    actions: pd.DataFrame,
+    symbol: str,
+    event_day: pd.Timestamp,
+) -> str:
+    """Preserve action comparability failures while using the prepared basis path."""
+
+    if actions is None or actions.empty:
+        return ""
+    required = {"Symbol", "Action_Type", "Ex_Date"}
+    missing = required.difference(actions.columns)
+    if missing:
+        return f"EPS_HISTORY_NOT_COMPARABLE: actions missing {sorted(missing)}"
+    action_index = actions.attrs.get("_e1_prepared_action_index")
+    if isinstance(action_index, dict):
+        relevant = action_index.get(symbol)
+        if relevant is None:
+            return ""
+        relevant = relevant.copy()
+    else:
+        relevant = actions.loc[actions["Symbol"].astype(str).str.upper().eq(symbol)].copy()
+        relevant["Ex_Date"] = relevant["Ex_Date"].map(_date)
+    relevant = relevant.loc[relevant["Ex_Date"].notna() & relevant["Ex_Date"].le(event_day)]
+    for _, action in relevant.iterrows():
+        if str(action.get("Action_Type") or "").upper() not in {"SPLIT", "BONUS", "CONSOLIDATION"}:
+            continue
+        try:
+            _action_factor(action)
+        except ValueError as exc:
+            return str(exc)
+    return ""
 
 
 def compute_sue_for_event(
@@ -278,13 +388,38 @@ def build_sue_events(
 ) -> tuple[pd.DataFrame, pd.DataFrame, pd.DataFrame, pd.DataFrame]:
     """Build EPS-history, finite-SUE, classified-cohort, and SUE-exclusion evidence."""
 
+    actions = _prepare_action_index(actions)
     successful: list[dict[str, object]] = []
     exclusions: list[dict[str, object]] = []
+    eps_by_identity: dict[tuple[str, str], pd.DataFrame] = {}
+    if {"Symbol", "Reporting_Basis"}.issubset(eps_snapshot.columns):
+        indexed_eps = eps_snapshot.copy()
+        indexed_eps["Symbol"] = indexed_eps["Symbol"].astype(str).str.upper().str.strip()
+        indexed_eps["Reporting_Basis"] = (
+            indexed_eps["Reporting_Basis"].fillna("").astype(str).str.upper().str.strip()
+        )
+        if "Fiscal_Period_End" in indexed_eps.columns:
+            indexed_eps["Fiscal_Period_End"] = indexed_eps["Fiscal_Period_End"].map(_date)
+        if "EPS" in indexed_eps.columns:
+            indexed_eps["EPS"] = pd.to_numeric(indexed_eps["EPS"], errors="coerce")
+        if "Public_Timestamp" in indexed_eps.columns:
+            indexed_eps["_Public_Timestamp"] = indexed_eps["Public_Timestamp"].map(_timestamp)
+        eps_by_identity = {
+            (symbol, basis): group.copy()
+            for (symbol, basis), group in indexed_eps.groupby(
+                ["Symbol", "Reporting_Basis"], sort=False
+            )
+        }
+        for history in eps_by_identity.values():
+            history.attrs["_e1_prepared_history"] = True
     for _, event in event_master.iterrows():
         eligible, eligibility_reason = formal_event_eligibility(event)
         if not eligible:
             continue
-        row, reason = compute_sue_for_event(event, eps_snapshot, actions)
+        symbol = str(event.get("Symbol") or "").upper().strip()
+        basis = str(event.get("Reporting_Basis") or event.get("Selected_Basis") or "").upper().strip()
+        eps_history = eps_by_identity.get((symbol, basis), eps_snapshot.iloc[0:0])
+        row, reason = compute_sue_for_event(event, eps_history, actions)
         if row is not None:
             successful.append(row)
         else:

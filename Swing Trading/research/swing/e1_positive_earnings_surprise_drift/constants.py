@@ -26,6 +26,21 @@ PRIMARY_NEGATIVE_MIN = 300
 TEMPORAL_POSITIVE_MIN = 100
 TECHNICAL_EPS_COVERAGE_MIN = 0.95
 COMPLETED_HOLDING_SESSIONS = 40
+PRIMARY_PRICE_COHORTS = frozenset(
+    {
+        "POSITIVE_SURPRISE",
+        "NEUTRAL_CONTROL",
+        "NEGATIVE_CONTROL",
+    }
+)
+PRICE_REQUIREMENT_COLUMNS = [
+    "Event_ID",
+    "Symbol",
+    "Cohort",
+    "SUE",
+    "Event_Public_Date",
+    "Fiscal_Period_End",
+]
 
 REQUIRED_INPUT_ARTIFACTS = (
     "e1_exchange_filings_snapshot.csv",
@@ -34,6 +49,7 @@ REQUIRED_INPUT_ARTIFACTS = (
     "e1_stock_prices_snapshot.csv",
     "e1_nifty500_prices_snapshot.csv",
     "e1_price_identity_audit.csv",
+    "e1_price_requirements.csv",
     "e1_source_manifest.csv",
     "e1_source_build_audit.csv",
 )

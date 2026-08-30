@@ -10,6 +10,7 @@ import pytest
 MODULE_ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(MODULE_ROOT))
 
+import compute_e1_sue as sue  # noqa: E402
 from compute_e1_sue import (  # noqa: E402
     _sue_from_changes,
     adjust_historical_eps_for_actions,
@@ -27,6 +28,45 @@ def test_sue_uses_exactly_eight_prior_seasonal_changes_and_ddof_one():
     assert row["Historical_Mean"] == pytest.approx(seasonal.mean())
     assert row["Historical_SD"] == pytest.approx(seasonal.std(ddof=1))
     assert row["SUE"] == pytest.approx(expected)
+
+
+def test_build_sue_events_uses_only_matching_symbol_basis_history(monkeypatch):
+    event_master = pd.DataFrame(
+        [
+            {
+                "Event_ID": "AAA-1",
+                "Symbol": "AAA",
+                "Fiscal_Period_End": "2024-06-30",
+                "Event_Public_Date": "2024-08-10",
+                "Event_Public_Timestamp": "2024-08-10T10:00:00+05:30",
+                "Reporting_Basis": "CONSOLIDATED",
+                "Selected_Basis": "CONSOLIDATED",
+                "PIT_Membership_OK": True,
+                "Timely_Result": True,
+                "EPS_Source_Resolved": True,
+                "EPS_Source_Status": "RESOLVED",
+            }
+        ]
+    )
+    eps_snapshot = pd.DataFrame(
+        [
+            {"Symbol": "AAA", "Reporting_Basis": "CONSOLIDATED", "Fiscal_Period_End": "2024-06-30", "EPS": 1.0},
+            {"Symbol": "AAA", "Reporting_Basis": "CONSOLIDATED", "Fiscal_Period_End": "2024-03-31", "EPS": 0.9},
+            {"Symbol": "BBB", "Reporting_Basis": "CONSOLIDATED", "Fiscal_Period_End": "2024-06-30", "EPS": 0.8},
+        ]
+    )
+    seen_sizes: list[int] = []
+
+    def fake_compute_sue_for_event(event, history, actions):
+        seen_sizes.append(len(history))
+        assert history.attrs.get("_e1_prepared_history") is True
+        return {"Event_ID": event["Event_ID"], "Symbol": "AAA", "SUE": 1.0, "Cohort": "POSITIVE_SURPRISE"}, ""
+
+    monkeypatch.setattr(sue, "compute_sue_for_event", fake_compute_sue_for_event)
+
+    build_sue_events(event_master, eps_snapshot, pd.DataFrame())
+
+    assert seen_sizes == [2]
 
 
 def _eps_history(public_dates: list[str]) -> pd.DataFrame:

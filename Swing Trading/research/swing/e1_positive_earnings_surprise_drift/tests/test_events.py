@@ -47,6 +47,41 @@ def test_revision_never_replaces_original_event():
     assert len(ignored) == 1
 
 
+def test_first_public_selection_does_not_iterate_rows(monkeypatch):
+    rows = pd.DataFrame(
+        [
+            {
+                "Symbol": "AAA",
+                "Fiscal_Period_End": "2024-06-30",
+                "Reporting_Basis": "CONSOLIDATED",
+                "Original_or_Revised": "ORIGINAL",
+                "Public_Timestamp": "2024-08-10 10:00:00+05:30",
+                "Source_Record_ID": "a",
+                "Exchange": "NSE",
+            },
+            {
+                "Symbol": "AAA",
+                "Fiscal_Period_End": "2024-06-30",
+                "Reporting_Basis": "CONSOLIDATED",
+                "Original_or_Revised": "REVISED",
+                "Public_Timestamp": "2024-08-12 10:00:00+05:30",
+                "Source_Record_ID": "b",
+                "Exchange": "BSE",
+            },
+        ]
+    )
+
+    def fail_iterrows(self):
+        raise AssertionError("first-public normalization must not iterate rows")
+
+    monkeypatch.setattr(pd.DataFrame, "iterrows", fail_iterrows)
+
+    selected, ignored = select_first_public_filings(rows)
+
+    assert selected["Source_Record_ID"].tolist() == ["a"]
+    assert ignored["Reason"].tolist() == ["REVISED_OR_DUPLICATE_IGNORED"]
+
+
 def test_timeliness_boundaries_are_inclusive_for_quarterly_and_final_quarter():
     assert is_timely_result(pd.Timestamp("2024-06-30"), pd.Timestamp("2024-08-14"), "Q1")
     assert not is_timely_result(pd.Timestamp("2024-06-30"), pd.Timestamp("2024-08-15"), "Q1")

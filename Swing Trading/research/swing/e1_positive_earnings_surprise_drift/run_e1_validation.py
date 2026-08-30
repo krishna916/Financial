@@ -28,6 +28,7 @@ from constants import (
     PRIMARY_NEGATIVE_MIN,
     PRIMARY_NEUTRAL_MIN,
     PRIMARY_POSITIVE_MIN,
+    PRIMARY_PRICE_COHORTS,
     REQUIRED_INPUT_ARTIFACTS,
     REQUIRED_OUTPUT_ARTIFACTS,
     TECHNICAL_EPS_COVERAGE_MIN,
@@ -201,6 +202,7 @@ def build_integrity_audit(
     final_package_issues: list[dict[str, object]] | None = None,
     event_exclusions: pd.DataFrame | None = None,
     sue_exclusions: pd.DataFrame | None = None,
+    price_requirement_issues: list[dict[str, object]] | None = None,
 ) -> pd.DataFrame:
     """Create explicit systemic integrity rows; never filter violations away."""
 
@@ -295,6 +297,15 @@ def build_integrity_audit(
             add(f"{cohort}_BENCHMARK", "BENCHMARK_DATE_MISMATCH", int(frame[["Nifty500_Entry_Open", "Nifty500_Exit_Open"]].isna().any(axis=1).sum()))
     if cancellations is not None and not cancellations.empty:
         pass
+    for item in price_requirement_issues or []:
+        rows.append(
+            {
+                "Check": "PRICE_REQUIREMENTS",
+                "Violation": "PRICE_REQUIREMENT_SET_MISMATCH",
+                "Count": int(item.get("Count", 0)),
+                "Detail": item.get("Detail", ""),
+            }
+        )
     for item in final_package_issues or []:
         rows.append({"Check": "FINAL_EVIDENCE_PACKAGE", "Violation": item.get("Violation", "INVALID_FINAL_EVIDENCE"), "Count": 1, "Detail": item.get("Detail", "")})
     return pd.DataFrame(rows, columns=["Check", "Violation", "Count", "Detail"])
@@ -365,6 +376,40 @@ def _read_input(input_dir: Path, name: str) -> tuple[pd.DataFrame, dict[str, obj
         return pd.DataFrame(), {"Artifact": name, "Violation": "UNREADABLE_REQUIRED_INPUT", "Detail": str(exc)}
 
 
+def _price_requirement_set_issues(
+    classified: pd.DataFrame, requirements: pd.DataFrame
+) -> list[dict[str, object]]:
+    """Compare the frozen primary-event price set with the recomputed SUE set."""
+
+    expected = (
+        set(
+            classified.loc[
+                classified["Cohort"].isin(PRIMARY_PRICE_COHORTS), "Event_ID"
+            ]
+            .dropna()
+            .astype(str)
+        )
+        if {"Event_ID", "Cohort"}.issubset(classified.columns)
+        else set()
+    )
+    actual = (
+        set(requirements["Event_ID"].dropna().astype(str))
+        if "Event_ID" in requirements.columns
+        else set()
+    )
+    differing = expected.symmetric_difference(actual)
+    if not differing:
+        return []
+    return [
+        {
+            "Check": "PRICE_REQUIREMENTS",
+            "Violation": "PRICE_REQUIREMENT_SET_MISMATCH",
+            "Count": len(differing),
+            "Detail": "|".join(sorted(differing)),
+        }
+    ]
+
+
 def _ensure_frame(frame: pd.DataFrame, columns: tuple[str, ...]) -> pd.DataFrame:
     return frame.reindex(columns=list(columns)) if frame is not None else _empty_frame(columns)
 
@@ -417,6 +462,9 @@ def run_validation(
         loaded.get("e1_eps_snapshot.csv", pd.DataFrame()),
         loaded.get("e1_corporate_actions_snapshot.csv", pd.DataFrame()),
     )
+    price_requirement_issues = _price_requirement_set_issues(
+        classified, loaded.get("e1_price_requirements.csv", pd.DataFrame())
+    )
     stock_prices = loaded.get("e1_stock_prices_snapshot.csv", pd.DataFrame())
     index_prices = loaded.get("e1_nifty500_prices_snapshot.csv", pd.DataFrame())
     classified_events = classified.copy()
@@ -444,6 +492,7 @@ def run_validation(
         cancellations,
         event_exclusions=exclusions,
         sue_exclusions=sue_exclusions,
+        price_requirement_issues=price_requirement_issues,
     )
     temporal = analysis.get("e1_temporal_summary.csv", temporal_summary(positive))
     year_loo = analysis.get("e1_leave_one_year_out.csv", leave_one_year_out(positive))

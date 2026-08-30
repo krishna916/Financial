@@ -67,56 +67,83 @@ def select_first_public_filings(filings: pd.DataFrame) -> tuple[pd.DataFrame, pd
     frame["Reporting_Basis"] = frame["Reporting_Basis"].fillna("").astype(str).str.upper()
     frame["Original_or_Revised"] = frame["Original_or_Revised"].fillna("").astype(str).str.upper()
     frame["_Event_Key"] = _event_key(frame)
-
-    selected_rows: list[pd.Series] = []
-    ignored_rows: list[dict[str, object]] = []
-    for event_key, group in frame.groupby("_Event_Key", sort=True):
-        originals = group.loc[group["Original_or_Revised"].eq("ORIGINAL")].copy()
-        if originals.empty:
-            for _, row in group.iterrows():
-                ignored_rows.append(
-                    {
-                        "Event_ID": _event_id(row["Symbol"], row["Fiscal_Period_End"], row["Reporting_Basis"]),
-                        "Symbol": row["Symbol"],
-                        "Fiscal_Period_End": row["Fiscal_Period_End"],
-                        "Reason": "NO_ORIGINAL_FILING",
-                        "Source_Record_ID": row.get("Source_Record_ID", ""),
-                    }
-                )
-            continue
+    frame["_Source_Row_Order"] = np.arange(len(frame), dtype=np.int64)
+    originals = frame.loc[frame["Original_or_Revised"].eq("ORIGINAL")].copy()
+    if not originals.empty:
         originals["_Sort_Timestamp"] = originals["Public_Timestamp"].map(
             lambda value: pd.Timestamp(value).value if pd.notna(value) else np.iinfo(np.int64).max
         )
-        originals = originals.sort_values(["_Sort_Timestamp", "Source_Record_ID"], kind="stable")
-        chosen = originals.iloc[0].copy()
-        chosen["_Event_Key"] = event_key
-        chosen["Event_ID"] = _event_id(chosen["Symbol"], chosen["Fiscal_Period_End"], chosen["Reporting_Basis"])
-        chosen["Source_Exchanges"] = "|".join(
-            sorted({str(item).upper() for item in originals.get("Exchange", pd.Series(dtype=str)).dropna()})
-        )
-        chosen["Original_Record_Count"] = len(originals)
-        selected_rows.append(chosen)
-        for index, row in group.iterrows():
-            if index == chosen.name:
-                continue
-            ignored_rows.append(
-                {
-                    "Event_ID": chosen["Event_ID"],
-                    "Symbol": row["Symbol"],
-                    "Fiscal_Period_End": row["Fiscal_Period_End"],
-                    "Reason": "REVISED_OR_DUPLICATE_IGNORED"
-                    if row["Original_or_Revised"] == "REVISED"
-                    else "DUPLICATE_ORIGINAL_IGNORED",
-                    "Source_Record_ID": row.get("Source_Record_ID", ""),
-                }
+        chosen = (
+            originals.sort_values(
+                ["_Event_Key", "_Sort_Timestamp", "Source_Record_ID"], kind="stable"
             )
-    selected = pd.DataFrame(selected_rows).drop(columns=["_Sort_Timestamp"], errors="ignore")
-    if not selected.empty:
-        selected = selected.drop(columns=["_Event_Key"], errors="ignore").reset_index(drop=True)
-    ignored = pd.DataFrame(
-        ignored_rows,
-        columns=["Event_ID", "Symbol", "Fiscal_Period_End", "Reason", "Source_Record_ID"],
-    )
+            .drop_duplicates("_Event_Key", keep="first")
+            .sort_values("_Event_Key", kind="stable")
+            .copy()
+        )
+        chosen["Event_ID"] = [
+            _event_id(symbol, period, basis)
+            for symbol, period, basis in zip(
+                chosen["Symbol"],
+                chosen["Fiscal_Period_End"],
+                chosen["Reporting_Basis"],
+            )
+        ]
+        original_counts = originals.groupby("_Event_Key", sort=True).size()
+        chosen["Original_Record_Count"] = chosen["_Event_Key"].map(original_counts)
+        if "Exchange" in originals.columns:
+            exchanges = originals.loc[
+                originals["Exchange"].notna(), ["_Event_Key", "Exchange"]
+            ].copy()
+            exchanges["_Exchange"] = exchanges["Exchange"].astype(str).str.upper()
+            exchanges = exchanges.drop_duplicates(["_Event_Key", "_Exchange"])
+            exchanges = exchanges.sort_values(["_Event_Key", "_Exchange"], kind="stable")
+            source_exchanges = exchanges.groupby("_Event_Key", sort=True)["_Exchange"].agg("|".join)
+            chosen["Source_Exchanges"] = chosen["_Event_Key"].map(source_exchanges).fillna("")
+        else:
+            chosen["Source_Exchanges"] = ""
+    else:
+        chosen = pd.DataFrame()
+
+    chosen_keys = set(chosen["_Event_Key"]) if not chosen.empty else set()
+    ignored = frame.loc[
+        ~frame["_Source_Row_Order"].isin(chosen.get("_Source_Row_Order", pd.Series(dtype=np.int64)))
+    ].sort_values(["_Event_Key", "_Source_Row_Order"], kind="stable").copy()
+    if not ignored.empty:
+        ignored["Event_ID"] = ignored["_Event_Key"].map(
+            chosen.set_index("_Event_Key")["Event_ID"] if not chosen.empty else pd.Series(dtype=str)
+        )
+        no_original = ~ignored["_Event_Key"].isin(chosen_keys)
+        ignored.loc[no_original, "Event_ID"] = [
+            _event_id(symbol, period, basis)
+            for symbol, period, basis in zip(
+                ignored.loc[no_original, "Symbol"],
+                ignored.loc[no_original, "Fiscal_Period_End"],
+                ignored.loc[no_original, "Reporting_Basis"],
+            )
+        ]
+        ignored["Reason"] = np.where(
+            no_original,
+            "NO_ORIGINAL_FILING",
+            np.where(
+                ignored["Original_or_Revised"].eq("REVISED"),
+                "REVISED_OR_DUPLICATE_IGNORED",
+                "DUPLICATE_ORIGINAL_IGNORED",
+            ),
+        )
+        ignored = ignored[
+            ["Event_ID", "Symbol", "Fiscal_Period_End", "Reason", "Source_Record_ID"]
+        ]
+    else:
+        ignored = pd.DataFrame(
+            columns=["Event_ID", "Symbol", "Fiscal_Period_End", "Reason", "Source_Record_ID"]
+        )
+    if chosen.empty:
+        selected = pd.DataFrame()
+    else:
+        selected = chosen.drop(
+            columns=["_Sort_Timestamp", "_Event_Key", "_Source_Row_Order"], errors="ignore"
+        ).reset_index(drop=True)
     return selected, ignored
 
 
@@ -200,7 +227,48 @@ def select_reporting_basis(
         eps_frame["Symbol"] = eps_frame["Symbol"].astype(str).str.strip().str.upper()
         eps_frame["Fiscal_Period_End"] = eps_frame["Fiscal_Period_End"].map(_date)
         eps_frame["Reporting_Basis"] = eps_frame["Reporting_Basis"].fillna("").astype(str).str.upper()
-    action_frame = actions if isinstance(actions, pd.DataFrame) else pd.DataFrame()
+        if "EPS" in eps_frame.columns:
+            eps_frame["EPS"] = pd.to_numeric(eps_frame["EPS"], errors="coerce")
+        if "Public_Timestamp" in eps_frame.columns:
+            from compute_e1_sue import _quarter_index, _timestamp
+
+            eps_frame["_Public_Timestamp"] = eps_frame["Public_Timestamp"].map(_timestamp)
+    eps_by_identity: dict[tuple[str, str], pd.DataFrame] = {}
+    if {"Symbol", "Reporting_Basis"}.issubset(eps_frame.columns):
+        for (symbol, basis), group in eps_frame.groupby(
+            ["Symbol", "Reporting_Basis"], sort=False
+        ):
+            history = group.copy()
+            history.attrs["_e1_prepared_history"] = True
+            if {"Fiscal_Period_End", "EPS", "Public_Timestamp"}.issubset(history.columns):
+                public_values = history.get("_Public_Timestamp", history["Public_Timestamp"].map(_timestamp))
+                original_values = (
+                    history["Original_or_Revised"].fillna("").astype(str).str.upper().eq("ORIGINAL")
+                    if "Original_or_Revised" in history.columns
+                    else pd.Series(True, index=history.index)
+                )
+                prepared_rows = []
+                for period, public, value, original in zip(
+                    history["Fiscal_Period_End"],
+                    public_values,
+                    history["EPS"],
+                    original_values,
+                ):
+                    if pd.notna(period) and pd.notna(value):
+                        prepared_rows.append(
+                            (
+                                period,
+                                _quarter_index(period),
+                                public,
+                                float(value),
+                                bool(original),
+                            )
+                        )
+                history.attrs["_e1_prepared_basis_rows"] = tuple(prepared_rows)
+            eps_by_identity[(symbol, basis)] = history
+    from compute_e1_sue import _prepare_action_index, basis_chain_status
+
+    action_frame = _prepare_action_index(actions)
     choices: list[pd.Series] = []
     for (_, period), group in frame.groupby(["Symbol", "Fiscal_Period_End"], sort=True):
         fallback = None
@@ -212,14 +280,16 @@ def select_reporting_basis(
             candidate = candidates.iloc[0].copy()
             if fallback is None:
                 fallback = candidate.copy()
-            from compute_e1_sue import basis_chain_status
 
+            basis_history = eps_by_identity.get(
+                (str(candidate["Symbol"]), basis), eps_frame.iloc[0:0]
+            )
             ok, reason = basis_chain_status(
                 str(candidate["Symbol"]),
                 period,
                 basis,
                 candidate.get("Public_Timestamp"),
-                eps_frame,
+                basis_history,
                 action_frame,
             )
             if ok:
@@ -317,6 +387,31 @@ def build_event_master(
         eps_frame["Fiscal_Period_End"] = eps_frame["Fiscal_Period_End"].map(_date)
         eps_frame["Reporting_Basis"] = eps_frame["Reporting_Basis"].fillna("").astype(str).str.upper()
 
+    eps_by_event_key: dict[tuple[str, pd.Timestamp, str], pd.DataFrame] = {}
+    eps_key_columns = {"Symbol", "Fiscal_Period_End", "Reporting_Basis", "Original_or_Revised"}
+    if not eps_frame.empty and eps_key_columns.issubset(eps_frame.columns):
+        eps_frame["Original_or_Revised"] = eps_frame["Original_or_Revised"].fillna("").astype(str).str.upper()
+        eps_frame["EPS"] = pd.to_numeric(eps_frame.get("EPS"), errors="coerce")
+        original_eps = eps_frame.loc[eps_frame["Original_or_Revised"].eq("ORIGINAL")]
+        eps_by_event_key = {
+            (symbol, period, basis): group
+            for (symbol, period, basis), group in original_eps.groupby(
+                ["Symbol", "Fiscal_Period_End", "Reporting_Basis"], sort=False
+            )
+        }
+
+    membership_by_symbol: dict[str, pd.DataFrame] | None = None
+    membership_key_columns = {"Symbol", "Member_From", "Member_To"}
+    if membership_key_columns.issubset(membership.columns):
+        membership_frame = membership.copy()
+        membership_frame["Symbol"] = membership_frame["Symbol"].astype(str).str.upper().str.strip()
+        membership_frame["_Member_From"] = membership_frame["Member_From"].map(_date)
+        membership_frame["_Member_To"] = membership_frame["Member_To"].map(_date)
+        membership_by_symbol = {
+            symbol: group
+            for symbol, group in membership_frame.groupby("Symbol", sort=False)
+        }
+
     for _, event in selected.iterrows():
         symbol = str(event.get("Symbol", "")).upper().strip()
         period_end = _date(event.get("Fiscal_Period_End"))
@@ -327,13 +422,20 @@ def build_event_master(
         event_id = str(event.get("Event_ID") or _event_id(symbol, period_end, basis))
         fiscal_quarter = str(event.get("Fiscal_Quarter") or "").upper()
         timely = is_timely_result(period_end, public_date, fiscal_quarter)
-        pit_ok = _membership_ok(membership, symbol, public_date)
-        matching = eps_frame.loc[
-            eps_frame["Symbol"].eq(symbol)
-            & eps_frame["Fiscal_Period_End"].eq(period_end)
-            & eps_frame["Reporting_Basis"].eq(basis)
-            & eps_frame["Original_or_Revised"].fillna("").astype(str).str.upper().eq("ORIGINAL")
-        ] if not eps_frame.empty else pd.DataFrame()
+        if membership_by_symbol is None:
+            pit_ok = _membership_ok(membership, symbol, public_date)
+        else:
+            membership_rows = membership_by_symbol.get(symbol, pd.DataFrame())
+            pit_ok = bool(
+                not membership_rows.empty
+                and (
+                    membership_rows["_Member_From"].le(public_date)
+                    & membership_rows["_Member_To"].ge(public_date)
+                ).any()
+            )
+        matching = eps_by_event_key.get(
+            (symbol, period_end, basis), eps_frame.iloc[0:0]
+        )
         values = pd.to_numeric(matching.get("EPS", pd.Series(dtype=float)), errors="coerce").dropna()
         mismatch = len(values) > 1 and not eps_values_match(values.max(), values.min())
         resolved = bool(len(values) and not mismatch)

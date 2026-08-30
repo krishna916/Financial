@@ -21,6 +21,8 @@ from constants import (
     PRICE_END_EXCLUSIVE,
     PRICE_START,
     PRIMARY_END,
+    PRIMARY_PRICE_COHORTS,
+    PRICE_REQUIREMENT_COLUMNS,
     PRIMARY_START,
     SOURCE_CUTOFF,
 )
@@ -757,6 +759,32 @@ def _symbols_active_in_window(membership: pd.DataFrame) -> pd.DataFrame:
     )
 
 
+def build_price_requirements(
+    filings: pd.DataFrame,
+    eps: pd.DataFrame,
+    actions: pd.DataFrame,
+    membership: pd.DataFrame,
+) -> pd.DataFrame:
+    """Derive the exact frozen price set from the authoritative SUE classification."""
+
+    from build_e1_events import build_event_master
+    from compute_e1_sue import build_sue_events
+
+    event_master, _, _, _ = build_event_master(filings, eps, membership, actions)
+    _, _, classified, _ = build_sue_events(event_master, eps, actions)
+    if classified is None or classified.empty:
+        return pd.DataFrame(columns=PRICE_REQUIREMENT_COLUMNS)
+    missing = set(PRICE_REQUIREMENT_COLUMNS).difference(classified.columns)
+    if missing:
+        raise ValueError(f"classified events missing columns: {sorted(missing)}")
+    required = classified.loc[
+        classified["Cohort"].isin(PRIMARY_PRICE_COHORTS), PRICE_REQUIREMENT_COLUMNS
+    ].copy()
+    return required.sort_values(
+        ["Event_Public_Date", "Symbol", "Event_ID"], kind="stable"
+    ).reset_index(drop=True)
+
+
 def build_price_identity_table(
     membership: pd.DataFrame, aliases: pd.DataFrame
 ) -> pd.DataFrame:
@@ -803,6 +831,24 @@ def build_price_identity_table(
     return table.sort_values(
         ["Research_Symbol", "Member_From", "Member_To"]
     ).reset_index(drop=True)
+
+
+def membership_for_required_symbols(
+    membership: pd.DataFrame, required_symbols: set[str]
+) -> pd.DataFrame:
+    """Return only active PIT rows for symbols with formal price requirements."""
+
+    active = _symbols_active_in_window(membership)
+    required = {str(symbol).strip().upper() for symbol in required_symbols if str(symbol).strip()}
+    available = set(active["Symbol"].astype(str).str.upper())
+    missing = sorted(required - available)
+    if missing:
+        raise ValueError(
+            "PRICE_REQUIREMENT_SYMBOL_MISSING_MEMBERSHIP: " + ",".join(missing)
+        )
+    return active.loc[
+        active["Symbol"].astype(str).str.upper().isin(required)
+    ].copy()
 
 
 def _validate_provider_price_frame(frame: pd.DataFrame, ticker: str) -> pd.DataFrame:
@@ -900,11 +946,13 @@ def _identity_stock_rows(
 def build_market_snapshot(
     membership: pd.DataFrame,
     aliases: pd.DataFrame,
+    required_symbols: set[str],
     downloader: Callable[[str, str, str], pd.DataFrame] = download_adjusted_prices,
 ) -> tuple[pd.DataFrame, pd.DataFrame, pd.DataFrame]:
     """Freeze adjusted prices after resolving and validating provider identities."""
 
-    identity_table = build_price_identity_table(membership, aliases)
+    required_membership = membership_for_required_symbols(membership, required_symbols)
+    identity_table = build_price_identity_table(required_membership, aliases)
     provider_frames = _download_provider_frames(identity_table, downloader)
     audit = _build_price_identity_audit(identity_table, provider_frames)
     stock = _identity_stock_rows(identity_table, provider_frames)
@@ -1302,18 +1350,27 @@ def _write_stage_a(
     action_audit = actions.attrs.get("audit", pd.DataFrame())
     if isinstance(action_audit, pd.DataFrame) and not action_audit.empty:
         audit = pd.concat([audit, action_audit], ignore_index=True)
-    aliases = load_price_aliases(ALIAS_REGISTRY_PATH)
-    market, benchmark, price_identity_audit = build_market_snapshot(membership, aliases)
+
     filings.to_csv(input_dir / "e1_exchange_filings_snapshot.csv", index=False, date_format="%Y-%m-%d")
     eps.to_csv(input_dir / "e1_eps_snapshot.csv", index=False, date_format="%Y-%m-%d")
     actions.to_csv(input_dir / "e1_corporate_actions_snapshot.csv", index=False, date_format="%Y-%m-%d")
+    audit.reindex(columns=["Symbol", "Source_Record_ID", "Violation", "Detail"]).to_csv(
+        input_dir / "e1_source_build_audit.csv", index=False
+    )
+
+    requirements = build_price_requirements(filings, eps, actions, membership)
+    requirements.to_csv(
+        input_dir / "e1_price_requirements.csv", index=False, date_format="%Y-%m-%d"
+    )
+    required_symbols = set(requirements["Symbol"].dropna().astype(str).str.upper())
+    aliases = load_price_aliases(ALIAS_REGISTRY_PATH)
+    market, benchmark, price_identity_audit = build_market_snapshot(
+        membership, aliases, required_symbols
+    )
     market.to_csv(input_dir / "e1_stock_prices_snapshot.csv", index=False, date_format="%Y-%m-%d")
     benchmark.to_csv(input_dir / "e1_nifty500_prices_snapshot.csv", index=False, date_format="%Y-%m-%d")
     price_identity_audit.to_csv(
         input_dir / "e1_price_identity_audit.csv", index=False, date_format="%Y-%m-%d"
-    )
-    audit.reindex(columns=["Symbol", "Source_Record_ID", "Violation", "Detail"]).to_csv(
-        input_dir / "e1_source_build_audit.csv", index=False
     )
     price_violations = price_identity_audit.loc[
         price_identity_audit["Violation"].fillna("").astype(str).str.strip().ne("")

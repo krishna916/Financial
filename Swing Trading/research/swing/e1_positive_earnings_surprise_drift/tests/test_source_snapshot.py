@@ -12,6 +12,7 @@ MODULE_ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(MODULE_ROOT))
 
 import build_e1_source_snapshot as snapshot  # noqa: E402
+from build_e1_events import select_reporting_basis  # noqa: E402
 from price_identity import ALIAS_COLUMNS, load_price_aliases  # noqa: E402
 
 
@@ -162,6 +163,59 @@ def test_snapshot_builder_outputs_source_fields_but_no_forward_return_fields(mon
     assert audit.empty
 
 
+def test_reporting_basis_validation_uses_only_matching_symbol_basis_history(monkeypatch):
+    events = pd.DataFrame(
+        [
+            {
+                "Event_ID": "AAA-1",
+                "Symbol": "AAA",
+                "Fiscal_Period_End": "2024-06-30",
+                "Reporting_Basis": "CONSOLIDATED",
+                "Public_Timestamp": "2024-08-10T10:00:00+05:30",
+            }
+        ]
+    )
+    eps = pd.DataFrame(
+        [
+            {"Symbol": "AAA", "Fiscal_Period_End": "2024-06-30", "Reporting_Basis": "CONSOLIDATED", "EPS": 1.0, "Public_Timestamp": "2024-08-10"},
+            {"Symbol": "AAA", "Fiscal_Period_End": "2024-03-31", "Reporting_Basis": "CONSOLIDATED", "EPS": 0.9, "Public_Timestamp": "2024-05-10"},
+            {"Symbol": "AAA", "Fiscal_Period_End": "2024-06-30", "Reporting_Basis": "STANDALONE", "EPS": 0.8, "Public_Timestamp": "2024-08-10"},
+            {"Symbol": "BBB", "Fiscal_Period_End": "2024-06-30", "Reporting_Basis": "CONSOLIDATED", "EPS": 0.7, "Public_Timestamp": "2024-08-10"},
+        ]
+    )
+    seen_sizes: list[int] = []
+
+    def fake_basis_chain_status(symbol, period_end, basis, event_timestamp, history, actions):
+        seen_sizes.append(len(history))
+        assert history.attrs.get("_e1_prepared_history") is True
+        return True, ""
+
+    monkeypatch.setattr("compute_e1_sue.basis_chain_status", fake_basis_chain_status)
+
+    selected = select_reporting_basis(events, eps, pd.DataFrame())
+
+    assert selected["Selected_Basis"].tolist() == ["CONSOLIDATED"]
+    assert seen_sizes == [2]
+
+
+def test_reporting_basis_handles_empty_eps_frame_without_columns():
+    events = pd.DataFrame(
+        [
+            {
+                "Event_ID": "AAA-1",
+                "Symbol": "AAA",
+                "Fiscal_Period_End": "2024-06-30",
+                "Reporting_Basis": "CONSOLIDATED",
+                "Public_Timestamp": "2024-08-10T10:00:00+05:30",
+            }
+        ]
+    )
+
+    selected = select_reporting_basis(events, pd.DataFrame(), pd.DataFrame())
+
+    assert selected["Selected_Basis"].isna().all()
+
+
 def test_market_snapshot_keeps_symbol_and_benchmark_dates_separate(monkeypatch):
     membership = pd.DataFrame(
         {
@@ -191,7 +245,7 @@ def test_market_snapshot_keeps_symbol_and_benchmark_dates_separate(monkeypatch):
     aliases = pd.DataFrame(columns=ALIAS_COLUMNS)
     monkeypatch.setattr(snapshot, "download_adjusted_prices", fake_download)
     stocks, index, audit = snapshot.build_market_snapshot(
-        membership, aliases, downloader=fake_download
+        membership, aliases, {"AAA"}, downloader=fake_download
     )
     assert stocks["Symbol"].unique().tolist() == ["AAA"]
     assert stocks["Membership_Yahoo_Ticker"].unique().tolist() == ["AAA.NS"]
@@ -241,7 +295,7 @@ def test_market_snapshot_resolves_shared_provider_once_and_preserves_research_id
         return _provider_frame()
 
     stocks, _, audit = snapshot.build_market_snapshot(
-        _price_identity_membership(), _price_aliases(), downloader=fake_download
+        _price_identity_membership(), _price_aliases(), {"GLS", "ALIVUS"}, downloader=fake_download
     )
 
     assert calls.count("ALIVUS.NS") == 1
@@ -273,9 +327,72 @@ def test_market_snapshot_rejects_shared_provider_interval_overlap_before_downloa
 
     with pytest.raises(ValueError, match="PROVIDER_ALIAS_MEMBERSHIP_OVERLAP"):
         snapshot.build_market_snapshot(
-            _price_identity_membership(overlap=True), _price_aliases(), downloader=fake_download
+            _price_identity_membership(overlap=True),
+            _price_aliases(),
+            {"GLS", "ALIVUS"},
+            downloader=fake_download,
         )
     assert calls == []
+
+
+def test_market_snapshot_ignores_dead_irrelevant_symbol_when_requirement_set_is_narrow():
+    membership = pd.DataFrame(
+        {
+            "Symbol": ["AAA", "DEAD"],
+            "Yahoo_Ticker": ["AAA.NS", "DEAD.NS"],
+            "Downloadable": [True, True],
+            "Member_From": ["2023-08-01", "2023-08-01"],
+            "Member_To": ["2026-06-30", "2026-06-30"],
+        }
+    )
+    calls: list[str] = []
+
+    def fake_download(ticker: str, start: str, end_exclusive: str) -> pd.DataFrame:
+        calls.append(ticker)
+        if ticker == "DEAD.NS":
+            raise AssertionError("irrelevant symbol must not be downloaded")
+        return _provider_frame()
+
+    stocks, _, _ = snapshot.build_market_snapshot(
+        membership,
+        pd.DataFrame(columns=ALIAS_COLUMNS),
+        {"AAA"},
+        downloader=fake_download,
+    )
+    assert "AAA.NS" in calls
+    assert "DEAD.NS" not in calls
+    assert set(stocks["Symbol"]) == {"AAA"}
+
+
+def test_market_snapshot_uses_gls_alias_only_when_gls_is_required():
+    calls: list[str] = []
+
+    def fake_download(ticker: str, start: str, end_exclusive: str) -> pd.DataFrame:
+        calls.append(ticker)
+        return _provider_frame()
+
+    stocks, _, _ = snapshot.build_market_snapshot(
+        _price_identity_membership(), _price_aliases(), {"GLS"}, downloader=fake_download
+    )
+    assert calls.count("ALIVUS.NS") == 1
+    assert "GLS.NS" not in calls
+    assert set(stocks["Symbol"]) == {"GLS"}
+
+
+def test_market_snapshot_with_no_required_symbols_downloads_only_benchmark():
+    calls: list[str] = []
+
+    def fake_download(ticker: str, start: str, end_exclusive: str) -> pd.DataFrame:
+        calls.append(ticker)
+        return _provider_frame()
+
+    stocks, benchmark, audit = snapshot.build_market_snapshot(
+        _price_identity_membership(), _price_aliases(), set(), downloader=fake_download
+    )
+    assert calls == [snapshot.NIFTY500_YAHOO_TICKER]
+    assert stocks.empty
+    assert benchmark["Date"].is_unique
+    assert audit.empty
 
 
 def test_stage_a_writes_price_audit_and_fails_before_manifest_on_empty_active_interval(
@@ -290,6 +407,13 @@ def test_stage_a_writes_price_audit_and_fails_before_manifest_on_empty_active_in
     actions.attrs["audit"] = pd.DataFrame()
     monkeypatch.setattr(
         snapshot, "build_corporate_action_snapshot", lambda symbols, cutoff: actions
+    )
+    monkeypatch.setattr(
+        snapshot,
+        "build_price_requirements",
+        lambda filings, eps, actions, membership: pd.DataFrame(
+            columns=snapshot.PRICE_REQUIREMENT_COLUMNS
+        ),
     )
     empty_active_audit = pd.DataFrame(
         [
@@ -318,7 +442,11 @@ def test_stage_a_writes_price_audit_and_fails_before_manifest_on_empty_active_in
     monkeypatch.setattr(
         snapshot,
         "build_market_snapshot",
-        lambda membership, aliases: (pd.DataFrame(), pd.DataFrame(), empty_active_audit),
+        lambda membership, aliases, required_symbols: (
+            pd.DataFrame(),
+            pd.DataFrame(),
+            empty_active_audit,
+        ),
     )
     monkeypatch.setattr(
         snapshot, "write_manifest", lambda *args, **kwargs: pytest.fail("manifest must not be written")
@@ -415,6 +543,100 @@ def test_price_identity_smoke_fails_overlapping_pit_intervals_before_download(mo
     assert interval_gate["Status"] == "FAIL"
 
 
+def test_price_requirements_exclude_irrelevant_dead_ticker(monkeypatch):
+    classified = pd.DataFrame(
+        [
+            {
+                "Event_ID": "AAA-1",
+                "Symbol": "AAA",
+                "Cohort": "POSITIVE_SURPRISE",
+                "SUE": 1.5,
+                "Event_Public_Date": pd.Timestamp("2024-08-10"),
+                "Fiscal_Period_End": pd.Timestamp("2024-06-30"),
+            }
+        ]
+    )
+    monkeypatch.setattr(
+        "build_e1_events.build_event_master",
+        lambda filings, eps, membership, actions: (
+            pd.DataFrame(),
+            pd.DataFrame(),
+            pd.DataFrame(),
+            pd.DataFrame(),
+        ),
+    )
+    monkeypatch.setattr(
+        "compute_e1_sue.build_sue_events",
+        lambda event_master, eps, actions: (
+            pd.DataFrame(),
+            pd.DataFrame(),
+            classified,
+            pd.DataFrame(),
+        ),
+    )
+
+    requirements = snapshot.build_price_requirements(
+        pd.DataFrame({"Symbol": ["AAA", "DEAD"]}),
+        pd.DataFrame(),
+        pd.DataFrame(),
+        pd.DataFrame(),
+    )
+
+    assert set(requirements["Symbol"]) == {"AAA"}
+    assert "DEAD" not in set(requirements["Symbol"])
+
+
+def test_price_requirements_exclude_buffer_cohorts(monkeypatch):
+    cohorts = [
+        "POSITIVE_SURPRISE",
+        "POSITIVE_BUFFER",
+        "NEUTRAL_CONTROL",
+        "NEGATIVE_BUFFER",
+        "NEGATIVE_CONTROL",
+    ]
+    classified = pd.DataFrame(
+        [
+            {
+                "Event_ID": f"AAA-{index}",
+                "Symbol": "AAA",
+                "Cohort": cohort,
+                "SUE": float(index),
+                "Event_Public_Date": pd.Timestamp("2024-08-10") + pd.Timedelta(days=index),
+                "Fiscal_Period_End": pd.Timestamp("2024-06-30"),
+            }
+            for index, cohort in enumerate(cohorts)
+        ]
+    )
+    monkeypatch.setattr(
+        "build_e1_events.build_event_master",
+        lambda filings, eps, membership, actions: (
+            pd.DataFrame(),
+            pd.DataFrame(),
+            pd.DataFrame(),
+            pd.DataFrame(),
+        ),
+    )
+    monkeypatch.setattr(
+        "compute_e1_sue.build_sue_events",
+        lambda event_master, eps, actions: (
+            pd.DataFrame(),
+            pd.DataFrame(),
+            classified,
+            pd.DataFrame(),
+        ),
+    )
+
+    requirements = snapshot.build_price_requirements(
+        pd.DataFrame(), pd.DataFrame(), pd.DataFrame(), pd.DataFrame()
+    )
+
+    assert set(requirements["Cohort"]) == {
+        "POSITIVE_SURPRISE",
+        "NEUTRAL_CONTROL",
+        "NEGATIVE_CONTROL",
+    }
+
+
 def test_repository_root_for_cli_resolves_financial_checkout():
     assert snapshot.repository_root() == Path(__file__).resolve().parents[5]
 
@@ -434,8 +656,15 @@ def test_stage_a_exports_corporate_action_parse_audit(monkeypatch, tmp_path):
     monkeypatch.setattr(snapshot, "build_corporate_action_snapshot", lambda symbols, cutoff: actions)
     monkeypatch.setattr(
         snapshot,
+        "build_price_requirements",
+        lambda filings, eps, actions, membership: pd.DataFrame(
+            columns=snapshot.PRICE_REQUIREMENT_COLUMNS
+        ),
+    )
+    monkeypatch.setattr(
+        snapshot,
         "build_market_snapshot",
-        lambda membership, aliases: (
+        lambda membership, aliases, required_symbols: (
             pd.DataFrame(),
             pd.DataFrame(),
             pd.DataFrame(columns=snapshot.PRICE_IDENTITY_AUDIT_COLUMNS),
@@ -446,6 +675,53 @@ def test_stage_a_exports_corporate_action_parse_audit(monkeypatch, tmp_path):
     snapshot._write_stage_a(tmp_path, pd.DataFrame(), [])
     written = pd.read_csv(tmp_path / "e1_source_build_audit.csv")
     assert written.iloc[0]["Violation"] == "UNPARSEABLE_CORPORATE_ACTION_RATIO"
+
+
+def test_stage_a_freezes_price_requirements_before_market_acquisition(monkeypatch, tmp_path):
+    monkeypatch.setattr(
+        snapshot,
+        "build_filing_snapshot",
+        lambda symbols, cutoff: (pd.DataFrame(), pd.DataFrame(), pd.DataFrame()),
+    )
+    actions = pd.DataFrame(columns=snapshot.ACTION_COLUMNS)
+    actions.attrs["audit"] = pd.DataFrame()
+    monkeypatch.setattr(snapshot, "build_corporate_action_snapshot", lambda symbols, cutoff: actions)
+    requirements = pd.DataFrame(
+        [
+            {
+                "Event_ID": "AAA-1",
+                "Symbol": "AAA",
+                "Cohort": "POSITIVE_SURPRISE",
+                "SUE": 1.0,
+                "Event_Public_Date": "2024-08-10",
+                "Fiscal_Period_End": "2024-06-30",
+            }
+        ],
+        columns=snapshot.PRICE_REQUIREMENT_COLUMNS,
+    )
+    monkeypatch.setattr(
+        snapshot,
+        "build_price_requirements",
+        lambda filings, eps, actions, membership: requirements,
+    )
+    received = {}
+
+    def fake_market(membership, aliases, required_symbols):
+        received["symbols"] = required_symbols
+        written = pd.read_csv(tmp_path / "e1_price_requirements.csv")
+        assert written["Event_ID"].tolist() == ["AAA-1"]
+        return (
+            pd.DataFrame(),
+            pd.DataFrame(),
+            pd.DataFrame(columns=snapshot.PRICE_IDENTITY_AUDIT_COLUMNS),
+        )
+
+    monkeypatch.setattr(snapshot, "build_market_snapshot", fake_market)
+    monkeypatch.setattr(snapshot, "write_manifest", lambda input_dir, provenance: pd.DataFrame())
+
+    snapshot._write_stage_a(tmp_path, pd.DataFrame(), [])
+
+    assert received["symbols"] == {"AAA"}
 
 
 @pytest.mark.parametrize(

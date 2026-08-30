@@ -4,9 +4,11 @@ from __future__ import annotations
 
 import json
 import re
+from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
+from urllib.parse import urljoin, urlparse
 
 import numpy as np
 import pandas as pd
@@ -24,6 +26,7 @@ from constants import (
 )
 from load_e1_inputs import active_members_on, load_membership, sha256_file
 from source_clients import (
+    BSE_CORPORATE_ACTIONS_URL,
     BSE_RESULTS_URL,
     BseIdentifierError,
     NSE_LEGACY_URL,
@@ -72,6 +75,115 @@ ACTION_COLUMNS = [
     "Source_Record_ID",
 ]
 
+CHECKPOINT_SCHEMA_VERSION = 2
+SOURCE_NORMALIZER_VERSION = 2
+EPS_PARSER_VERSION = 2
+TRANSIENT_CHECKPOINT_VIOLATIONS = {
+    "NSE_SOURCE_ERROR",
+    "BSE_SOURCE_ERROR",
+    "BSE_SOURCE_NON_JSON",
+    "EPS_PAYLOAD_HTTP_ERROR",
+    "CORPORATE_ACTION_SOURCE_ERROR",
+}
+
+
+@dataclass(frozen=True)
+class SourcePayload:
+    requested_url: str
+    final_url: str
+    status_code: int
+    content_type: str
+    payload_kind: str
+    body_bytes: bytes
+
+
+_OFFICIAL_SOURCE_HOSTS = {
+    "www.nseindia.com",
+    "nsearchives.nseindia.com",
+    "www.bseindia.com",
+    "api.bseindia.com",
+}
+_PAYLOAD_ERROR_CODES = {
+    "EPS_PAYLOAD_HTTP_ERROR",
+    "EPS_PAYLOAD_UNSUPPORTED_FORMAT",
+    "EPS_FACT_NOT_FOUND",
+    "EPS_FACT_AMBIGUOUS",
+}
+
+
+def _payload_error(code: str, detail: str) -> ValueError:
+    return ValueError(f"{code}: {detail}")
+
+
+def _payload_error_code(exc: Exception) -> str:
+    message = str(exc)
+    code = message.split(":", 1)[0].strip()
+    return code if code in _PAYLOAD_ERROR_CODES else "EPS_PAYLOAD_HTTP_ERROR"
+
+
+def _normalize_payload_url(record: dict[str, object]) -> str:
+    requested = str(record.get("Machine_Readable_URL") or "").strip()
+    if not requested:
+        raise _payload_error("EPS_PAYLOAD_UNSUPPORTED_FORMAT", "missing machine-readable URL")
+    parsed = urlparse(requested)
+    if parsed.scheme:
+        if parsed.scheme != "https" or parsed.hostname not in _OFFICIAL_SOURCE_HOSTS:
+            raise _payload_error("EPS_PAYLOAD_UNSUPPORTED_FORMAT", requested)
+        return requested
+    source = str(record.get("Source_URL") or "").strip()
+    origin = urlparse(source)
+    if origin.scheme != "https" or origin.hostname not in _OFFICIAL_SOURCE_HOSTS:
+        raise _payload_error("EPS_PAYLOAD_UNSUPPORTED_FORMAT", requested)
+    resolved = urljoin(source, requested)
+    resolved_parts = urlparse(resolved)
+    if resolved_parts.scheme != "https" or resolved_parts.hostname not in _OFFICIAL_SOURCE_HOSTS:
+        raise _payload_error("EPS_PAYLOAD_UNSUPPORTED_FORMAT", requested)
+    return resolved
+
+
+def _classify_payload(body: bytes, content_type: str) -> str:
+    media_type = content_type.split(";", 1)[0].strip().lower()
+    prefix = body.lstrip()[:256].lower()
+    if (
+        "xml" in media_type
+        or prefix.startswith(b"<?xml")
+        or prefix.startswith(b"<xbrl")
+        or prefix.startswith(b"<xbrli:xbrl")
+    ):
+        return "xml"
+    is_html = "html" in media_type or b"<html" in prefix or b"<!doctype" in prefix
+    if is_html and re.search(rb"<\s*ix:(?:nonfraction|nonnumeric)\b", body, re.IGNORECASE):
+        return "ixbrl_html"
+    return "unsupported"
+
+
+def fetch_machine_payload(
+    record: dict[str, object],
+    session: requests.Session,
+    timeout: float = 30.0,
+) -> SourcePayload:
+    requested_url = str(record.get("Machine_Readable_URL") or "").strip()
+    url = _normalize_payload_url(record)
+    try:
+        response = session.get(url, timeout=timeout)
+    except requests.RequestException as exc:
+        raise _payload_error("EPS_PAYLOAD_HTTP_ERROR", str(exc)) from exc
+    status_code = int(getattr(response, "status_code", 0))
+    if status_code != 200:
+        raise _payload_error("EPS_PAYLOAD_HTTP_ERROR", f"HTTP {status_code}: {url}")
+    headers = getattr(response, "headers", {}) or {}
+    content_type = str(headers.get("Content-Type", headers.get("content-type", "")))
+    body = bytes(getattr(response, "content", b""))
+    final_url = str(getattr(response, "url", "") or url)
+    return SourcePayload(
+        requested_url=requested_url,
+        final_url=final_url,
+        status_code=status_code,
+        content_type=content_type,
+        payload_kind=_classify_payload(body, content_type),
+        body_bytes=body,
+    )
+
 
 def _number(value: object) -> float | None:
     if value is None or (isinstance(value, float) and np.isnan(value)):
@@ -102,14 +214,17 @@ def _fetch_eps(
     direct = _number(record.get("EPS"))
     if direct is not None:
         return direct
-    url = str(record.get("Machine_Readable_URL") or "").strip()
     basis = str(record.get("Reporting_Basis") or "").strip()
     period_end = record.get("Fiscal_Period_End")
-    if not url or not basis or pd.isna(period_end):
-        return None
-    response = session.get(url, timeout=timeout)
-    response.raise_for_status()
-    return extract_basic_eps_continuing(response.content, pd.Timestamp(period_end), basis)
+    if not basis or pd.isna(period_end):
+        raise _payload_error("EPS_FACT_NOT_FOUND", "missing reporting basis or period end")
+    payload = fetch_machine_payload(record, session, timeout=timeout)
+    if payload.payload_kind == "unsupported":
+        raise _payload_error("EPS_PAYLOAD_UNSUPPORTED_FORMAT", payload.final_url)
+    value = extract_basic_eps_continuing(payload.body_bytes, pd.Timestamp(period_end), basis)
+    if value is None:
+        raise _payload_error("EPS_FACT_NOT_FOUND", payload.final_url)
+    return value
 
 
 def _checkpoint_stem(symbol: str) -> str:
@@ -137,10 +252,13 @@ def _read_symbol_checkpoint(
     try:
         metadata = json.loads(paths["metadata"].read_text(encoding="utf-8"))
         if (
-            metadata.get("Checkpoint_Version") != 1
+            metadata.get("Checkpoint_Schema_Version") != CHECKPOINT_SCHEMA_VERSION
+            or metadata.get("Source_Normalizer_Version") != SOURCE_NORMALIZER_VERSION
+            or metadata.get("EPS_Parser_Version") != EPS_PARSER_VERSION
             or metadata.get("Symbol") != str(symbol).strip().upper()
             or metadata.get("Source_Cutoff") != str(cutoff.date())
-            or metadata.get("Complete") is not True
+            or metadata.get("Acquisition_Complete") is not True
+            or metadata.get("Reusable") is not True
         ):
             return None
         frames = {
@@ -161,6 +279,8 @@ def _read_symbol_checkpoint(
                 return None
             if sha256_file(paths[name]) != artifact.get("SHA256"):
                 return None
+        if frames["audit"]["Violation"].isin(TRANSIENT_CHECKPOINT_VIOLATIONS).any():
+            return None
         return frames["filings"], frames["eps"], frames["audit"]
     except (OSError, TypeError, ValueError, KeyError, json.JSONDecodeError):
         return None
@@ -183,11 +303,15 @@ def _write_symbol_checkpoint(
     }
     for name, frame in frames.items():
         frame.to_csv(paths[name], index=False)
+    reusable = not frames["audit"]["Violation"].isin(TRANSIENT_CHECKPOINT_VIOLATIONS).any()
     metadata = {
-        "Checkpoint_Version": 1,
+        "Checkpoint_Schema_Version": CHECKPOINT_SCHEMA_VERSION,
+        "Source_Normalizer_Version": SOURCE_NORMALIZER_VERSION,
+        "EPS_Parser_Version": EPS_PARSER_VERSION,
         "Symbol": str(symbol).strip().upper(),
         "Source_Cutoff": str(cutoff.date()),
-        "Complete": True,
+        "Acquisition_Complete": True,
+        "Reusable": bool(reusable),
         "Artifacts": {
             name: {"Row_Count": len(frame), "SHA256": sha256_file(paths[name])}
             for name, frame in frames.items()
@@ -253,7 +377,7 @@ def _build_filing_snapshot_for_symbol(
                 {
                     "Symbol": normalized.get("Symbol", symbol),
                     "Source_Record_ID": normalized.get("Source_Record_ID", ""),
-                    "Violation": "EPS_PARSE_ERROR",
+                    "Violation": _payload_error_code(exc),
                     "Detail": f"{type(exc).__name__}: {exc}",
                 }
             )
@@ -329,12 +453,18 @@ def _record_number(record: dict[str, object], *names: str) -> float | None:
 
 
 def _normalize_action(record: dict[str, object], symbol: str) -> dict[str, object] | None:
-    action_text = str(
-        record.get("purpose")
-        or record.get("Purpose")
-        or record.get("action")
-        or record.get("Action_Type")
-        or ""
+    action_text = " ".join(
+        str(record.get(name)).strip()
+        for name in (
+            "purpose",
+            "Purpose",
+            "action",
+            "Action_Type",
+            "subject",
+            "XTYPE",
+            "VALUE",
+        )
+        if record.get(name) is not None and str(record.get(name)).strip()
     )
     lower = action_text.lower()
     if "split" in lower:
@@ -387,11 +517,37 @@ def _normalize_action(record: dict[str, object], symbol: str) -> dict[str, objec
         "Ratio_Denominator": ratio_denominator,
         "Normalization_Status": normalization_status,
         "Action_Text": action_text,
-        "Ex_Date": _naive_date(record.get("exDate") or record.get("ex_date")),
-        "Record_Date": _naive_date(record.get("recordDate") or record.get("record_date")),
+        "Ex_Date": _naive_date(
+            record.get("exDate")
+            or record.get("ex_date")
+            or record.get("Ex_date")
+            or record.get("BCRD_FROM")
+            or record.get("BCRD_from")
+        ),
+        "Record_Date": _naive_date(
+            record.get("recordDate")
+            or record.get("record_date")
+            or record.get("recDate")
+            or record.get("BCRD_FROM")
+            or record.get("BCRD_from")
+        ),
         "Source_URL": str(record.get("sourceUrl") or record.get("url") or ""),
         "Source_Record_ID": str(record.get("id") or record.get("recordId") or ""),
     }
+
+
+def _action_records(payload: object) -> list[dict[str, object]]:
+    """Return all exchange action tables, preserving each source row."""
+
+    if isinstance(payload, dict):
+        tables: list[dict[str, object]] = []
+        for key in ("Table", "Table1", "Table2"):
+            value = payload.get(key)
+            if isinstance(value, list):
+                tables.extend(item for item in value if isinstance(item, dict))
+        if tables:
+            return tables
+    return _records(payload)
 
 
 def build_corporate_action_snapshot(
@@ -413,6 +569,7 @@ def build_corporate_action_snapshot(
         except Exception as exc:  # noqa: BLE001 - preserve malformed official responses in the audit
             bse_identity = None
             audit.append({"Symbol": symbol, "Violation": "BSE_SOURCE_ERROR", "Detail": str(exc)})
+        seen_actions: set[tuple[object, ...]] = set()
         endpoints = [
             (
                 nse,
@@ -424,20 +581,35 @@ def build_corporate_action_snapshot(
             endpoints.append(
                 (
                     bse,
-                    "https://api.bseindia.com/BseIndiaAPI/api/CorporateAction/w",
+                    BSE_CORPORATE_ACTIONS_URL,
                     {"scripcode": bse_identity["BSE_Scrip_Code"], "pageno": 1, "pagesize": 100},
                 )
             )
         for client, url, params in endpoints:
             try:
-                payload = client._get_json(url, params)
+                if client is bse:
+                    payload = bse.corporate_actions(symbol)
+                else:
+                    payload = client._get_json(url, params)
             except Exception as exc:  # noqa: BLE001 - keep acquisition failure visible
                 audit.append({"Symbol": symbol, "Violation": "CORPORATE_ACTION_SOURCE_ERROR", "Detail": str(exc)})
                 continue
-            for record in _records(payload):
+            for record in _action_records(payload):
                 action = _normalize_action(record, symbol)
                 if action is None:
-                    text = str(record.get("purpose") or record.get("Purpose") or record.get("action") or "")
+                    text = " ".join(
+                        str(record.get(name)).strip()
+                        for name in (
+                            "purpose",
+                            "Purpose",
+                            "action",
+                            "Action_Type",
+                            "subject",
+                            "XTYPE",
+                            "VALUE",
+                        )
+                        if record.get(name) is not None and str(record.get(name)).strip()
+                    )
                     if any(word in text.lower() for word in ("split", "bonus", "consolid")):
                         audit.append(
                             {
@@ -457,6 +629,14 @@ def build_corporate_action_snapshot(
                     )
                 effective = action["Ex_Date"]
                 if pd.notna(effective) and effective <= cutoff:
+                    identity = (
+                        action["Action_Type"],
+                        action["Ex_Date"],
+                        action["Share_Count_Factor"],
+                    )
+                    if identity in seen_actions:
+                        continue
+                    seen_actions.add(identity)
                     action["Source_URL"] = action["Source_URL"] or url
                     rows.append(action)
     result = pd.DataFrame(rows, columns=ACTION_COLUMNS)
@@ -603,6 +783,115 @@ def write_manifest(input_dir: Path, provenance: dict[str, str]) -> pd.DataFrame:
 
 
 SMOKE_SYMBOLS = ("RELIANCE", "TCS", "INFY")
+SMOKE_VALIDATION_COLUMNS = ["Symbol", "Gate", "Status", "Detail"]
+
+
+def _frame_symbol(frame: pd.DataFrame, symbol: str) -> pd.DataFrame:
+    if frame is None or "Symbol" not in frame.columns:
+        return pd.DataFrame()
+    values = frame["Symbol"].fillna("").astype(str).str.strip().str.upper()
+    return frame.loc[values.eq(symbol)].copy()
+
+
+def _smoke_gate(symbol: str, gate: str, passed: bool, detail: str) -> dict[str, object]:
+    return {
+        "Symbol": symbol,
+        "Gate": gate,
+        "Status": "PASS" if passed else "FAIL",
+        "Detail": detail,
+    }
+
+
+def evaluate_source_smoke(
+    filings: pd.DataFrame,
+    eps: pd.DataFrame,
+    actions: pd.DataFrame,
+    audit: pd.DataFrame,
+    symbols: tuple[str, ...] = SMOKE_SYMBOLS,
+) -> tuple[str, pd.DataFrame]:
+    """Evaluate fixed source-only acceptance gates without inspecting returns or SUE."""
+
+    from compute_e1_sue import basis_chain_status
+
+    requested = tuple(str(symbol).strip().upper() for symbol in symbols)
+    rows: list[dict[str, object]] = []
+    for symbol in requested:
+        symbol_filings = _frame_symbol(filings, symbol)
+        symbol_eps = _frame_symbol(eps, symbol)
+        filing_ok = not symbol_filings.empty
+        rows.append(_smoke_gate(symbol, "FILINGS_PRESENT", filing_ok, f"rows={len(symbol_filings)}"))
+
+        eps_values = pd.to_numeric(symbol_eps.get("EPS", pd.Series(dtype=float)), errors="coerce")
+        resolved = symbol_eps.loc[eps_values.notna()].copy()
+        if "EPS_Source_Resolved" in resolved:
+            resolved = resolved.loc[
+                resolved["EPS_Source_Resolved"].astype(str).str.lower().isin({"true", "1"})
+            ]
+        eps_ok = not resolved.empty
+        rows.append(_smoke_gate(symbol, "EPS_RESOLVED", eps_ok, f"rows={len(resolved)}"))
+
+        chain_ok = False
+        chain_detail = "no usable 13-quarter basis chain"
+        if not resolved.empty and {"Fiscal_Period_End", "Reporting_Basis", "Public_Timestamp"}.issubset(resolved.columns):
+            for _, candidate in resolved.sort_values("Fiscal_Period_End").iterrows():
+                candidate_basis = str(candidate.get("Reporting_Basis") or "").strip().upper()
+                if not candidate_basis or pd.isna(candidate.get("Public_Timestamp")):
+                    continue
+                chain_ok, reason = basis_chain_status(
+                    symbol,
+                    pd.Timestamp(candidate["Fiscal_Period_End"]),
+                    candidate_basis,
+                    pd.Timestamp(candidate["Public_Timestamp"]),
+                    resolved,
+                    actions,
+                )
+                if chain_ok:
+                    chain_detail = f"basis={candidate_basis} period={candidate['Fiscal_Period_End']}"
+                    break
+                chain_detail = reason or chain_detail
+        rows.append(_smoke_gate(symbol, "BASIS_CHAIN_13_QUARTERS", chain_ok, chain_detail))
+
+        identity_columns = {"BSE_Scrip_Code", "BSE_Scrip_ID"}
+        identity_ok = False
+        identity_detail = "missing BSE identity columns"
+        if identity_columns.issubset(symbol_filings.columns):
+            identities = symbol_filings.loc[:, ["BSE_Scrip_Code", "BSE_Scrip_ID"]].copy()
+            identities["BSE_Scrip_Code"] = identities["BSE_Scrip_Code"].fillna("").astype(str).str.strip()
+            identities["BSE_Scrip_ID"] = identities["BSE_Scrip_ID"].fillna("").astype(str).str.strip().str.upper()
+            identities = identities.loc[
+                identities["BSE_Scrip_Code"].str.fullmatch(r"\d+")
+                & identities["BSE_Scrip_ID"].ne("")
+            ].drop_duplicates()
+            identity_ok = len(identities) == 1
+            identity_detail = f"identities={len(identities)}"
+        rows.append(_smoke_gate(symbol, "BSE_IDENTITY_EXACTLY_ONE", identity_ok, identity_detail))
+
+    audit_violations = set()
+    if audit is not None and "Violation" in audit.columns:
+        audit_violations = set(audit["Violation"].dropna().astype(str))
+    transient = sorted(audit_violations.intersection(TRANSIENT_CHECKPOINT_VIOLATIONS))
+    rows.append(_smoke_gate("ALL", "NO_TRANSIENT_SOURCE_ERRORS", not transient, ", ".join(transient) or "none"))
+
+    bonus_ok = False
+    bonus_detail = "RELIANCE 2024-10-28 bonus factor 2.0 not found"
+    if actions is not None and not actions.empty and {"Symbol", "Action_Type", "Ex_Date", "Share_Count_Factor"}.issubset(actions.columns):
+        action_frame = actions.copy()
+        action_frame["Ex_Date"] = pd.to_datetime(action_frame["Ex_Date"], errors="coerce")
+        factor = pd.to_numeric(action_frame["Share_Count_Factor"], errors="coerce")
+        sentinel = action_frame.loc[
+            action_frame["Symbol"].astype(str).str.upper().eq("RELIANCE")
+            & action_frame["Action_Type"].astype(str).str.upper().eq("BONUS")
+            & action_frame["Ex_Date"].eq(pd.Timestamp("2024-10-28"))
+            & factor.eq(2.0)
+        ]
+        bonus_ok = not sentinel.empty
+        if bonus_ok:
+            bonus_detail = "RELIANCE 2024-10-28 bonus factor 2.0 present"
+    rows.append(_smoke_gate("RELIANCE", "RELIANCE_BONUS_SENTINEL", bonus_ok, bonus_detail))
+
+    validation = pd.DataFrame(rows, columns=SMOKE_VALIDATION_COLUMNS)
+    status = "PASS" if validation["Status"].eq("PASS").all() else "FAIL"
+    return status, validation
 
 
 def run_source_smoke(
@@ -620,13 +909,19 @@ def run_source_smoke(
     filings.to_csv(root / "smoke_exchange_filings.csv", index=False)
     eps.to_csv(root / "smoke_eps.csv", index=False)
     actions.to_csv(root / "smoke_corporate_actions.csv", index=False)
+    action_audit = actions.attrs.get("audit", pd.DataFrame())
+    if isinstance(action_audit, pd.DataFrame) and not action_audit.empty:
+        audit = pd.concat([audit, action_audit], ignore_index=True)
     audit.to_csv(root / "smoke_source_audit.csv", index=False)
+    smoke_status, validation = evaluate_source_smoke(filings, eps, actions, audit, symbols=symbols)
+    validation.to_csv(root / "smoke_validation.csv", index=False)
     return {
         "Symbols": list(symbols),
         "Filing_Rows": len(filings),
         "EPS_Rows": len(eps),
         "Corporate_Action_Rows": len(actions),
         "Audit_Rows": len(audit),
+        "Smoke_Status": smoke_status,
         "Output_Directory": str(root),
     }
 
@@ -677,8 +972,9 @@ if __name__ == "__main__":
     module_root = Path(__file__).resolve().parent
     if args.smoke:
         smoke_root = args.work_dir or module_root / "smoke-work"
-        print(run_source_smoke(smoke_root))
-        raise SystemExit(0)
+        result = run_source_smoke(smoke_root)
+        print(result)
+        raise SystemExit(0 if result["Smoke_Status"] == "PASS" else 2)
     membership = load_membership(
         repository_root() / "Swing Trading/research/swing/market_breadth/config/nifty500_membership.csv"
     )

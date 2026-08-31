@@ -21,7 +21,11 @@ from analyze_e1_results import (
     write_analysis_outputs,
     year_summary,
 )
-from build_e1_events import build_event_master, write_event_outputs
+from build_e1_events import (
+    build_event_master,
+    build_quarterly_exit_event_calendar,
+    write_event_outputs,
+)
 from build_e1_trades import build_primary_trades, write_trade_outputs
 from compute_e1_sue import build_sue_events, write_sue_outputs
 from constants import (
@@ -468,7 +472,17 @@ def run_validation(
     stock_prices = loaded.get("e1_stock_prices_snapshot.csv", pd.DataFrame())
     index_prices = loaded.get("e1_nifty500_prices_snapshot.csv", pd.DataFrame())
     classified_events = classified.copy()
-    trade_frames, cancellations = build_primary_trades(classified_events, stock_prices, index_prices, event_master)
+    trade_symbols = set(
+        classified.loc[
+            classified["Cohort"].isin(PRIMARY_PRICE_COHORTS), "Symbol"
+        ].dropna().astype(str)
+    ) if {"Cohort", "Symbol"}.issubset(classified.columns) else set()
+    exit_calendar = build_quarterly_exit_event_calendar(
+        loaded["e1_exchange_filings_snapshot.csv"], trade_symbols
+    )
+    trade_frames, cancellations = build_primary_trades(
+        classified_events, stock_prices, index_prices, exit_calendar
+    )
 
     event_schema = OUTPUT_SCHEMAS["e1_event_master.csv"] + ("Event_Public_Timestamp", "Fiscal_Period_End", "Reporting_Basis", "Selected_Basis", "Fiscal_Quarter", "Timely_Result", "PIT_Membership_OK", "EPS_Source_Status", "EPS_Source_Resolved", "Machine_Readable_URL", "Source_Exchanges", "Original_or_Revised", "Original_Record_Count")
     exclusion_schema = OUTPUT_SCHEMAS["e1_event_exclusions.csv"] + ("Symbol", "Fiscal_Period_End", "Exclusion_Stage", "Event_Public_Date")
@@ -494,10 +508,10 @@ def run_validation(
         sue_exclusions=sue_exclusions,
         price_requirement_issues=price_requirement_issues,
     )
-    temporal = analysis.get("e1_temporal_summary.csv", temporal_summary(positive))
-    year_loo = analysis.get("e1_leave_one_year_out.csv", leave_one_year_out(positive))
-    top_five = analysis.get("e1_top_five_robustness.csv", top_five_robustness(positive))
-    loso = analysis.get("e1_leave_one_symbol_out.csv", leave_one_symbol_out(positive))
+    temporal = analysis["e1_temporal_summary.csv"]
+    year_loo = analysis["e1_leave_one_year_out.csv"]
+    top_five = analysis["e1_top_five_robustness.csv"]
+    loso = analysis["e1_leave_one_symbol_out.csv"]
     status, gates = evaluate_gates(
         positive,
         neutral,

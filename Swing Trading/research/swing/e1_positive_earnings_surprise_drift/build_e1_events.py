@@ -8,7 +8,7 @@ from pathlib import Path
 import numpy as np
 import pandas as pd
 
-from constants import PRIMARY_END, PRIMARY_START
+from constants import PRIMARY_END, PRIMARY_START, SOURCE_CUTOFF
 from load_e1_inputs import active_members_on
 
 
@@ -24,6 +24,14 @@ def _date(value: object) -> pd.Timestamp:
 
 def _public_date(value: object) -> pd.Timestamp:
     return _date(value)
+
+
+def _timestamp(value: object) -> pd.Timestamp:
+    parsed = pd.to_datetime(value, errors="coerce")
+    if pd.isna(parsed):
+        return pd.NaT
+    stamp = pd.Timestamp(parsed)
+    return stamp.tz_localize("Asia/Kolkata") if stamp.tz is None else stamp.tz_convert("Asia/Kolkata")
 
 
 def _event_id(symbol: object, period_end: object, basis: object) -> str:
@@ -145,6 +153,148 @@ def select_first_public_filings(filings: pd.DataFrame) -> tuple[pd.DataFrame, pd
             columns=["_Sort_Timestamp", "_Event_Key", "_Source_Row_Order"], errors="ignore"
         ).reset_index(drop=True)
     return selected, ignored
+
+
+def partition_primary_candidates(
+    first_public: pd.DataFrame,
+    membership: pd.DataFrame,
+) -> tuple[pd.DataFrame, pd.DataFrame]:
+    """Keep only cheap-qualified primary events for expensive basis selection."""
+
+    exclusion_columns = [
+        "Event_ID",
+        "Symbol",
+        "Fiscal_Period_End",
+        "Reason",
+        "Exclusion_Stage",
+        "Event_Public_Date",
+    ]
+    if first_public.empty:
+        return first_public.copy(), pd.DataFrame(columns=exclusion_columns)
+
+    frame = first_public.copy()
+    frame["Symbol"] = frame["Symbol"].astype(str).str.strip().str.upper()
+    frame["Fiscal_Period_End"] = frame["Fiscal_Period_End"].map(_date)
+    frame["_Event_Public_Date"] = frame["Public_Timestamp"].map(_public_date)
+    in_primary_window = frame["_Event_Public_Date"].between(
+        PRIMARY_START, PRIMARY_END, inclusive="both"
+    )
+    primary = frame.loc[in_primary_window].copy()
+    if primary.empty:
+        return frame.iloc[0:0].drop(columns=["_Event_Public_Date"]).copy(), pd.DataFrame(
+            columns=exclusion_columns
+        )
+
+    quarter = primary.get("Fiscal_Quarter", pd.Series("", index=primary.index))
+    quarter = quarter.fillna("").astype(str).str.upper().str.strip()
+    days = pd.Series(np.where(quarter.eq("Q4"), 60, 45), index=primary.index)
+    period_end = primary["Fiscal_Period_End"]
+    public_date = primary["_Event_Public_Date"]
+    primary["_Timely_Result"] = (
+        period_end.notna()
+        & public_date.notna()
+        & quarter.isin({"Q1", "Q2", "Q3", "Q4"})
+        & public_date.ge(period_end)
+        & public_date.le(period_end + pd.to_timedelta(days, unit="D"))
+    )
+
+    primary["_PIT_Membership_OK"] = False
+    membership_columns = {"Symbol", "Member_From", "Member_To"}
+    if membership_columns.issubset(membership.columns):
+        membership_frame = membership.copy()
+        membership_frame["Symbol"] = membership_frame["Symbol"].astype(str).str.strip().str.upper()
+        membership_frame["_Member_From"] = membership_frame["Member_From"].map(_date)
+        membership_frame["_Member_To"] = membership_frame["Member_To"].map(_date)
+        for symbol, member_rows in membership_frame.groupby("Symbol", sort=False):
+            event_rows = primary.index[primary["Symbol"].eq(symbol)]
+            if len(event_rows) == 0:
+                continue
+            event_dates = primary.loc[event_rows, "_Event_Public_Date"]
+            active = np.zeros(len(event_rows), dtype=bool)
+            for member_from, member_to in zip(
+                member_rows["_Member_From"], member_rows["_Member_To"]
+            ):
+                active |= (
+                    event_dates.ge(member_from) & event_dates.le(member_to)
+                ).to_numpy()
+            primary.loc[event_rows, "_PIT_Membership_OK"] = active
+
+    cheap_ok = primary["_PIT_Membership_OK"] & primary["_Timely_Result"]
+    excluded = primary.loc[~cheap_ok].copy()
+    if not excluded.empty:
+        excluded["Event_Public_Date"] = excluded["_Event_Public_Date"]
+        excluded["Reason"] = np.where(
+            ~excluded["_PIT_Membership_OK"],
+            "PIT_MEMBERSHIP_NOT_ACTIVE",
+            "LATE_RESULT",
+        )
+        excluded["Exclusion_Stage"] = "EVENT"
+        excluded = excluded[exclusion_columns]
+    else:
+        excluded = pd.DataFrame(columns=exclusion_columns)
+
+    candidates = primary.loc[cheap_ok].drop(
+        columns=["_Event_Public_Date", "_Timely_Result", "_PIT_Membership_OK"],
+        errors="ignore",
+    )
+    return candidates.reset_index(drop=True), excluded.reset_index(drop=True)
+
+
+def build_quarterly_exit_event_calendar(
+    filings: pd.DataFrame,
+    symbols: Iterable[str],
+) -> pd.DataFrame:
+    """Build the original quarterly-result calendar used only for trade exits."""
+
+    output_columns = [
+        "Symbol",
+        "Fiscal_Period_End",
+        "Event_Public_Timestamp",
+        "Original_or_Revised",
+    ]
+    requested_symbols = {str(symbol).strip().upper() for symbol in symbols}
+    required = {
+        "Symbol",
+        "Fiscal_Period_End",
+        "Public_Timestamp",
+        "Original_or_Revised",
+        "Quarterly_or_Annual",
+    }
+    if filings.empty or not requested_symbols or not required.issubset(filings.columns):
+        return pd.DataFrame(columns=output_columns)
+
+    frame = filings.copy()
+    frame["Symbol"] = frame["Symbol"].astype(str).str.strip().str.upper()
+    frame["Fiscal_Period_End"] = frame["Fiscal_Period_End"].map(_date)
+    frame["_Event_Public_Timestamp"] = frame["Public_Timestamp"].map(_timestamp)
+    frame["_Event_Public_Date"] = frame["Public_Timestamp"].map(_public_date)
+    frame["Original_or_Revised"] = (
+        frame["Original_or_Revised"].fillna("").astype(str).str.upper().str.strip()
+    )
+    frame["Quarterly_or_Annual"] = (
+        frame["Quarterly_or_Annual"].fillna("").astype(str).str.upper().str.strip()
+    )
+    frame = frame.loc[
+        frame["Symbol"].isin(requested_symbols)
+        & frame["Original_or_Revised"].eq("ORIGINAL")
+        & frame["Quarterly_or_Annual"].eq("QUARTERLY")
+        & frame["_Event_Public_Date"].le(SOURCE_CUTOFF)
+        & frame["_Event_Public_Timestamp"].notna()
+        & frame["Fiscal_Period_End"].notna()
+    ].copy()
+    if frame.empty:
+        return pd.DataFrame(columns=output_columns)
+    frame = (
+        frame.sort_values(
+            ["Symbol", "Fiscal_Period_End", "_Event_Public_Timestamp"],
+            kind="stable",
+        )
+        .drop_duplicates(["Symbol", "Fiscal_Period_End"], keep="first")
+    )
+    frame["Original_or_Revised"] = "ORIGINAL"
+    return frame.rename(columns={"_Event_Public_Timestamp": "Event_Public_Timestamp"})[
+        output_columns
+    ].reset_index(drop=True)
 
 
 def is_timely_result(period_end: pd.Timestamp, public_date: pd.Timestamp, fiscal_quarter: str) -> bool:
@@ -378,9 +528,10 @@ def build_event_master(
     """Build event master, explicit exclusions, coverage evidence, and ignored filing audit."""
 
     first_public, ignored = select_first_public_filings(filings)
-    selected = select_reporting_basis(first_public, eps, actions)
+    basis_candidates, cheap_exclusions = partition_primary_candidates(first_public, membership)
+    selected = select_reporting_basis(basis_candidates, eps, actions)
     rows: list[dict[str, object]] = []
-    exclusions: list[dict[str, object]] = []
+    exclusions: list[dict[str, object]] = cheap_exclusions.to_dict("records")
     eps_frame = eps.copy()
     if not eps_frame.empty:
         eps_frame["Symbol"] = eps_frame["Symbol"].astype(str).str.upper().str.strip()

@@ -15,6 +15,7 @@ from build_e1_trades import (  # noqa: E402
     next_session_after,
     scheduled_exit_session,
 )
+from build_e1_events import build_quarterly_exit_event_calendar  # noqa: E402
 
 
 def test_canonical_sessions_accepts_schema_empty_market_input():
@@ -87,6 +88,35 @@ def test_next_quarterly_result_truncates_even_when_late_and_unusable():
     assert trade["Exit_Reason"] == "EXIT_NEXT_EARNINGS_EVENT"
     assert trade["Exit_Date"] == pd.Timestamp("2024-01-11")
     assert trade["Holding_Sessions"] == 7
+
+
+def test_exit_calendar_truncates_for_late_unscored_quarter_without_basis_or_sue():
+    stock = _prices([100.0] + [101.0] * 12 + [102.0] * 87)
+    index = stock[["Date", "Open", "High", "Low", "Close"]].assign(Open=100.0)
+    filings = pd.DataFrame(
+        [
+            {
+                "Symbol": "AAA",
+                "Fiscal_Period_End": "2023-12-31",
+                "Fiscal_Quarter": "Q4",
+                "Public_Timestamp": "2024-04-10 10:00:00+05:30",
+                "Original_or_Revised": "ORIGINAL",
+                "Quarterly_or_Annual": "QUARTERLY",
+            },
+        ]
+    )
+    exit_calendar = build_quarterly_exit_event_calendar(filings, {"AAA"})
+    event = _event("2024-03-01 10:00:00+05:30")
+    event["Event_Public_Date"] = pd.Timestamp("2024-03-01")
+
+    trade, reason = build_trade_for_event(
+        event, stock, index, exit_calendar
+    )
+
+    assert reason == ""
+    assert trade is not None
+    assert trade["Exit_Reason"] == "EXIT_NEXT_EARNINGS_EVENT"
+    assert trade["Exit_Date"] == pd.Timestamp("2024-04-11")
 
 
 def test_next_distinct_quarterly_result_ignores_same_event_and_revisions():

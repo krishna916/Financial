@@ -216,10 +216,42 @@ def test_formal_validator_enforces_frozen_price_requirement_set(
             pd.DataFrame(columns=["Event_ID", "Symbol", "Cohort", "Reason"]),
         ),
     )
+    analysis_calls = {
+        "temporal_summary": 0,
+        "leave_one_year_out": 0,
+        "top_five_robustness": 0,
+        "leave_one_symbol_out": 0,
+    }
+
+    def counted_analysis(name):
+        def calculate(*args, **kwargs):
+            analysis_calls[name] += 1
+            return pd.DataFrame()
+
+        return calculate
+
+    for name in analysis_calls:
+        monkeypatch.setattr(f"run_e1_validation.{name}", counted_analysis(name))
+    monkeypatch.setattr(
+        "run_e1_validation.write_analysis_outputs",
+        lambda *args, **kwargs: {
+            "e1_temporal_summary.csv": pd.DataFrame(),
+            "e1_leave_one_year_out.csv": pd.DataFrame(),
+            "e1_top_five_robustness.csv": pd.DataFrame(),
+            "e1_leave_one_symbol_out.csv": pd.DataFrame(),
+        },
+    )
+    monkeypatch.setattr("run_e1_validation._final_package_issues", lambda output_dir: [])
 
     status, _ = run_validation(input_dir, output_dir, membership_path=membership)
 
     assert status == expected_status
+    assert analysis_calls == {
+        "temporal_summary": 0,
+        "leave_one_year_out": 0,
+        "top_five_robustness": 0,
+        "leave_one_symbol_out": 0,
+    }
     integrity = pd.read_csv(output_dir / "e1_integrity_audit.csv")
     mismatch = integrity.loc[
         integrity["Violation"].eq("PRICE_REQUIREMENT_SET_MISMATCH")
@@ -332,9 +364,11 @@ def test_late_result_is_excluded_from_sue_and_trades():
     sue_result = build_sue_events(event_master, eps, pd.DataFrame())
     sue_events = sue_result[1]
     classified = sue_result[2]
-    event_id = event_master.loc[0, "Event_ID"]
+    event_id = event_exclusions.loc[
+        event_exclusions["Reason"].eq("LATE_RESULT"), "Event_ID"
+    ].iloc[0]
 
-    assert not bool(event_master.loc[0, "Primary_Event"])
+    assert event_master.empty
     assert "LATE_RESULT" in event_exclusions["Reason"].tolist()
     assert event_id not in set(sue_events["Event_ID"])
     assert event_id not in set(classified["Event_ID"])

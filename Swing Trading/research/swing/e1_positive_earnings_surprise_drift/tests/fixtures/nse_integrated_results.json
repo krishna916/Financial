@@ -1,0 +1,14 @@
+{
+  "data": [
+    {
+      "symbol": "AAA",
+      "periodEndDate": "30-Sep-2024",
+      "broadcastDate": "14-Nov-2024 18:00:00",
+      "consolidated": "Standalone",
+      "Type of Submission": "Original",
+      "xbrlFile": "https://nsearchives.nseindia.com/example-integrated.xml",
+      "id": "nse-aaa-integrated-20241114"
+    }
+  ],
+  "totalPages": 1
+}

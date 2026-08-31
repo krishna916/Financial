@@ -1,0 +1,27 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<xbrli:xbrl
+    xmlns:xbrli="http://www.xbrl.org/2003/instance"
+    xmlns:in-capmkt="http://www.icai.org/in-capmkt">
+  <xbrli:context id="c_q2_cons">
+    <xbrli:entity><xbrli:identifier scheme="nse">AAA</xbrli:identifier>
+      <xbrli:segment><in-capmkt:StatementBasisAxis>in-capmkt:ConsolidatedMember</in-capmkt:StatementBasisAxis></xbrli:segment>
+    </xbrli:entity>
+    <xbrli:period><xbrli:startDate>2024-04-01</xbrli:startDate><xbrli:endDate>2024-06-30</xbrli:endDate></xbrli:period>
+  </xbrli:context>
+  <xbrli:context id="c_ytd_cons">
+    <xbrli:entity><xbrli:identifier scheme="nse">AAA</xbrli:identifier>
+      <xbrli:segment><in-capmkt:StatementBasisAxis>in-capmkt:ConsolidatedMember</in-capmkt:StatementBasisAxis></xbrli:segment>
+    </xbrli:entity>
+    <xbrli:period><xbrli:startDate>2023-10-01</xbrli:startDate><xbrli:endDate>2024-06-30</xbrli:endDate></xbrli:period>
+  </xbrli:context>
+  <xbrli:context id="c_q2_standalone">
+    <xbrli:entity><xbrli:identifier scheme="nse">AAA</xbrli:identifier>
+      <xbrli:segment><in-capmkt:StatementBasisAxis>in-capmkt:StandaloneMember</in-capmkt:StatementBasisAxis></xbrli:segment>
+    </xbrli:entity>
+    <xbrli:period><xbrli:startDate>2024-04-01</xbrli:startDate><xbrli:endDate>2024-06-30</xbrli:endDate></xbrli:period>
+  </xbrli:context>
+  <in-capmkt:BasicEarningsLossPerShareFromContinuingOperations contextRef="c_q2_cons" decimals="2">12.34</in-capmkt:BasicEarningsLossPerShareFromContinuingOperations>
+  <in-capmkt:BasicEarningsLossPerShareFromContinuingOperations contextRef="c_ytd_cons" decimals="2">30.00</in-capmkt:BasicEarningsLossPerShareFromContinuingOperations>
+  <in-capmkt:BasicEarningsLossPerShareFromContinuingOperations contextRef="c_q2_standalone" decimals="2">10.00</in-capmkt:BasicEarningsLossPerShareFromContinuingOperations>
+  <in-capmkt:DilutedEarningsLossPerShareFromContinuingOperations contextRef="c_q2_cons" decimals="2">13.00</in-capmkt:DilutedEarningsLossPerShareFromContinuingOperations>
+</xbrli:xbrl>

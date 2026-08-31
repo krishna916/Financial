@@ -24,133 +24,88 @@ objective sideways range
 -> reversion toward pre-signal range midpoint
 ```
 
-RR1 is deliberately independent from the failed momentum/breakout architectures T1, V2, V3 and M1.
-
-RR1 is also not a rescue of R1. R1 tested:
-
-```text
-large one-day negative price shock
-+ low participation
--> short-horizon reversal
-```
-
-RR1 instead tests:
-
-```text
-pre-existing non-directional range
-+ failed downside range break
--> range reversion
-```
-
-RR1 has no primary low-volume, shock-size, momentum, relative-strength, sector or market-regime condition.
+RR1 is independent of T1/V2/V3/M1 momentum/breakout research. It is also not a rescue of R1: R1 tested large low-volume negative shocks, whereas RR1 tests a pre-existing range plus a failed downside break. RR1 has no primary shock-size, volume, momentum, RS, sector or market-regime condition.
 
 ---
 
 ## 2. Research discipline and stopping rule
 
-Use the established project discipline:
+Use:
 
 > **One hypothesis -> one frozen methodology -> one test -> one verdict.**
 
-Hard rules:
+Do not change after outcomes:
 
-- Do not optimize the 60-session range length after outcomes.
-- Do not optimize the efficiency-ratio threshold after outcomes.
-- Do not change the sweep/reclaim definition after outcomes.
-- Do not add RSI, stochastic, Bollinger Bands, SMA trend filters, RS, sector, volume, regime, breadth, candlestick-pattern, event/news or gap filters to rescue RR1.
-- Do not change the midpoint target, ATR stop buffer, 2R entry-economics rule, 15-session horizon or friction assumptions after outcomes.
-- Do not remove weak years, sectors or symbols after outcomes.
-- Diagnostics may explain the result but cannot become RR1 filters retrospectively.
+- 60-session range length;
+- `ER60 <= 0.25` range qualification;
+- sweep/reclaim definition;
+- midpoint target;
+- `0.25 × ATR14` stop buffer;
+- `Initial_RR >= 2.0` entry economics;
+- 15-session horizon;
+- friction assumptions;
+- sample/gate thresholds.
 
-RR1 is the **final planned strategy-family candidate** in the current research budget.
+Do not add RSI, stochastic, Bollinger Bands, SMA filters, momentum/RS, sector, volume, regime, breadth, candle-pattern, event/news or gap filters to rescue RR1. Do not remove bad years/sectors/symbols after results.
 
-After RR1 receives one formal status:
+Diagnostics may explain the outcome but cannot become RR1 filters retrospectively.
 
-```text
-PASS
-FAIL
-INSUFFICIENT_EVIDENCE
-INVALID_RESEARCH_RUN
-```
-
-stop inventing new strategy families and reassess the overall swing-trading program.
+RR1 is the **final planned strategy-family candidate**. After its formal `PASS`, `FAIL`, `INSUFFICIENT_EVIDENCE` or `INVALID_RESEARCH_RUN`, stop inventing new strategy families and reassess the swing program.
 
 ---
 
-## 3. Historical universe and signal window
+## 3. Universe, window and data
 
-### Primary universe
+### Universe
 
-Use **point-in-time Nifty 500 membership**.
-
-A valid RR1 signal must occur while the symbol is an active point-in-time Nifty 500 member on the signal date.
-
-Do not apply present-day membership retrospectively.
+Use **point-in-time Nifty 500 membership**. A signal is eligible only while the symbol is an active member on `Signal_Date`.
 
 ### Signal window
 
-Use:
-
 ```text
-Signal_Date: 2023-08-01 through 2026-08-25 inclusive
+2023-08-01 through 2026-08-25 inclusive
 ```
 
-This matches the established non-event swing-research window and keeps Candidate 3 comparable with R1/V3-era evidence.
+Historical data before the window may only seed required lookbacks. Signals near the end that lack enough forward sessions remain visible as incomplete observations.
 
-Historical OHLCV before the signal window may be used only to seed range, efficiency, ATR, liquidity and other required lookbacks.
+### Price/session convention
 
-Signals near the observation end that lack sufficient future sessions remain visible as incomplete accepted entries and are not silently dropped.
+Reuse existing project infrastructure for:
 
----
+- canonical market sessions;
+- PIT membership;
+- adjusted OHLCV;
+- provider identity/cache handling where already available.
 
-## 4. Price data and canonical sessions
-
-Use the existing project convention of consistently adjusted daily OHLCV:
+Use adjusted daily OHLCV consistently:
 
 ```text
 Yahoo Finance auto_adjust=True
 ```
 
-Do not mix adjusted and unadjusted fields inside one signal/trade lifecycle.
+Do not mix adjusted/unadjusted fields.
 
-Reuse existing:
-
-- canonical Nifty 500 market-session infrastructure;
-- point-in-time membership data;
-- historical provider-identity handling where already available;
-- adjusted OHLCV acquisition/cache paths.
-
-Do not build a generic security master, filing warehouse or unrelated data platform for RR1.
-
-For every observation actually used by RR1, data must be accurate enough to satisfy the frozen integrity audit.
-
-A stock need not have perfect historical coverage outside periods required to form or evaluate an RR1 observation.
+Do not build a generic historical-security master, filing warehouse, dashboard or unrelated research platform. Accuracy is mandatory for observations RR1 actually uses; universal historical-data perfection is not the objective.
 
 ---
 
-## 5. Required pre-signal history
+## 4. Exact pre-signal history
 
-For a candidate signal session `T`, use the canonical session calendar.
-
-RR1 requires valid adjusted stock bars for:
+For candidate signal session `T`, require valid adjusted stock bars on every canonical session:
 
 ```text
 T-61 through T
 ```
 
-where the offsets refer to canonical market sessions.
+This prevents a nominal 60-session range from silently spanning a longer period because the stock was missing bars.
 
-The full prior-history requirement is intentional because the range and directional-efficiency calculation must represent exactly the predeclared number of market sessions rather than silently lengthening across missing stock bars.
-
-If any required pre-signal OHLC bar is unavailable, the session cannot qualify.
-
-The prior 20 sessions used for liquidity must also be present and valid.
+If any required pre-signal OHLC bar is unavailable, that session cannot qualify.
 
 ---
 
-## 6. Objective 60-session range
+## 5. Objective 60-session range
 
-For signal session `T`, define the established pre-signal range from the **previous 60 complete canonical sessions only**, excluding the signal session:
+Using only the previous 60 complete sessions:
 
 ```text
 Range_Low[T]  = min(Low[T-60 ... T-1])
@@ -164,17 +119,13 @@ Require:
 Range_High > Range_Low
 ```
 
-The signal-day low/high/close must not influence the range boundaries against which that same signal is judged.
-
-The range midpoint is frozen at the signal close and is never recalculated during the trade.
+The signal session must not influence the boundaries used to judge itself. `Range_Mid` is frozen on the signal date and never recalculated during the trade.
 
 ---
 
-## 7. Directional-efficiency qualification
+## 6. Objective sideways qualification
 
-RR1 is intended to test reversion inside an objectively sideways structure, not countertrend buying in a directional decline.
-
-Define the 60-session directional-efficiency ratio using only information known before the signal session:
+Define the pre-signal directional-efficiency ratio:
 
 ```text
 ER60[T] =
@@ -185,26 +136,19 @@ sum(abs(Close[i] - Close[i-1])) for i = T-60 ... T-1
 
 The denominator therefore contains exactly 60 one-session absolute close changes ending at `T-1`.
 
-Require the denominator to be finite and positive.
-
-RR1 range qualification requires:
+Require a finite positive denominator and:
 
 ```text
 ER60[T] <= 0.25
 ```
 
-Interpretation:
-
-- values near `0` indicate substantial back-and-forth travel with little net directional progress;
-- values near `1` indicate highly directional travel.
-
-Do not tune `0.25` after results.
+Low ER means the stock travelled back and forth but made relatively little net directional progress. This is RR1's objective definition of a range and prevents the experiment from becoming generic countertrend buying in a directional decline.
 
 ---
 
-## 8. Liquidity eligibility
+## 7. Liquidity
 
-Require on the signal date:
+Require:
 
 ```text
 Prior20_Median_Traded_Value[T] >= ₹10 crore
@@ -216,113 +160,105 @@ where:
 Daily_Traded_Value = Close × Volume
 ```
 
-and the median uses only:
-
-```text
-T-20 ... T-1
-```
-
-The signal session is excluded from its own liquidity baseline.
-
-This matches the established Nifty 500 swing-research liquidity floor.
+and the median uses only `T-20 ... T-1`. The signal day is excluded from its own liquidity baseline.
 
 ---
 
-## 9. Primary lower-range sweep/reclaim signal
+## 8. Primary lower-range signal
 
-A session becomes a qualified RR1 lower-range signal when all are true:
+A session is a qualified lower RR1 signal only when all are true:
 
-1. `Signal_Date` is inside the frozen signal window.
-2. Symbol is an active point-in-time Nifty 500 member on `Signal_Date`.
-3. Required `T-61..T` adjusted OHLCV history exists.
-4. `Prior20_Median_Traded_Value >= ₹10 crore`.
+1. Signal date is inside the frozen window.
+2. Symbol is PIT Nifty 500 member on the signal date.
+3. Exact required `T-61..T` history exists.
+4. Prior-20 median traded value is at least ₹10 crore.
 5. `ER60 <= 0.25`.
-6. The signal-session Low trades strictly below the pre-signal range low:
+6. Signal low sweeps below the pre-signal range:
 
 ```text
 Low[T] < Range_Low[T]
 ```
 
-7. The signal-session Close finishes strictly back above the pre-signal range low:
+7. Signal close finishes back inside:
 
 ```text
 Close[T] > Range_Low[T]
 ```
 
-This is the defining failed-downside-auction pattern:
+There is no minimum sweep depth, wick/body rule, close-location requirement or signal-day volume requirement.
+
+This is the defining failed downside auction:
 
 ```text
 break below established support intraday
 + failure to remain below support by EOD
 ```
 
-No minimum sweep depth is imposed.
-
-No minimum candle-body, wick, close-location or signal-day volume condition is imposed.
-
 ---
 
-## 10. What RR1 deliberately does not require
+## 9. What RR1 deliberately does not require
 
-RR1 has no primary filter for:
+No primary:
 
-- RSI or another oversold oscillator;
-- SMA20/SMA50/SMA200 relationship;
-- moving-average slope;
+- RSI/oversold oscillator;
+- SMA20/SMA50/SMA200 relationship or slope;
 - stock relative strength;
 - sector strength;
-- market breadth;
-- market regime;
-- index trend;
+- breadth or market regime;
 - signal-day volume ratio;
-- large one-day negative return or shock score;
+- large one-day shock;
 - 52-week-high proximity;
 - named candlestick pattern;
 - next-day bullish confirmation;
-- positive/negative gap filter;
-- quarterly results/news interpretation;
-- fundamental quality beyond PIT Nifty 500 membership and liquidity.
+- standalone gap filter;
+- quarterly-result/news interpretation;
+- fundamental filter beyond PIT Nifty 500 + liquidity.
 
-These may be retained diagnostically only where already available cheaply and safely.
+Existing fields may be retained diagnostically only if cheap and safe.
 
 ---
 
-## 11. Mirror upper-range falsification cohort
+## 10. Mirror upper-range falsification cohort
 
-Create one predeclared mirror control using the same PIT universe, history, liquidity and `ER60 <= 0.25` range qualification.
+Construct one predeclared mirror control using the same PIT, exact-history, liquidity and `ER60 <= 0.25` qualification.
 
-An upper-range mirror signal requires:
+A qualified upper mirror signal requires:
 
 ```text
 High[T] > Range_High[T]
 Close[T] < Range_High[T]
 ```
 
-This represents:
+This is a failed upside auction. The mirror cohort is **not a short-trading strategy**; it is a falsification test of the range-reversion mechanism.
 
-```text
-break above established resistance intraday
-+ failure to remain above resistance by EOD
-```
-
-The mirror cohort is **not a short-trading strategy**. It exists only to falsify the proposed range-reversion mechanism.
-
-The expected directional relationship is:
+Expected directional relationship:
 
 ```text
 lower sweep/reclaim -> positive subsequent return
 upper sweep/rejection -> negative subsequent return
 ```
 
-Do not use the mirror cohort to create short trades, leverage or F&O logic.
+### Mirror lifecycle
+
+A qualified upper mirror signal receives one reference entry at the immediate next canonical-session Open.
+
+Cancel explicitly only for:
+
+- `MISSING_NEXT_SESSION`;
+- `MISSING_NEXT_SESSION_BAR`;
+- `SAME_SYMBOL_LOCKOUT` within the mirror cohort.
+
+After an upper mirror signal is accepted, no second upper mirror signal for that symbol is accepted until its scheduled `T+16 Open` lifecycle has passed, even if later diagnostics would imply an earlier move.
+
+If the `T+16` reference exit cannot be evaluated, the accepted mirror observation remains visible as incomplete rather than disappearing.
+
+Lower and upper lockouts are cohort-local; the mirror cohort does not suppress a genuine lower RR1 signal and vice versa.
 
 ---
 
-## 12. ATR14 and structural stop
+## 11. ATR14 and structural stop
 
-Use **Wilder ATR14**, matching the established project convention.
-
-True Range:
+Use **Wilder ATR14**.
 
 ```text
 TR[t] = max(
@@ -335,68 +271,53 @@ TR[t] = max(
 Initialization and recursion:
 
 ```text
-first valid ATR14 = mean(first 14 valid True Range observations)
-
-subsequent ATR14 =
-(previous_ATR14 × 13 + current_TR) / 14
+first valid ATR14 = mean(first 14 valid TR observations)
+subsequent ATR14 = (previous_ATR14 × 13 + current_TR) / 14
 ```
 
-On lower-range signal date `T`, freeze:
+Freeze on signal date:
 
 ```text
 Structural_Stop = Low[T] - 0.25 × ATR14_signal
 ```
 
-The signal low is the failed-auction extreme. A meaningful move below that extreme invalidates the practical reversion thesis.
+The signal low is the failed-auction extreme. A meaningful move beneath it invalidates the practical trade thesis.
 
-Do not use:
-
-- fixed-percentage stop;
-- entry-based ATR stop;
-- moving-average stop;
-- trailing stop;
-- breakeven stop;
-- post-entry stop widening.
+No percentage stop, entry-based ATR stop, MA stop, trailing stop, breakeven move or stop widening.
 
 ---
 
-## 13. Fixed practical target
+## 12. Fixed practical target
 
-For every qualified lower-range signal, freeze the target at the **pre-signal range midpoint**:
+Freeze:
 
 ```text
 Target = Range_Mid[T]
 ```
 
-The target does not move if the rolling 60-session range changes later.
-
-RR1 specifically tests practical reversion toward the midpoint, not a breakout to the opposite edge of the range.
+The target never moves with a later rolling range. RR1 tests reversion toward the midpoint, not a rally to the opposite boundary.
 
 ---
 
-## 14. Immediate next-session entry
+## 13. Immediate next-session long entry
 
-Each qualified lower-range signal receives exactly one automatic entry opportunity:
+Each qualified lower signal receives exactly one entry opportunity:
 
 ```text
 Entry = Open of the immediately following canonical market session
 ```
 
-No same-session close entry is assumed.
+No same-session entry is assumed.
 
-A qualified signal may still be cancelled before entry.
+A qualified signal is cancelled before entry when any applies:
 
-### Entry cancellation reasons
-
-Cancel with explicit accounting when any applies:
-
-- `MISSING_NEXT_SESSION`
-- `MISSING_NEXT_SESSION_BAR`
-- `SIGNAL_ALREADY_AT_OR_ABOVE_TARGET` when `Close[T] >= Target`
-- `OPEN_AT_OR_BELOW_STRUCTURAL_STOP` when `Entry_Open <= Structural_Stop`
-- `OPEN_AT_OR_ABOVE_TARGET` when `Entry_Open >= Target`
-- `INSUFFICIENT_REWARD_RISK` when the frozen target provides less than 2R from the actual entry open
-- `SAME_SYMBOL_LOCKOUT`
+- `MISSING_NEXT_SESSION`;
+- `MISSING_NEXT_SESSION_BAR`;
+- `SIGNAL_ALREADY_AT_OR_ABOVE_TARGET` if `Close[T] >= Target`;
+- `OPEN_AT_OR_BELOW_STRUCTURAL_STOP` if `Entry_Open <= Structural_Stop`;
+- `OPEN_AT_OR_ABOVE_TARGET` if `Entry_Open >= Target`;
+- `INSUFFICIENT_REWARD_RISK`;
+- `SAME_SYMBOL_LOCKOUT`.
 
 Define:
 
@@ -414,92 +335,55 @@ Reward > 0
 Initial_RR >= 2.0
 ```
 
-The 2R rule is part of the frozen practical architecture, not a post-hoc filter.
-
-There is no separate gap-up or gap-down filter beyond these economically necessary invalidation/target/RR rules.
+There is no separate gap rule beyond these frozen invalidation/target/RR checks.
 
 ---
 
-## 15. Same-symbol lifecycle lockout
+## 14. Lower-cohort same-symbol lockout
 
-RR1 must not repeatedly re-enter the same unresolved range episode.
-
-After one qualified lower-range signal is accepted for a symbol, no second lower-range RR1 entry may be accepted in that symbol until the original signal's scheduled 15-session lifecycle has fully passed.
-
-Define:
+After one lower signal is accepted, no second lower RR1 entry for that symbol is accepted until the original signal's scheduled lifecycle passes:
 
 ```text
-Signal session = T
-Entry session  = T+1
-Scheduled time exit = T+16 Open
+Signal = T
+Entry  = T+1 Open
+Scheduled lifecycle end = T+16 Open
 ```
 
-The position is therefore exposed across 15 complete holding sessions `T+1 ... T+15` unless the practical target or stop exits earlier.
+The position is exposed across 15 complete sessions `T+1 ... T+15` unless Lens B exits earlier.
 
-The lockout remains active until the scheduled `T+16` point even if the practical trade exits early.
+The lockout remains active until scheduled `T+16` even if Lens B stops or hits target early. Later qualified lower signals remain visible and are cancelled as `SAME_SYMBOL_LOCKOUT`.
 
-This avoids overweighting one range-break episode and prevents repeated entries from behaving like averaging down.
+This prevents clustered re-entries from behaving like averaging down or overweighting one range episode.
 
-Qualified signals during lockout remain visible and are cancelled as:
-
-```text
-SAME_SYMBOL_LOCKOUT
-```
-
-The mirror upper-range cohort uses its own same-symbol 15-session lifecycle lockout.
-
-Cross-stock overlap is retained at the signal-research stage.
+Cross-stock signals are retained; portfolio capacity comes later if RR1 passes.
 
 ---
 
-## 16. Lens A — raw fixed-horizon range-reversion effect
+## 15. Lens A — raw fixed-horizon reversion
 
-Lens A asks whether an actionable lower-range sweep/reclaim has positive subsequent return after realistic next-open execution, independent of stop/target path mechanics.
+Lens A asks whether the **actionable accepted lower cohort** has a positive effect independent of target/stop path mechanics.
 
-Use the same accepted lower-range `Entry_ID` population as Lens B.
-
-For every primary-complete accepted entry:
+Use exactly the same accepted lower `Entry_ID` population as Lens B.
 
 ```text
 Entry = T+1 Open
 Exit  = T+16 Open
 ```
 
-Thus the position is exposed across 15 complete market sessions.
-
-There is no stop or target in Lens A.
-
-Gross return:
+No stop/target in Lens A.
 
 ```text
 Gross_Return_15 = (Exit_Open - Entry_Open) / Entry_Open
-```
-
-Return profit factor:
-
-```text
 Return_PF = sum(positive returns) / abs(sum(negative returns))
 ```
 
-Lens A exists to separate:
-
-```text
-no underlying reversion effect
-```
-
-from:
-
-```text
-underlying effect exists but practical stop/target implementation is poor
-```
-
-Forward 3-, 5-, 10- and 20-session returns may be retained diagnostically, but cannot replace the primary 15-session lens after results are known.
+3/5/10/20-session forward returns may be diagnostics only; they cannot replace the frozen 15-session primary horizon.
 
 ---
 
-## 17. Mirror-control fixed-horizon outcome
+## 16. Mirror fixed-horizon outcome
 
-For accepted upper-range mirror signals, use the same next-open and 15-complete-session timing:
+For every accepted, complete upper mirror observation:
 
 ```text
 Entry_Reference = T+1 Open
@@ -507,392 +391,316 @@ Exit_Reference  = T+16 Open
 Mirror_Gross_Return_15 = (Exit_Reference - Entry_Reference) / Entry_Reference
 ```
 
-No short position is simulated.
-
-The mirror cohort tests only whether failed upper breaks are followed by weaker/negative subsequent returns as predicted by a range-reversion mechanism.
+No short position, stop or target is simulated.
 
 ---
 
-## 18. Lens B — practical midpoint-reversion trade
+## 17. Lens B — practical midpoint-reversion trade
 
-Lens B uses the same accepted lower-range `Entry_ID` set and the frozen:
+Lens B uses the same accepted lower `Entry_ID` set with the frozen stop, midpoint target and maximum 15-session lifecycle.
 
-- next-session open entry;
-- structural stop;
-- pre-signal midpoint target;
-- maximum 15-session lifecycle.
+### Open precedence
 
-For each holding session, apply execution conservatively.
-
-### Session-open precedence
-
-For any holding session after entry:
+For each holding session after entry:
 
 1. If `Open <= Structural_Stop`, exit at that Open.
 2. Else if `Open >= Target`, exit at that Open.
 3. Otherwise evaluate intraday stop/target touches.
 
-The entry session itself has already passed the pre-entry `Entry_Open` stop/target checks.
+The entry Open has already passed pre-entry stop/target checks.
 
 ### Intraday precedence
 
-If both are touched inside one daily OHLC bar:
+If the same daily bar satisfies both:
 
 ```text
 Low <= Structural_Stop
-and
 High >= Target
 ```
 
-ordering is unknowable from EOD data, so score the outcome conservatively as **stop first**.
+EOD data cannot determine ordering, so score **stop first** conservatively.
 
 Otherwise:
 
-- if only the stop is touched, exit at `Structural_Stop`;
-- if only the target is touched, exit at `Target`;
-- otherwise remain open.
+- only stop touched -> exit at `Structural_Stop`;
+- only target touched -> exit at `Target`;
+- neither -> remain open.
 
 ### Time exit
 
-If neither stop nor target has occurred through the end of `T+15`, exit at:
+If neither occurs through the end of `T+15`:
 
 ```text
-T+16 Open
+Exit = T+16 Open
 ```
 
-No trailing stop, breakeven move, partial profit, opportunity-cost exit or pyramiding is modeled in RR1 signal-level validation.
-
-Gross practical R:
+No trailing stop, breakeven move, partial profit, opportunity-cost exit or pyramiding is modeled.
 
 ```text
 Gross_R = (Exit_Price - Entry_Open) / Initial_Risk
 ```
 
-Gap losses may be worse than `-1R`.
+Gap losses may exceed `-1R`.
 
 ---
 
-## 19. Friction model
+## 18. Friction
 
-Use the established frozen round-trip friction assumptions:
+Frozen round-trip assumptions:
 
 ```text
-Base friction   = 0.40% of entry value
-Stress friction = 0.60% of entry value
-Severe friction = 0.80% of entry value
+Base   = 0.40% of entry value
+Stress = 0.60%
+Severe = 0.80%
 ```
 
-For fixed-horizon returns:
+Fixed-horizon net return:
 
 ```text
 Net_Return_c = Gross_Return - c
 ```
 
-For practical R:
+Practical net R:
 
 ```text
-Net_R_c =
-((Exit_Price - Entry_Open) - c × Entry_Open)
-/ Initial_Risk
+Net_R_c = ((Exit_Price - Entry_Open) - c × Entry_Open) / Initial_Risk
 ```
 
-Use:
-
-- 0.40% base for primary gates;
-- 0.60% stress for mandatory friction robustness;
-- 0.80% severe diagnostically only.
-
-Do not tune friction from outcomes.
+Base creates primary gates, stress creates mandatory robustness gates, severe is diagnostic only.
 
 ---
 
-## 20. Nifty 500 excess-return comparison
+## 19. Nifty 500 excess-return comparison
 
-RR1 must beat passive market exposure over comparable holding windows on average.
+Compare stock outcomes with Nifty 500 over equivalent dates.
 
-Use the frozen Nifty 500 benchmark series and canonical sessions.
-
-### Lens A excess
-
-For each completed lower-range Lens A trade:
+### Lens A
 
 ```text
-Benchmark_Return =
-Nifty500_Open[T+16] / Nifty500_Open[T+1] - 1
-
+Benchmark_Return = Nifty500_Open[T+16] / Nifty500_Open[T+1] - 1
 Base_Excess_Return = Base_Net_Stock_Return - Benchmark_Return
 ```
 
-### Practical-lens excess
+### Lens B
 
-For each completed practical trade, benchmark from the stock entry session Open to the canonical-session Open corresponding to the trade's actual exit date.
+Benchmark from the stock `Entry_Date` Open to the Nifty 500 Open on the stock's actual exit date. For an intraday stock exit, this Open-to-Open benchmark is the frozen reproducible opportunity-cost approximation.
 
-If an intraday stop/target exits on date `D`, use Nifty 500 Open-to-Open return from `Entry_Date` to `D` as a conservative reproducible opportunity-cost approximation.
-
-If benchmark evidence required for an accepted completed trade is missing, the final research package fails integrity rather than silently dropping the trade.
+Missing benchmark evidence for a completed accepted lower trade is an integrity failure; do not silently drop the trade.
 
 ---
 
-## 21. Accounting funnel
+## 20. Accounting and paired samples
 
-Track every stage explicitly.
-
-At minimum:
+At minimum track:
 
 ```text
-PIT sessions with sufficient prehistory
+PIT sessions with exact prehistory
 -> liquidity eligible
--> ER60 <= 0.25 objective-range sessions
--> lower sweep/reclaim signals
--> upper mirror signals
+-> ER60 <= 0.25 range sessions
+-> lower qualified signals
+-> upper qualified signals
 ```
 
-For lower RR1:
-
-```text
-Qualified lower signals
--> accepted entries + explicit entry cancellations
--> completed paired outcomes + incomplete accepted entries
-```
-
-Require mechanically:
+Lower accounting:
 
 ```text
 Qualified_Lower_Signals
 = Accepted_Lower_Entries + Lower_Entry_Cancellations
+
+Accepted_Lower_Entries
+= Completed_Paired_Lower + Incomplete_Accepted_Lower
 ```
 
-Every accepted entry and cancellation must reference exactly one qualified signal.
+Upper mirror accounting:
 
-No signal may silently disappear.
+```text
+Qualified_Upper_Signals
+= Accepted_Upper_References + Upper_Cancellations
 
-Mirror-cohort accounting must likewise reconcile accepted/cancelled/incomplete/completed observations.
+Accepted_Upper_References
+= Completed_Upper + Incomplete_Upper
+```
 
----
+No observation may silently disappear.
 
-## 22. Paired completed-sample rule
-
-Lens A and Lens B must use the same completed lower-range `Entry_ID` set.
-
-Require:
+Lens A and Lens B must use the same completed lower IDs:
 
 ```text
 Completed_LensA_Entry_IDs == Completed_LensB_Entry_IDs
 ```
 
-An accepted lower entry is primary-complete only when:
-
-- the full scheduled `T+16` fixed-horizon bar exists for Lens A; and
-- Lens B can be evaluated consistently through stop/target/time-exit logic; and
-- required benchmark observations exist.
-
-A practical trade that exits early but lacks enough future data for Lens A remains visible as incomplete and is excluded from the primary paired sample.
-
-This prevents sample-composition differences from manufacturing apparent differences between the raw and practical lenses.
+A lower accepted entry is primary-complete only when Lens A, Lens B and required benchmark evidence can all be evaluated consistently. An early practical exit does not permit dropping the later fixed-horizon Lens A requirement.
 
 ---
 
-## 23. Point-in-time and formula integrity audit
+## 21. Integrity audit
 
-The final run must independently verify core evidence rather than trust convenience booleans.
-
-Use deterministic numeric tolerance:
+Use independent recomputation, with deterministic numeric tolerance where appropriate:
 
 ```text
 np.isclose(observed, recomputed, rtol=1e-9, atol=1e-12)
 ```
 
-unless exact integer/date equality is appropriate.
+For every accepted lower trade verify at minimum:
 
-For every accepted lower-range entry, independently verify at minimum:
+1. signal is inside frozen window;
+2. PIT Nifty 500 membership on signal date;
+3. exact `T-61..T` bars exist;
+4. range uses only `T-60..T-1`;
+5. range values recompute exactly/tolerantly;
+6. ER60 formula and `ER60 <= 0.25`;
+7. prior-20 median traded value and threshold;
+8. `Low[T] < Range_Low` and `Close[T] > Range_Low`;
+9. ATR14 and structural stop recompute;
+10. immediate next canonical-session entry;
+11. accepted trade has `Close[T] < Target`;
+12. `Structural_Stop < Entry_Open < Target`;
+13. `Initial_RR >= 2.0`;
+14. lower same-symbol lockout respected;
+15. Lens A/Lens B completed IDs match;
+16. scheduled `T+16` timing is correct;
+17. benchmark observations/dates are valid;
+18. practical stop/target precedence is reproducible.
 
-1. `Signal_Date < Entry_Date`.
-2. Signal is inside the frozen window.
-3. Symbol is PIT Nifty 500 member on the signal date.
-4. Entry date is the immediate next canonical market session.
-5. Exact required `T-61..T` adjusted bars exist.
-6. `Range_Low`, `Range_High`, `Range_Mid` use only `T-60..T-1`.
-7. Persisted range values match independent recomputation.
-8. ER60 uses exactly the frozen pre-signal formula.
-9. `ER60 <= 0.25`.
-10. Prior-20 median traded value matches recomputation and is >= ₹10 crore.
-11. `Low[T] < Range_Low`.
-12. `Close[T] > Range_Low`.
-13. ATR14 and structural stop match the frozen formulas.
-14. Accepted entry has `Signal_Close < Target`.
-15. Accepted entry has `Structural_Stop < Entry_Open < Target`.
-16. Accepted entry has `Initial_RR >= 2.0`.
-17. Same-symbol lockout is respected.
-18. Lens A/Lens B completed Entry_ID sets match.
-19. Scheduled `T+16` timing is correct.
-20. Benchmark dates/opens required for excess-return metrics are valid.
-21. Practical exit precedence is reproducible from persisted OHLC evidence.
+For upper mirror observations likewise verify PIT/history/range/ER/liquidity, `High[T] > Range_High`, `Close[T] < Range_High`, immediate-next-open timing, mirror lockout and `T+16` timing.
 
-The mirror cohort must similarly verify PIT, range, ER, liquidity, upper sweep/rejection and fixed-horizon timing.
-
-If any mandatory integrity invariant fails:
+Any mandatory integrity failure produces:
 
 ```text
-FINAL_STATUS = INVALID_RESEARCH_RUN
+INVALID_RESEARCH_RUN
 ```
 
-Profitability gates must not be interpreted from an invalid run.
+and profitability interpretation stops.
 
 ---
 
-## 24. Diagnostics retained but forbidden as rescue filters
+## 22. Diagnostics only
 
-Retain where cheap and already available:
+Retain where practical:
 
-### Range/signal diagnostics
-
-- range width as percentage of midpoint;
-- sweep depth below `Range_Low` in percentage and ATR units;
-- signal close location inside the 60-session range;
-- signal-day return;
-- signal-day volume ratio;
-- signal-day true range;
-- `ER60` value;
+- range width %;
+- sweep depth % and ATR units;
+- signal close location in range;
+- signal-day return/volume ratio/true range;
+- ER60;
 - signal-close to next-open gap;
-- initial stop width;
-- initial R:R.
-
-### Context diagnostics
-
-- SMA20/SMA50/SMA200 relationship;
-- stock RS percentile where existing infrastructure supports it safely;
-- market regime where already available;
-- sector mapping where already available;
-- Nifty 500 return/volatility;
-- calendar year.
-
-### Path diagnostics
-
-- target-hit rate;
-- stop-hit rate;
-- time-exit rate;
-- time to target;
-- time to stop;
+- stop width and initial R:R;
+- SMA/RS/regime/sector context where existing data already supports it;
+- target/stop/time-exit rates;
+- time to target/stop;
 - MFE/MAE;
 - 3/5/10/15/20-session forward returns;
-- gap-stop frequency;
-- same-day stop-and-target ambiguity count.
+- same-day stop+target ambiguity count;
+- calendar year.
 
-These are explanatory only.
-
-No diagnostic subgroup may be promoted into RR1 after outcomes.
+None can become a post-hoc RR1 filter.
 
 ---
 
-## 25. Bootstrap reporting
+## 23. Bootstrap reporting
 
-Use deterministic bootstrap reporting for uncertainty around key averages:
+Use:
 
 ```text
-Bootstrap resamples = 10,000
-RNG seed            = 20260831
-Confidence interval = 95%
+resamples = 10,000
+seed      = 20260831
+CI        = 95%
 ```
 
-Report bootstrap confidence intervals for at least:
+Report CIs for at least:
 
-- lower-cohort gross 15-session mean return;
-- lower-cohort base-net 15-session mean return;
+- lower gross 15-session mean return;
+- lower base-net 15-session mean return;
 - base practical mean R;
 - base practical mean excess return;
-- lower minus upper mirror difference in gross 15-session mean return.
+- lower-minus-upper gross 15-session mean-return difference.
 
-Bootstrap intervals are robustness evidence, not an independent p-value gate.
+Bootstrap evidence is diagnostic robustness, not an independent p-value gate.
 
 ---
 
-## 26. Temporal robustness
+## 24. Temporal robustness
 
-Use the same fixed calendar split as R1:
+Frozen split:
 
 ```text
 FIRST:  2023-08-01 through 2025-02-11 inclusive
 SECOND: 2025-02-12 through 2026-08-25 inclusive
 ```
 
-For completed paired lower-range trades in each half, compute at minimum:
+For each half report:
 
+- completed paired lower count;
 - base practical mean R;
-- base practical R-profit factor;
+- base practical RPF;
 - base practical mean excess return;
-- fixed-horizon base-net mean return.
+- Lens A base-net mean return.
 
 Do not move the split after results.
 
 ---
 
-## 27. Outlier and concentration robustness
+## 25. Outlier/concentration robustness
 
 ### Top-five winner removal
 
-Rank completed lower-range practical trades by `Gross_R` and remove the five largest winners.
-
-Recompute base practical metrics on the remaining sample.
+Remove the five completed lower practical trades with largest `Gross_R`, then recompute base practical metrics.
 
 ### Leave-one-year-out
 
-For each calendar year represented by completed lower-range trades, remove all trades whose `Signal_Date` falls in that year and recompute base practical metrics.
-
-The partial 2023 and 2026 windows are retained as their actual calendar-year cohorts; do not merge or remove them merely because they are partial.
+For every calendar year represented, remove all completed lower trades with a signal in that year and recompute. Keep partial 2023 and 2026 as their actual cohorts.
 
 ### Leave-one-symbol-out
 
-For each symbol represented in the completed paired sample, remove all completed trades for that symbol and recompute base practical metrics.
+For every represented symbol, remove all its completed lower trades and recompute.
 
-These robustness tests are mandatory PASS gates as defined below.
+These are mandatory gates below.
 
 ---
 
-## 28. Sample sufficiency
+## 26. Sample sufficiency
 
-A valid RR1 run requires at least:
+Require at least:
 
 ```text
-Completed paired lower-range trades >= 300
-FIRST completed paired lower trades  >= 100
-SECOND completed paired lower trades >= 100
-Completed upper mirror outcomes      >= 100
+Completed paired lower trades >= 300
+FIRST completed paired lower  >= 100
+SECOND completed paired lower >= 100
+Completed upper mirror        >= 100
 ```
 
-If any of these minimums are not met and the run is otherwise valid:
+If the run is valid but any minimum is missed:
 
 ```text
 FINAL_STATUS = INSUFFICIENT_EVIDENCE
 ```
 
-Do not lower thresholds/history requirements or extend the experiment merely to manufacture sample size.
+Do not lower rules or extend the experiment merely to hit sample targets.
 
 ---
 
-## 29. Precommitted validation gates
+## 27. Precommitted PASS gates
 
-RR1 receives `PASS` only if every mandatory gate below passes.
+RR1 passes only if **all** mandatory gates pass.
 
 ### A. Research validity
 
 ```text
-PIT/integrity violations       = 0
-Accounting invariants          = PASS
-Lens A/Lens B completed IDs    = identical
-Required evidence artifacts    = complete
+PIT/integrity violations    = 0
+Accounting invariants       = PASS
+Lens A/Lens B completed IDs = identical
+Required evidence           = complete
 ```
 
-Any failure produces `INVALID_RESEARCH_RUN`.
+Failure -> `INVALID_RESEARCH_RUN`.
 
 ### B. Sample sufficiency
 
-All minimums in Section 28 must pass.
+All Section 26 minimums must pass.
 
-Otherwise status is `INSUFFICIENT_EVIDENCE`.
+Failure -> `INSUFFICIENT_EVIDENCE`.
 
-### C. Raw lower-range reversion effect
-
-Using Lens A and 0.40% base friction:
+### C. Raw lower reversion — Lens A, 0.40% base friction
 
 ```text
 Base_Net_Mean_Return > 0
@@ -900,9 +708,7 @@ Base_Net_Return_PF > 1.00
 Mean_Base_Excess_Return > 0
 ```
 
-### D. Practical trading expectancy
-
-Using Lens B and 0.40% base friction:
+### D. Practical expectancy — Lens B, 0.40% base friction
 
 ```text
 Base_Practical_Mean_R >= +0.15R
@@ -910,35 +716,27 @@ Base_Practical_R_PF >= 1.20
 Mean_Base_Practical_Excess_Return > 0
 ```
 
-Median practical R and win rate are reported but are **diagnostic, not hard gates**. A 2R-minimum architecture can legitimately have positive expectancy with a sub-50% win rate, so a median-R gate would impose an unjustified high-win-rate requirement.
+Median practical R and win rate are **diagnostics, not hard gates**. Because entries require at least 2R to target, a profitable strategy can legitimately win fewer than half its trades; a positive-median gate would impose an unjustified high-win-rate requirement.
 
-### E. Stress-friction robustness
-
-At 0.60% round-trip friction:
+### E. Stress friction — 0.60%
 
 ```text
 Stress_Practical_Mean_R > 0
 Stress_Practical_R_PF > 1.00
 ```
 
-The 0.80% severe scenario is diagnostic only.
+0.80% severe remains diagnostic.
 
-### F. Mirror falsification
-
-Using gross 15-session fixed-horizon returns:
+### F. Mirror falsification — gross fixed-horizon returns
 
 ```text
 Mean_Return_LOWER > Mean_Return_UPPER
 Mean_Return_UPPER < 0
 ```
 
-Because the lower cohort must already pass positive net-return gates, the first condition tests separation while the second tests the predicted opposite directional behavior of failed upper breaks.
+If failed upper breaks do not have negative subsequent mean return, the proposed symmetric range-reversion mechanism fails even if lower trades happen to be profitable.
 
-If the upper mirror cohort is not negative, the proposed symmetric range-reversion mechanism fails even if lower trades happen to be profitable.
-
-### G. Temporal robustness
-
-Both FIRST and SECOND halves must satisfy:
+### G. Temporal robustness — both halves
 
 ```text
 Base_Practical_Mean_R > 0
@@ -946,243 +744,163 @@ Base_Practical_R_PF > 1.00
 Mean_Base_Practical_Excess_Return > 0
 ```
 
-### H. Top-five-winner robustness
-
-After removing the five largest gross-R winners:
+### H. Top-five removal
 
 ```text
 Base_Practical_Mean_R > 0
 Base_Practical_R_PF > 1.00
 ```
 
-### I. Leave-one-year-out robustness
-
-Every leave-one-year-out sample must retain:
+### I. Every leave-one-year-out sample
 
 ```text
 Base_Practical_Mean_R > 0
 Base_Practical_R_PF > 1.00
 ```
 
-### J. Leave-one-symbol-out robustness
-
-Every leave-one-symbol-out sample must retain:
+### J. Every leave-one-symbol-out sample
 
 ```text
 Base_Practical_Mean_R > 0
 Base_Practical_R_PF > 1.00
 ```
 
-No regime, sector, range-width, sweep-depth, volume, gap, ER bucket or other diagnostic creates an extra post-hoc gate.
+No diagnostic subgroup creates another post-hoc gate.
 
 ---
 
-## 30. Final status hierarchy
+## 28. Formal status precedence
 
-Assign exactly one status using this precedence.
+Assign exactly one status:
 
-### `INVALID_RESEARCH_RUN`
+1. Integrity/accounting/evidence failure -> `INVALID_RESEARCH_RUN`.
+2. Valid run but any frozen sample minimum missed -> `INSUFFICIENT_EVIDENCE`.
+3. Valid + sufficient + every mandatory strategy gate passes -> `PASS`.
+4. Otherwise -> `FAIL`.
 
-Use when any mandatory research-integrity condition fails.
+`PASS` means RR1 may proceed toward portfolio-constrained and forward validation, not normal-capital deployment.
 
-Profitability interpretation stops.
-
-### `INSUFFICIENT_EVIDENCE`
-
-Use when the run is valid but any frozen minimum sample requirement is unmet.
-
-Observed economics may be described, but the strategy cannot receive PASS or FAIL.
-
-### `PASS`
-
-Use only when the run is valid, sample sufficiency passes, and **all** mandatory economic, practical, stress, mirror, temporal and robustness gates pass.
-
-PASS means:
-
-> RR1 has enough historical signal-level evidence to proceed toward portfolio-constrained and forward validation.
-
-It does not mean ready for normal-capital live deployment.
-
-### `FAIL`
-
-Use when the run is valid and sufficiently sampled but one or more mandatory strategy gates fail.
-
-Do not rescue a FAIL with post-result filters or parameter changes.
+Never rescue `FAIL` by changing RR1 from its diagnostics.
 
 ---
 
-## 31. Cross-stock overlap and future portfolio work
+## 29. Cross-stock overlap / future portfolio stage
 
-Do not suppress valid cross-stock RR1 entries merely because other symbols already have active signal-level trades.
+Do not suppress valid lower signals because other stocks already have signal-level RR1 trades.
 
-RR1 first tests individual-signal edge.
+Report:
 
-Report at minimum:
-
-- total accepted entries;
-- maximum simultaneous RR1 trades;
-- average simultaneous RR1 trades;
+- accepted entries;
+- maximum/average simultaneous trades;
 - maximum same-day entries;
-- percentage of accepted entries overlapping another RR1 trade;
-- broad sector concentration where mapping already exists;
-- rough implied capital requirement under eventual 1%-risk-per-trade sizing.
+- overlap percentage;
+- sector concentration where mapping already exists;
+- rough capital requirement under eventual ~1%-risk-per-trade sizing.
 
-If RR1 passes, portfolio-capacity/ranking logic belongs to the later 3–5-position portfolio simulation.
-
-Do not invent ranking rules inside RR1.
+If RR1 passes, 3–5-position capacity/ranking belongs to later portfolio simulation. Do not invent ranking rules in RR1.
 
 ---
 
-## 32. Required final reporting
+## 30. Required final report
 
-The final RR1 evidence package/report must state at minimum:
+The evidence package must include at minimum:
 
-- frozen hypothesis and methodology;
-- PIT universe and signal window;
-- usable data coverage;
+- frozen hypothesis/rules;
+- PIT universe/window/data coverage;
 - objective-range session count;
-- lower sweep/reclaim count;
-- upper mirror count;
-- qualified/accepted/cancelled/completed/incomplete lower accounting;
-- cancellation reasons;
-- mirror accounting;
-- Lens A gross/base/stress/severe metrics;
-- Lens B gross/base/stress/severe practical R metrics;
-- benchmark excess metrics;
+- lower and upper signal counts;
+- all accepted/cancelled/completed/incomplete accounting and reasons;
+- Lens A gross/base/stress/severe results;
+- Lens B gross/base/stress/severe R results;
+- benchmark excess;
 - target/stop/time-exit diagnostics;
-- temporal-half results;
-- calendar-year diagnostics;
-- top-five-winner robustness;
-- leave-one-year-out robustness;
-- leave-one-symbol-out robustness;
-- mirror falsification result;
+- mirror result;
+- temporal halves and calendar-year diagnostics;
+- top-five removal;
+- leave-one-year-out;
+- leave-one-symbol-out;
 - bootstrap intervals;
 - overlap/capacity diagnostics;
-- PIT/formula integrity audit;
-- every precommitted gate with PASS/FAIL;
-- exactly one final formal status.
+- integrity audit;
+- every mandatory gate;
+- exactly one formal status.
 
-Clearly distinguish mandatory gates from diagnostics.
-
----
-
-## 33. Interpretation discipline after results
-
-Allowed conclusions include:
-
-- `RR1 PASS: proceed to portfolio-constrained/forward validation.`
-- `RR1 FAIL: lower-range reversion did not survive practical execution/costs.`
-- `RR1 FAIL: lower signals were profitable but the mirror falsification contradicted the range-reversion mechanism.`
-- `RR1 FAIL: the effect depended on a few winners, one year or one symbol.`
-- `RR1 INSUFFICIENT_EVIDENCE: frozen sample minimums were not met.`
-- `RR1 INVALID_RESEARCH_RUN: integrity/accounting failed; profitability cannot be interpreted.`
-
-Prohibited rescue examples:
-
-- changing `ER60 <= 0.25` to the best-performing ER bucket;
-- changing 60 sessions to 40/90/120 because another lookback looked better;
-- adding RSI because oversold signals worked better;
-- requiring high/low volume because one bucket outperformed;
-- excluding HOSTILE markets or weak sectors after seeing results;
-- changing midpoint target to upper range boundary;
-- changing 15 sessions because another forward horizon looked better;
-- changing the `0.25 ATR` stop buffer;
-- lowering the 2R requirement;
-- removing poor years or symbols.
-
-RR1 remains frozen regardless of outcome.
+Clearly separate gates from diagnostics.
 
 ---
 
-## 34. Minimal infrastructure principle
+## 31. Prohibited post-result rescue
 
-The north-star implementation question is:
+Do not after outcomes:
 
-> **Does this directly help validate RR1?**
+- change `ER60 <= 0.25`;
+- change 60 sessions to a prettier lookback;
+- add RSI/volume/trend/RS/regime/sector filters;
+- change midpoint target to the upper boundary;
+- change `0.25 × ATR14` stop buffer;
+- lower the 2R requirement;
+- switch from 15 sessions to a prettier horizon;
+- exclude weak years/sectors/symbols;
+- use gap buckets or sweep-depth buckets as new rules.
 
-RR1 requires only enough infrastructure to:
-
-- construct the PIT Nifty 500 observation set;
-- obtain accurate adjusted OHLCV for relevant observations;
-- use canonical sessions;
-- compute the frozen range/ER/liquidity/ATR formulas;
-- simulate the frozen entry/exit mechanics;
-- benchmark against Nifty 500;
-- audit integrity/accounting;
-- calculate the precommitted gates.
-
-Do not build:
-
-- a generic historical-security master;
-- a financial-statement warehouse;
-- a dashboard;
-- a general-purpose research framework;
-- a news/event archive;
-- unrelated ticker cleanup for securities that never materially affect RR1 observations.
-
-Accuracy is mandatory for observations RR1 actually uses. Universal historical-data perfection is not the goal.
+Interesting diagnostics do not create Candidate 4. RR1 is the final family test.
 
 ---
 
-## 35. Core frozen specification summary
+## 32. Core frozen summary
 
 ```text
 Universe:
     point-in-time Nifty 500
 
 Signal window:
-    2023-08-01 through 2026-08-25
+    2023-08-01 .. 2026-08-25
 
-Required prehistory:
-    exact canonical-session bars T-61..T
+Prehistory:
+    exact canonical bars T-61..T
 
-Objective range:
-    Range_Low  = min Low over T-60..T-1
-    Range_High = max High over T-60..T-1
-    Range_Mid  = midpoint of those boundaries
+Range:
+    Low/High over T-60..T-1
+    fixed midpoint target
 
-Directional efficiency:
-    ER60 = abs net close movement / sum absolute close changes
-    require ER60 <= 0.25
+Sideways qualification:
+    ER60 <= 0.25
 
 Liquidity:
     prior-20 median traded value >= ₹10 crore
 
-Lower RR1 signal:
+Lower signal:
     Low[T] < Range_Low
     Close[T] > Range_Low
 
-Upper mirror signal:
+Upper mirror:
     High[T] > Range_High
     Close[T] < Range_High
 
 Entry:
     immediate next canonical-session Open
 
-Structural stop:
+Stop:
     Signal_Low - 0.25 × ATR14_signal
 
-Target:
-    frozen pre-signal Range_Mid
-
-Practical entry economics:
-    Structural_Stop < Entry_Open < Target
+Entry economics:
+    Stop < Entry < Target
     Initial_RR >= 2.0
 
-Same-symbol rule:
-    one accepted lower signal per scheduled 15-session lifecycle
+Same-symbol:
+    cohort-local lockout through scheduled T+16
 
 Lens A:
-    T+1 Open -> T+16 Open fixed-horizon return
+    T+1 Open -> T+16 Open
 
 Lens B:
-    stop / midpoint target / T+16 time exit
-    conservative stop-first ambiguity handling
+    structural stop / midpoint target / T+16 time exit
+    stop-first if same OHLC bar touches both
 
 Friction:
-    base 0.40%
-    stress 0.60%
-    severe 0.80% diagnostic
+    0.40% base
+    0.60% stress
+    0.80% severe diagnostic
 
 Sample minimums:
     lower paired >= 300
@@ -1190,24 +908,13 @@ Sample minimums:
     SECOND lower >= 100
     upper mirror >= 100
 
-Primary practical gate:
+Primary practical hurdle:
     base mean >= +0.15R
     base RPF >= 1.20
     mean practical excess > 0
-
-No primary:
-    RSI
-    SMA/trend filter
-    momentum/RS
-    sector
-    regime/breadth
-    volume filter
-    news/event filter
-    candle taxonomy
-    parameter rescue
 ```
 
-RR1 therefore asks exactly one final Candidate-3 question:
+RR1 asks exactly one final Candidate-3 question:
 
 > **Does an objectively range-bound liquid Indian stock that sweeps below its established range and closes back inside offer a robust, practically exploitable next-session long reversion toward the pre-signal range midpoint after realistic friction?**
 

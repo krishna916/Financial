@@ -110,11 +110,21 @@ def test_synthetic_rr1_run_preserves_accounting_and_incomplete_pairs(tmp_path):
     assert final_status == "INSUFFICIENT_EVIDENCE"
 
 
-def test_atomic_writer_replaces_existing_output_set(tmp_path):
+def test_atomic_writer_replaces_existing_output_set(tmp_path, monkeypatch):
     output_dir = tmp_path / "output"
     output_dir.mkdir()
     (output_dir / "stale.csv").write_text("stale", encoding="utf-8")
 
+    import run_rr1_validation
+
+    original_rename = run_rr1_validation.os.rename
+
+    def deny_directory_rename(source, target):
+        if str(source).startswith(str(tmp_path)):
+            raise PermissionError("directory promotion denied")
+        return original_rename(source, target)
+
+    monkeypatch.setattr(run_rr1_validation.os, "rename", deny_directory_rename)
     _write_atomic(output_dir, {"fresh.csv": pd.DataFrame({"Value": [1]})})
 
     assert (output_dir / "fresh.csv").exists()

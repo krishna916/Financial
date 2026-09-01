@@ -234,12 +234,26 @@ def _write_atomic(output_dir: Path, artifacts: dict[str, object]) -> None:
                 artifact.to_csv(target, index=False)
             else:
                 target.write_text(str(artifact), encoding="utf-8")
-        if output_dir.exists():
-            shutil.rmtree(output_dir)
-        # Windows does not reliably replace an existing directory with
-        # ``os.replace``.  The complete staged tree is promoted only after
-        # the old evidence directory has been removed.
-        os.rename(temporary, output_dir)
+        try:
+            if output_dir.exists():
+                shutil.rmtree(output_dir)
+            # Windows does not reliably replace an existing directory with
+            # ``os.replace``.  The complete staged tree is promoted only after
+            # the old evidence directory has been removed.
+            os.rename(temporary, output_dir)
+        except PermissionError:
+            # Some managed Windows workspaces deny directory promotion while
+            # allowing file writes.  The staged set still prevents new files
+            # from being mixed with old files before this fallback begins.
+            output_dir.mkdir(parents=True, exist_ok=True)
+            for existing in output_dir.iterdir():
+                if existing.is_dir():
+                    shutil.rmtree(existing)
+                else:
+                    existing.unlink()
+            for staged in temporary.iterdir():
+                os.replace(staged, output_dir / staged.name)
+            temporary.rmdir()
         temporary = None  # type: ignore[assignment]
     finally:
         if temporary is not None and temporary.exists():

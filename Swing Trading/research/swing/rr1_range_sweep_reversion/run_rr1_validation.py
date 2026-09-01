@@ -5,6 +5,7 @@ from __future__ import annotations
 import os
 import shutil
 import tempfile
+import time
 from pathlib import Path
 from typing import Any
 
@@ -161,6 +162,7 @@ def _analysis_evidence(
     upper_refs: pd.DataFrame,
     upper_cancellations: pd.DataFrame,
     diagnostics: pd.DataFrame,
+    range_qualified_count: int,
 ) -> dict[str, object]:
     a = summarize_lens_a(lens_a)
     p = summarize_practical(practical)
@@ -212,7 +214,7 @@ def _analysis_evidence(
         "symbol_robustness_ok": _robustness_pass(symbols),
         "signal_window": f"{SIGNAL_START.date()}..{SIGNAL_END.date()}",
         "benchmark": "^CRSLDX",
-        "range_qualified_count": len(lower_signals) + len(upper_signals),
+        "range_qualified_count": range_qualified_count,
         "lower_signal_count": len(lower_signals),
         "upper_signal_count": len(upper_signals),
         "lower_accounting": f"{len(lower_entries)} accepted / {len(lower_cancellations)} cancelled / {len(lens_a)} paired complete",
@@ -252,8 +254,23 @@ def _write_atomic(output_dir: Path, artifacts: dict[str, object]) -> None:
                 else:
                     existing.unlink()
             for staged in temporary.iterdir():
-                os.replace(staged, output_dir / staged.name)
-            temporary.rmdir()
+                destination = output_dir / staged.name
+                for attempt in range(5):
+                    try:
+                        os.replace(staged, destination)
+                        break
+                    except PermissionError:
+                        if attempt == 4:
+                            # Managed Windows workspaces can deny renaming an
+                            # open staged file even after its writer closed it.
+                            # Copying the closed file is the last-resort
+                            # promotion path; the staged tree still keeps the
+                            # destination from mixing with the old evidence.
+                            shutil.copyfile(staged, destination)
+                            staged.unlink()
+                            break
+                        time.sleep(0.2)
+            shutil.rmtree(temporary)
         temporary = None  # type: ignore[assignment]
     finally:
         if temporary is not None and temporary.exists():
@@ -332,6 +349,7 @@ def run_validation(
             lens_a, practical, upper_outcomes, temporal, top_five, years, symbols,
             audit, lower_signals, lower_entries, lower_cancellations, upper_signals,
             upper_refs, upper_cancellations, diagnostics,
+            len(candidates),
         )
         gates, status = evaluate_gates(evidence)
         validation_summary = pd.DataFrame(

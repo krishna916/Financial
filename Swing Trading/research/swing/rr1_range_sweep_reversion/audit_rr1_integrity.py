@@ -284,7 +284,9 @@ def audit_upper_reference(
                           str(pd.Timestamp(reference["Entry_Date"]).date()),
                           str(expected_entry.date()) if expected_entry is not None else "MISSING"))
     checks.append(_record(entity, "SCHEDULED_T16",
-                          expected_exit is not None and pd.Timestamp(reference["Scheduled_Exit_Date"]).normalize() == expected_exit,
+                          (expected_exit is None and pd.isna(reference["Scheduled_Exit_Date"]))
+                          or (expected_exit is not None
+                              and pd.Timestamp(reference["Scheduled_Exit_Date"]).normalize() == expected_exit),
                           str(pd.Timestamp(reference["Scheduled_Exit_Date"]).date()),
                           str(expected_exit.date()) if expected_exit is not None else "MISSING"))
     return checks

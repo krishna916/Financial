@@ -8,7 +8,7 @@ import pandas as pd
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
-from audit_rr1_integrity import audit_lower_entry  # noqa: E402
+from audit_rr1_integrity import audit_lower_entry, audit_upper_reference  # noqa: E402
 
 
 def valid_lower_case():
@@ -82,4 +82,47 @@ def test_audit_catches_non_immediate_entry_date():
     assert any(
         x["Check"] == "IMMEDIATE_NEXT_SESSION_ENTRY" and not x["Passed"]
         for x in failures
+    )
+
+
+def test_audit_accepts_upper_reference_without_available_t16():
+    sessions = pd.bdate_range("2024-01-01", periods=80)
+    signal_position = 70
+    prices = pd.DataFrame(
+        {
+            "Date": sessions,
+            "Open": np.full(len(sessions), 105.0),
+            "High": np.full(len(sessions), 120.0),
+            "Low": np.full(len(sessions), 100.0),
+            "Close": np.full(len(sessions), 105.0),
+            "Volume": np.full(len(sessions), 2_000_000.0),
+        }
+    )
+    prices.loc[signal_position, "High"] = 121.0
+    signal_date = sessions[signal_position]
+    membership = pd.DataFrame(
+        {
+            "Symbol": ["AAA"],
+            "Member_From": [sessions[0]],
+            "Member_To": [sessions[-1]],
+            "Downloadable": [True],
+            "Yahoo_Ticker": ["AAA.NS"],
+        }
+    )
+    reference = pd.Series(
+        {
+            "Reference_ID": "REFERENCE|UPPER|AAA|2024-04-08",
+            "Signal_ID": "UPPER|AAA|2024-04-08",
+            "Symbol": "AAA",
+            "Signal_Date": signal_date,
+            "Entry_Date": sessions[signal_position + 1],
+            "Entry_Open": 105.0,
+            "Scheduled_Exit_Date": pd.NaT,
+        }
+    )
+
+    failures = audit_upper_reference(reference, prices, membership, sessions)
+
+    assert not any(
+        x["Check"] == "SCHEDULED_T16" and not x["Passed"] for x in failures
     )

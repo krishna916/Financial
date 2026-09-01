@@ -97,6 +97,8 @@ def test_synthetic_rr1_run_preserves_accounting_and_incomplete_pairs(tmp_path):
     practical = pd.read_csv(output_dir / "rr1_practical_trades.csv")
     diagnostics = pd.read_csv(output_dir / "rr1_forward_diagnostics.csv")
     audit = pd.read_csv(output_dir / "rr1_integrity_audit.csv")
+    validation_summary = pd.read_csv(output_dir / "rr1_validation_summary.csv")
+    report = (output_dir / "research_report.md").read_text(encoding="utf-8")
 
     assert len(lower_signals) == len(lower_entries) + len(lower_cancellations)
     assert set(lens_a["Entry_ID"]) == set(practical["Entry_ID"])
@@ -107,6 +109,12 @@ def test_synthetic_rr1_run_preserves_accounting_and_incomplete_pairs(tmp_path):
     incomplete = diagnostics.loc[diagnostics["Primary_Complete"] == False, "Entry_ID"]  # noqa: E712
     assert incomplete.astype(str).str.contains("DDD").any()
     assert audit["Passed"].all()
+    candidate_count = int(
+        validation_summary.loc[
+            validation_summary["Metric"] == "Range_Qualified_Sessions", "Value"
+        ].iloc[0]
+    )
+    assert f"Range-qualified sessions: {candidate_count};" in report
     assert final_status == "INSUFFICIENT_EVIDENCE"
 
 
@@ -129,3 +137,29 @@ def test_atomic_writer_replaces_existing_output_set(tmp_path, monkeypatch):
 
     assert (output_dir / "fresh.csv").exists()
     assert not (output_dir / "stale.csv").exists()
+
+
+def test_atomic_writer_copies_when_file_promotion_is_locked(tmp_path, monkeypatch):
+    output_dir = tmp_path / "output"
+    output_dir.mkdir()
+
+    import run_rr1_validation
+
+    original_replace = run_rr1_validation.os.replace
+
+    def deny_file_replace(source, target):
+        if str(source).startswith(str(tmp_path)):
+            raise PermissionError("file promotion denied")
+        return original_replace(source, target)
+
+    def deny_directory_rename(source, target):
+        raise PermissionError("directory promotion denied")
+
+    monkeypatch.setattr(run_rr1_validation.os, "replace", deny_file_replace)
+    monkeypatch.setattr(run_rr1_validation.os, "rename", deny_directory_rename)
+    _write_atomic(output_dir, {"fresh.csv": pd.DataFrame({"Value": [1]})})
+
+    assert (output_dir / "fresh.csv").read_text(encoding="utf-8").splitlines() == [
+        "Value",
+        "1",
+    ]

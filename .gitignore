@@ -1,0 +1,13 @@
+# Python and pytest generated files
+__pycache__/
+*.py[cod]
+.pytest_cache/
+.pytest-temp-*/
+
+# Local CodeGraph index
+.codegraph/
+
+# Local E1 source snapshots, validation outputs, and scratch runs
+.e1-*
+Swing Trading/research/swing/e1_positive_earnings_surprise_drift/input/
+Swing Trading/research/swing/e1_positive_earnings_surprise_drift/output/

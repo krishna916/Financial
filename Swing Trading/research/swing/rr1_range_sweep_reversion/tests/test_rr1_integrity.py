@@ -66,6 +66,54 @@ def valid_lower_case():
     return entry, prices, membership, benchmark, sessions
 
 
+def valid_upper_case():
+    sessions = pd.bdate_range("2024-01-01", periods=80)
+    close = np.array([105.0 + (i % 2) for i in range(len(sessions))], dtype=float)
+    high = np.full(len(sessions), 110.0)
+    low = np.full(len(sessions), 100.0)
+    open_ = close.copy()
+    volume = np.full(len(sessions), 2_000_000.0)
+    signal_position = 61
+    high[signal_position] = 111.0
+    close[signal_position] = 105.0
+
+    prices = pd.DataFrame(
+        {
+            "Date": sessions,
+            "Open": open_,
+            "High": high,
+            "Low": low,
+            "Close": close,
+            "Volume": volume,
+        }
+    )
+    membership = pd.DataFrame(
+        {
+            "Symbol": ["AAA"],
+            "Member_From": [sessions[0]],
+            "Member_To": [sessions[-1]],
+            "Downloadable": [True],
+            "Yahoo_Ticker": ["AAA.NS"],
+        }
+    )
+    reference = pd.Series(
+        {
+            "Reference_ID": "REFERENCE|UPPER|AAA|fixture",
+            "Signal_ID": "UPPER|AAA|fixture",
+            "Symbol": "AAA",
+            "Signal_Date": sessions[signal_position],
+            "Entry_Date": sessions[signal_position + 1],
+            "Entry_Open": float(open_[signal_position + 1]),
+            "Scheduled_Exit_Date": sessions[signal_position + 16],
+        }
+    )
+    return reference, prices, membership, sessions
+
+
+def _failed_checks(rows):
+    return {row["Check"] for row in rows if not row["Passed"]}
+
+
 def test_audit_catches_range_low_using_signal_day():
     entry, prices, membership, benchmark, sessions = valid_lower_case()
     entry["Range_Low"] = prices.loc[
@@ -126,3 +174,29 @@ def test_audit_accepts_upper_reference_without_available_t16():
     assert not any(
         x["Check"] == "SCHEDULED_T16" and not x["Passed"] for x in failures
     )
+
+
+def test_upper_audit_rejects_non_range_structure():
+    reference, prices, membership, sessions = valid_upper_case()
+    signal_pos = sessions.get_loc(reference.Signal_Date)
+    prices.loc[signal_pos - 60 : signal_pos - 1, "Low"] = 110.0
+    rows = audit_upper_reference(reference, prices, membership, sessions)
+    assert "UPPER_RANGE_QUALIFICATION" in _failed_checks(rows)
+
+
+def test_upper_audit_rejects_er60_above_threshold():
+    reference, prices, membership, sessions = valid_upper_case()
+    signal_pos = sessions.get_loc(reference.Signal_Date)
+    prices.loc[signal_pos - 61 : signal_pos - 1, "Close"] = np.linspace(
+        100.0, 160.0, 61
+    )
+    rows = audit_upper_reference(reference, prices, membership, sessions)
+    assert "UPPER_ER60_QUALIFICATION" in _failed_checks(rows)
+
+
+def test_upper_audit_rejects_insufficient_liquidity():
+    reference, prices, membership, sessions = valid_upper_case()
+    signal_pos = sessions.get_loc(reference.Signal_Date)
+    prices.loc[signal_pos - 20 : signal_pos - 1, "Volume"] = 1_000.0
+    rows = audit_upper_reference(reference, prices, membership, sessions)
+    assert "UPPER_LIQUIDITY_QUALIFICATION" in _failed_checks(rows)

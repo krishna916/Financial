@@ -14,6 +14,7 @@ import pandas as pd
 
 from analyze_rr1_results import (
     bootstrap_mean_ci,
+    bootstrap_mean_difference_ci,
     build_leave_one_symbol_out,
     build_leave_one_year_out,
     build_overlap_diagnostic,
@@ -50,6 +51,14 @@ from simulate_rr1_outcomes import build_outcomes
 
 def _empty_like(columns: list[str]) -> pd.DataFrame:
     return pd.DataFrame(columns=columns)
+
+
+def _range_qualified_count(candidates: pd.DataFrame) -> int:
+    if "Range_Eligibility_Reason" not in candidates.columns:
+        raise ValueError("candidates missing Range_Eligibility_Reason")
+    return int(
+        candidates["Range_Eligibility_Reason"].astype(str).eq("QUALIFIED_RANGE").sum()
+    )
 
 
 def _injected_validation(feature_frames: dict[str, pd.DataFrame]) -> pd.DataFrame:
@@ -115,15 +124,6 @@ def _bootstrap_summary(
         ("LOWER_BASE_PRACTICAL_MEAN_R", practical.get("Base_Net_R", [])),
         ("LOWER_BASE_PRACTICAL_EXCESS_RETURN", practical.get("Base_Practical_Excess_Return", [])),
     ]
-    if not lens_a.empty and not upper.empty:
-        n = min(len(lens_a), len(upper))
-        series.append(
-            (
-                "LOWER_MINUS_UPPER_GROSS_15_RETURN",
-                lens_a["Gross_Return"].iloc[:n].to_numpy()
-                - upper["Mirror_Gross_Return_15"].iloc[:n].to_numpy(),
-            )
-        )
     rows: list[dict[str, object]] = []
     for offset, (metric, values) in enumerate(series):
         numeric = pd.to_numeric(pd.Series(values), errors="coerce").dropna()
@@ -143,6 +143,35 @@ def _bootstrap_summary(
                 "Resamples": BOOTSTRAP_RESAMPLES,
             }
         )
+    lower_values = pd.to_numeric(
+        pd.Series(lens_a.get("Gross_Return", [])), errors="coerce"
+    ).dropna().to_numpy()
+    upper_values = pd.to_numeric(
+        pd.Series(upper.get("Mirror_Gross_Return_15", [])), errors="coerce"
+    ).dropna().to_numpy()
+    difference_lower, difference_upper = bootstrap_mean_difference_ci(
+        lower_values,
+        upper_values,
+        seed=BOOTSTRAP_SEED + 4,
+        resamples=BOOTSTRAP_RESAMPLES,
+    )
+    rows.append(
+        {
+            "Metric": "LOWER_MINUS_UPPER_GROSS_15_RETURN",
+            "Count": len(lower_values) + len(upper_values),
+            "Lower_Count": len(lower_values),
+            "Upper_Count": len(upper_values),
+            "Mean": (
+                float(lower_values.mean() - upper_values.mean())
+                if len(lower_values) and len(upper_values)
+                else np.nan
+            ),
+            "CI_Lower_95": difference_lower,
+            "CI_Upper_95": difference_upper,
+            "Seed": BOOTSTRAP_SEED + 4,
+            "Resamples": BOOTSTRAP_RESAMPLES,
+        }
+    )
     return pd.DataFrame(rows)
 
 
@@ -314,6 +343,7 @@ def run_validation(
             validation = _injected_validation(feature_frames)
         sessions = canonical_sessions(benchmark)
         candidates, lower_signals, upper_signals = build_signal_tables(feature_frames, membership)
+        range_qualified_count = _range_qualified_count(candidates)
         lower_entries, lower_cancellations = build_lower_entries(
             lower_signals, feature_frames, sessions
         )
@@ -349,12 +379,12 @@ def run_validation(
             lens_a, practical, upper_outcomes, temporal, top_five, years, symbols,
             audit, lower_signals, lower_entries, lower_cancellations, upper_signals,
             upper_refs, upper_cancellations, diagnostics,
-            len(candidates),
+            range_qualified_count,
         )
         gates, status = evaluate_gates(evidence)
         validation_summary = pd.DataFrame(
             [
-                {"Metric": "Range_Qualified_Sessions", "Value": len(candidates)},
+                {"Metric": "Range_Qualified_Sessions", "Value": range_qualified_count},
                 {"Metric": "Lower_Signals", "Value": len(lower_signals)},
                 {"Metric": "Upper_Signals", "Value": len(upper_signals)},
                 {"Metric": "Lower_Accepted", "Value": len(lower_entries)},

@@ -3,6 +3,7 @@ from __future__ import annotations
 import sys
 from pathlib import Path
 
+import numpy as np
 import pandas as pd
 import pytest
 
@@ -10,6 +11,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 from analyze_rr1_results import (  # noqa: E402
     bootstrap_mean_ci,
+    bootstrap_mean_difference_ci,
     evaluate_gates,
     profit_factor,
 )
@@ -104,3 +106,20 @@ def test_practical_inclusive_boundaries_pass_and_strict_zero_gates_fail():
 def test_bootstrap_is_seeded_and_reproducible():
     values = [0.1, -0.05, 0.2, 0.0]
     assert bootstrap_mean_ci(values, resamples=200) == bootstrap_mean_ci(values, resamples=200)
+
+
+def test_bootstrap_mean_difference_resamples_independent_cohorts():
+    lower = np.array([0.10, 0.20, 0.30])
+    upper = np.array([-0.20, -0.10])
+
+    observed = bootstrap_mean_difference_ci(lower, upper, seed=7, resamples=500)
+
+    rng = np.random.default_rng(7)
+    differences = np.empty(500)
+    for index in range(500):
+        lower_star = rng.choice(lower, size=len(lower), replace=True)
+        upper_star = rng.choice(upper, size=len(upper), replace=True)
+        differences[index] = lower_star.mean() - upper_star.mean()
+    expected = tuple(np.quantile(differences, [0.025, 0.975]))
+
+    assert observed == pytest.approx(expected)

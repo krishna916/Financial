@@ -94,6 +94,28 @@ def bootstrap_mean_ci(
     return tuple(np.quantile(means, [0.025, 0.975]))
 
 
+def bootstrap_mean_difference_ci(
+    lower: np.ndarray | Iterable[object],
+    upper: np.ndarray | Iterable[object],
+    seed: int = BOOTSTRAP_SEED,
+    resamples: int = BOOTSTRAP_RESAMPLES,
+) -> tuple[float, float]:
+    lower_x = _numeric(lower)
+    upper_x = _numeric(upper)
+    lower_x = lower_x[np.isfinite(lower_x)]
+    upper_x = upper_x[np.isfinite(upper_x)]
+    if len(lower_x) == 0 or len(upper_x) == 0:
+        return float("nan"), float("nan")
+
+    rng = np.random.default_rng(seed)
+    differences = np.empty(resamples, dtype=float)
+    for index in range(resamples):
+        lower_star = rng.choice(lower_x, size=len(lower_x), replace=True)
+        upper_star = rng.choice(upper_x, size=len(upper_x), replace=True)
+        differences[index] = lower_star.mean() - upper_star.mean()
+    return tuple(np.quantile(differences, [0.025, 0.975]))
+
+
 def _paired_lens_a(practical: pd.DataFrame, lens_a: pd.DataFrame) -> pd.DataFrame:
     if practical.empty or lens_a.empty:
         return practical.iloc[0:0].copy()

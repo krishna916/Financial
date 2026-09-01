@@ -5,11 +5,17 @@ from pathlib import Path
 
 import numpy as np
 import pandas as pd
+import pytest
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 from build_rr1_features import compute_rr1_features  # noqa: E402
-from run_rr1_validation import _write_atomic, run_validation  # noqa: E402
+from run_rr1_validation import (  # noqa: E402
+    _bootstrap_summary,
+    _range_qualified_count,
+    _write_atomic,
+    run_validation,
+)
 
 
 def synthetic_inputs():
@@ -97,6 +103,7 @@ def test_synthetic_rr1_run_preserves_accounting_and_incomplete_pairs(tmp_path):
     practical = pd.read_csv(output_dir / "rr1_practical_trades.csv")
     diagnostics = pd.read_csv(output_dir / "rr1_forward_diagnostics.csv")
     audit = pd.read_csv(output_dir / "rr1_integrity_audit.csv")
+    candidates = pd.read_csv(output_dir / "rr1_range_candidates.csv")
     validation_summary = pd.read_csv(output_dir / "rr1_validation_summary.csv")
     report = (output_dir / "research_report.md").read_text(encoding="utf-8")
 
@@ -114,7 +121,11 @@ def test_synthetic_rr1_run_preserves_accounting_and_incomplete_pairs(tmp_path):
             validation_summary["Metric"] == "Range_Qualified_Sessions", "Value"
         ].iloc[0]
     )
-    assert f"Range-qualified sessions: {candidate_count};" in report
+    expected_candidate_count = int(
+        candidates["Range_Eligibility_Reason"].eq("QUALIFIED_RANGE").sum()
+    )
+    assert candidate_count == expected_candidate_count
+    assert f"Range-qualified sessions: {expected_candidate_count};" in report
     assert final_status == "INSUFFICIENT_EVIDENCE"
 
 
@@ -163,3 +174,33 @@ def test_atomic_writer_copies_when_file_promotion_is_locked(tmp_path, monkeypatc
         "Value",
         "1",
     ]
+
+
+def test_range_qualified_count_uses_only_qualified_rows():
+    candidates = pd.DataFrame(
+        {
+            "Range_Eligibility_Reason": [
+                "QUALIFIED_RANGE",
+                "ER60_ABOVE_MAX",
+                "LOW_LIQUIDITY",
+                "QUALIFIED_RANGE",
+            ]
+        }
+    )
+
+    assert _range_qualified_count(candidates) == 2
+
+
+def test_bootstrap_summary_keeps_full_unequal_lower_and_upper_samples():
+    lens_a = pd.DataFrame({"Gross_Return": [0.1, 0.2, 0.3]})
+    practical = pd.DataFrame(
+        {"Base_Net_R": [0.1], "Base_Practical_Excess_Return": [0.01]}
+    )
+    upper = pd.DataFrame({"Mirror_Gross_Return_15": [-0.1, -0.2]})
+
+    summary = _bootstrap_summary(lens_a, practical, upper)
+    row = summary.loc[
+        summary["Metric"].eq("LOWER_MINUS_UPPER_GROSS_15_RETURN")
+    ].iloc[0]
+
+    assert row["Mean"] == pytest.approx(0.2 - (-0.15))

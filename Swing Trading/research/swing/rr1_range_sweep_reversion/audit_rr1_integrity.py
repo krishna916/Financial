@@ -272,11 +272,43 @@ def audit_upper_reference(
     if position < 61:
         return checks
     prior = aligned.iloc[position - 60:position]
-    high = float(prior["High"].max())
+    range_low = float(prior["Low"].min())
+    range_high = float(prior["High"].max())
+    range_ok = np.isfinite(range_low) and np.isfinite(range_high) and range_high > range_low
+    checks.append(_record(
+        entity,
+        "UPPER_RANGE_QUALIFICATION",
+        range_ok,
+        [range_low, range_high],
+        "finite Range_High > Range_Low from T-60..T-1",
+    ))
+    close = aligned["Close"]
+    numerator = abs(float(close.iloc[position - 1]) - float(close.iloc[position - 61]))
+    denominator = float(close.iloc[position - 61:position].diff().abs().iloc[1:].sum())
+    er60 = numerator / denominator if denominator > 0.0 else np.nan
+    checks.append(_record(
+        entity,
+        "UPPER_ER60_QUALIFICATION",
+        np.isfinite(er60) and denominator > 0.0 and er60 <= ER60_MAX,
+        er60,
+        f"ER60 <= {ER60_MAX}",
+    ))
+    traded_value = aligned["Close"] * aligned["Volume"]
+    liquidity = float(traded_value.iloc[position - 20:position].median())
+    checks.append(_record(
+        entity,
+        "UPPER_LIQUIDITY_QUALIFICATION",
+        np.isfinite(liquidity) and liquidity >= LIQUIDITY_FLOOR,
+        liquidity,
+        f">= {LIQUIDITY_FLOOR}",
+    ))
     signal_bar = aligned.iloc[position]
     checks.append(_record(entity, "UPPER_SIGNAL",
-                          float(signal_bar["High"]) > high and float(signal_bar["Close"]) < high,
-                          [signal_bar["High"], signal_bar["Close"]], f"High>{high}, Close<{high}"))
+                          range_ok
+                          and float(signal_bar["High"]) > range_high
+                          and float(signal_bar["Close"]) < range_high,
+                          [signal_bar["High"], signal_bar["Close"]],
+                          f"High>{range_high}, Close<{range_high}"))
     expected_entry = _session_after(signal_date, index, 1)
     expected_exit = _session_after(signal_date, index, 16)
     checks.append(_record(entity, "IMMEDIATE_NEXT_SESSION_ENTRY",

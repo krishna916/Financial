@@ -236,7 +236,10 @@ def _write_atomic(output_dir: Path, artifacts: dict[str, object]) -> None:
                 target.write_text(str(artifact), encoding="utf-8")
         if output_dir.exists():
             shutil.rmtree(output_dir)
-        os.replace(temporary, output_dir)
+        # Windows does not reliably replace an existing directory with
+        # ``os.replace``.  The complete staged tree is promoted only after
+        # the old evidence directory has been removed.
+        os.rename(temporary, output_dir)
         temporary = None  # type: ignore[assignment]
     finally:
         if temporary is not None and temporary.exists():

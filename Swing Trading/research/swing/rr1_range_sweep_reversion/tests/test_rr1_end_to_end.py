@@ -9,7 +9,7 @@ import pandas as pd
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 from build_rr1_features import compute_rr1_features  # noqa: E402
-from run_rr1_validation import run_validation  # noqa: E402
+from run_rr1_validation import _write_atomic, run_validation  # noqa: E402
 
 
 def synthetic_inputs():
@@ -108,3 +108,14 @@ def test_synthetic_rr1_run_preserves_accounting_and_incomplete_pairs(tmp_path):
     assert incomplete.astype(str).str.contains("DDD").any()
     assert audit["Passed"].all()
     assert final_status == "INSUFFICIENT_EVIDENCE"
+
+
+def test_atomic_writer_replaces_existing_output_set(tmp_path):
+    output_dir = tmp_path / "output"
+    output_dir.mkdir()
+    (output_dir / "stale.csv").write_text("stale", encoding="utf-8")
+
+    _write_atomic(output_dir, {"fresh.csv": pd.DataFrame({"Value": [1]})})
+
+    assert (output_dir / "fresh.csv").exists()
+    assert not (output_dir / "stale.csv").exists()

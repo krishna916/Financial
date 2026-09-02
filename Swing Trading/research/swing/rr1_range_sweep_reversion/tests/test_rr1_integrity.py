@@ -9,6 +9,7 @@ import pandas as pd
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 from audit_rr1_integrity import (  # noqa: E402
+    audit_cohort_lockout,
     audit_lower_entry,
     audit_upper_outcome,
     audit_upper_reference,
@@ -247,3 +248,103 @@ def test_upper_outcome_audit_rejects_corrupted_mirror_return():
     rows = audit_upper_outcome(reference, outcome, prices, sessions)
 
     assert "UPPER_OUTCOME_GROSS_RETURN" in _failed_checks(rows)
+
+
+def test_lockout_audit_rejects_second_accepted_lower_inside_t16():
+    sessions = pd.bdate_range("2024-01-01", periods=40)
+    signals = pd.DataFrame(
+        [
+            {"Signal_ID": "LOWER|AAA|1", "Symbol": "AAA", "Signal_Date": sessions[0]},
+            {"Signal_ID": "LOWER|AAA|2", "Symbol": "AAA", "Signal_Date": sessions[5]},
+        ]
+    )
+    accepted = pd.DataFrame(
+        [
+            {
+                "Signal_ID": "LOWER|AAA|1",
+                "Symbol": "AAA",
+                "Signal_Date": sessions[0],
+                "Scheduled_Exit_Date": sessions[16],
+            },
+            {
+                "Signal_ID": "LOWER|AAA|2",
+                "Symbol": "AAA",
+                "Signal_Date": sessions[5],
+                "Scheduled_Exit_Date": sessions[21],
+            },
+        ]
+    )
+    cancellations = pd.DataFrame(
+        columns=["Signal_ID", "Symbol", "Signal_Date", "Cancellation_Reason"]
+    )
+
+    rows = audit_cohort_lockout(signals, accepted, cancellations, sessions, "LOWER")
+
+    assert "LOWER_LOCKOUT_REPLAY" in _failed_checks(rows)
+
+
+def test_lockout_audit_requires_same_symbol_lockout_reason_inside_window():
+    sessions = pd.bdate_range("2024-01-01", periods=40)
+    signals = pd.DataFrame(
+        [
+            {"Signal_ID": "UPPER|AAA|1", "Symbol": "AAA", "Signal_Date": sessions[0]},
+            {"Signal_ID": "UPPER|AAA|2", "Symbol": "AAA", "Signal_Date": sessions[5]},
+        ]
+    )
+    accepted = pd.DataFrame(
+        [
+            {
+                "Signal_ID": "UPPER|AAA|1",
+                "Symbol": "AAA",
+                "Signal_Date": sessions[0],
+                "Scheduled_Exit_Date": sessions[16],
+            }
+        ]
+    )
+    cancellations = pd.DataFrame(
+        [
+            {
+                "Signal_ID": "UPPER|AAA|2",
+                "Symbol": "AAA",
+                "Signal_Date": sessions[5],
+                "Cancellation_Reason": "MISSING_NEXT_SESSION_BAR",
+            }
+        ]
+    )
+
+    rows = audit_cohort_lockout(signals, accepted, cancellations, sessions, "UPPER")
+
+    assert "UPPER_LOCKOUT_REPLAY" in _failed_checks(rows)
+
+
+def test_lockout_audit_allows_new_signal_on_scheduled_t16():
+    sessions = pd.bdate_range("2024-01-01", periods=40)
+    signals = pd.DataFrame(
+        [
+            {"Signal_ID": "LOWER|AAA|1", "Symbol": "AAA", "Signal_Date": sessions[0]},
+            {"Signal_ID": "LOWER|AAA|2", "Symbol": "AAA", "Signal_Date": sessions[16]},
+        ]
+    )
+    accepted = pd.DataFrame(
+        [
+            {
+                "Signal_ID": "LOWER|AAA|1",
+                "Symbol": "AAA",
+                "Signal_Date": sessions[0],
+                "Scheduled_Exit_Date": sessions[16],
+            },
+            {
+                "Signal_ID": "LOWER|AAA|2",
+                "Symbol": "AAA",
+                "Signal_Date": sessions[16],
+                "Scheduled_Exit_Date": sessions[32],
+            },
+        ]
+    )
+    cancellations = pd.DataFrame(
+        columns=["Signal_ID", "Symbol", "Signal_Date", "Cancellation_Reason"]
+    )
+
+    rows = audit_cohort_lockout(signals, accepted, cancellations, sessions, "LOWER")
+
+    assert all(row["Passed"] for row in rows)

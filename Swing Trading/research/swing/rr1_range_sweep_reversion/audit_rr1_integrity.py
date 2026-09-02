@@ -413,6 +413,83 @@ def audit_upper_outcome(
     return checks
 
 
+def audit_cohort_lockout(
+    signals: pd.DataFrame,
+    accepted: pd.DataFrame,
+    cancellations: pd.DataFrame,
+    sessions: pd.DatetimeIndex,
+    cohort: str,
+) -> list[dict[str, Any]]:
+    """Replay same-symbol lockouts independently for one signal cohort."""
+
+    if cohort not in {"LOWER", "UPPER"}:
+        raise ValueError("cohort must be LOWER or UPPER")
+
+    accepted_by_id = {
+        str(row.Signal_ID): row
+        for row in accepted.itertuples(index=False)
+    }
+    cancelled_by_id = {
+        str(row.Signal_ID): str(row.Cancellation_Reason)
+        for row in cancellations.itertuples(index=False)
+    }
+    lockout_until: dict[str, pd.Timestamp] = {}
+    rows: list[dict[str, Any]] = []
+    ordered = signals.copy()
+    ordered["Signal_Date"] = pd.to_datetime(ordered["Signal_Date"]).dt.normalize()
+    ordered = ordered.sort_values(["Signal_Date", "Symbol", "Signal_ID"])
+
+    for signal in ordered.itertuples(index=False):
+        signal_id = str(signal.Signal_ID)
+        symbol = str(signal.Symbol)
+        signal_date = pd.Timestamp(signal.Signal_Date).normalize()
+        active_until = lockout_until.get(symbol)
+        inside_lockout = active_until is not None and signal_date < active_until
+        accepted_row = accepted_by_id.get(signal_id)
+        cancellation_reason = cancelled_by_id.get(signal_id)
+
+        if inside_lockout:
+            passed = accepted_row is None and cancellation_reason == "SAME_SYMBOL_LOCKOUT"
+            expected = f"cancel SAME_SYMBOL_LOCKOUT before {active_until.date()}"
+        else:
+            passed = cancellation_reason != "SAME_SYMBOL_LOCKOUT"
+            expected = "not cancelled as SAME_SYMBOL_LOCKOUT outside active window"
+
+        rows.append(
+            _record(
+                f"{cohort}|{signal_id}",
+                f"{cohort}_LOCKOUT_REPLAY",
+                passed,
+                cancellation_reason if accepted_row is None else "ACCEPTED",
+                expected,
+            )
+        )
+
+        if not inside_lockout and accepted_row is not None:
+            expected_exit = _session_after(signal_date, sessions, 16)
+            stored_exit = getattr(accepted_row, "Scheduled_Exit_Date")
+            exit_matches = (
+                (expected_exit is None and pd.isna(stored_exit))
+                or (
+                    expected_exit is not None
+                    and not pd.isna(stored_exit)
+                    and pd.Timestamp(stored_exit).normalize() == expected_exit
+                )
+            )
+            rows.append(
+                _record(
+                    f"{cohort}|{signal_id}",
+                    f"{cohort}_LOCKOUT_SCHEDULED_T16",
+                    exit_matches,
+                    _date_text(stored_exit),
+                    _date_text(expected_exit),
+                )
+            )
+            lockout_until[symbol] = expected_exit or pd.Timestamp.max
+
+    return rows
+
+
 def accounting_invariants(
     lower_signals: pd.DataFrame,
     lower_entries: pd.DataFrame,

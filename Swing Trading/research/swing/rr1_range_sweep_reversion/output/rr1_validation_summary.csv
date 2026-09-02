@@ -1,0 +1,10 @@
+Metric,Value
+Range_Qualified_Sessions,285367
+Lower_Signals,6204
+Upper_Signals,9119
+Lower_Accepted,2495
+Lower_Cancelled,3709
+Lower_Paired_Completed,2437
+Upper_Completed,4017
+Integrity_Failures,0
+FINAL_STATUS,FAIL

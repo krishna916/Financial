@@ -90,7 +90,7 @@ def _record(entity: str, check: str, passed: bool, observed: Any, expected: Any)
 
 
 def _date_text(value: object) -> str:
-    if pd.isna(value):
+    if value is None or pd.isna(value):
         return "MISSING"
     return str(pd.Timestamp(value).date())
 
@@ -315,12 +315,101 @@ def audit_upper_reference(
                           expected_entry is not None and pd.Timestamp(reference["Entry_Date"]).normalize() == expected_entry,
                           str(pd.Timestamp(reference["Entry_Date"]).date()),
                           str(expected_entry.date()) if expected_entry is not None else "MISSING"))
+    entry_bar = aligned.loc[expected_entry] if expected_entry is not None and expected_entry in aligned.index else None
+    entry_bar_ok = (
+        entry_bar is not None
+        and entry_bar[["Open", "High", "Low", "Close"]].notna().all()
+    )
+    actual_entry_open = float(entry_bar["Open"]) if entry_bar_ok else np.nan
+    checks.append(_record(
+        entity,
+        "UPPER_ENTRY_OPEN_RECOMPUTE",
+        entry_bar_ok and _same_number(reference.get("Entry_Open"), actual_entry_open),
+        reference.get("Entry_Open"),
+        actual_entry_open,
+    ))
     checks.append(_record(entity, "SCHEDULED_T16",
                           (expected_exit is None and pd.isna(reference["Scheduled_Exit_Date"]))
                           or (expected_exit is not None
                               and pd.Timestamp(reference["Scheduled_Exit_Date"]).normalize() == expected_exit),
                           str(pd.Timestamp(reference["Scheduled_Exit_Date"]).date()),
                           str(expected_exit.date()) if expected_exit is not None else "MISSING"))
+    return checks
+
+
+def audit_upper_outcome(
+    reference: pd.Series,
+    outcome: pd.Series,
+    raw_prices: pd.DataFrame,
+    sessions: pd.DatetimeIndex,
+) -> list[dict[str, Any]]:
+    """Recompute upper fixed-horizon outcome evidence from raw prices."""
+
+    entity = str(reference["Reference_ID"])
+    aligned = _aligned(raw_prices, sessions)
+    index = pd.DatetimeIndex(aligned.index)
+    signal_date = pd.Timestamp(reference["Signal_Date"]).normalize()
+    expected_entry = _session_after(signal_date, index, 1)
+    expected_exit = _session_after(signal_date, index, 16)
+    checks: list[dict[str, Any]] = []
+
+    entry_bar = aligned.loc[expected_entry] if expected_entry is not None and expected_entry in aligned.index else None
+    exit_bar = aligned.loc[expected_exit] if expected_exit is not None and expected_exit in aligned.index else None
+    bars_ok = (
+        entry_bar is not None
+        and exit_bar is not None
+        and entry_bar[["Open", "High", "Low", "Close"]].notna().all()
+        and exit_bar[["Open", "High", "Low", "Close"]].notna().all()
+    )
+    expected_entry_open = float(entry_bar["Open"]) if bars_ok else np.nan
+    expected_exit_open = float(exit_bar["Open"]) if bars_ok else np.nan
+    expected_return = (
+        expected_exit_open / expected_entry_open - 1.0
+        if bars_ok and expected_entry_open != 0.0
+        else np.nan
+    )
+
+    checks.extend(
+        [
+            _record(
+                entity,
+                "UPPER_OUTCOME_ENTRY_DATE",
+                expected_entry is not None
+                and pd.Timestamp(outcome["Entry_Date"]).normalize() == expected_entry,
+                _date_text(outcome["Entry_Date"]),
+                _date_text(expected_entry),
+            ),
+            _record(
+                entity,
+                "UPPER_OUTCOME_EXIT_DATE",
+                expected_exit is not None
+                and pd.Timestamp(outcome["Exit_Date"]).normalize() == expected_exit,
+                _date_text(outcome["Exit_Date"]),
+                _date_text(expected_exit),
+            ),
+            _record(
+                entity,
+                "UPPER_OUTCOME_ENTRY_OPEN",
+                bars_ok and _same_number(outcome.get("Entry_Open"), expected_entry_open),
+                outcome.get("Entry_Open"),
+                expected_entry_open,
+            ),
+            _record(
+                entity,
+                "UPPER_OUTCOME_EXIT_OPEN",
+                bars_ok and _same_number(outcome.get("Exit_Price"), expected_exit_open),
+                outcome.get("Exit_Price"),
+                expected_exit_open,
+            ),
+            _record(
+                entity,
+                "UPPER_OUTCOME_GROSS_RETURN",
+                bars_ok and _same_number(outcome.get("Mirror_Gross_Return_15"), expected_return),
+                outcome.get("Mirror_Gross_Return_15"),
+                expected_return,
+            ),
+        ]
+    )
     return checks
 
 

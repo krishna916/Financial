@@ -8,7 +8,11 @@ import pandas as pd
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
-from audit_rr1_integrity import audit_lower_entry, audit_upper_reference  # noqa: E402
+from audit_rr1_integrity import (  # noqa: E402
+    audit_lower_entry,
+    audit_upper_outcome,
+    audit_upper_reference,
+)
 
 
 def valid_lower_case():
@@ -200,3 +204,46 @@ def test_upper_audit_rejects_insufficient_liquidity():
     prices.loc[signal_pos - 20 : signal_pos - 1, "Volume"] = 1_000.0
     rows = audit_upper_reference(reference, prices, membership, sessions)
     assert "UPPER_LIQUIDITY_QUALIFICATION" in _failed_checks(rows)
+
+
+def test_upper_audit_rejects_wrong_next_session_entry_open():
+    reference, prices, membership, sessions = valid_upper_case()
+    reference["Entry_Open"] = float(reference["Entry_Open"]) + 1.0
+
+    rows = audit_upper_reference(reference, prices, membership, sessions)
+
+    assert "UPPER_ENTRY_OPEN_RECOMPUTE" in _failed_checks(rows)
+
+
+def valid_upper_outcome_case():
+    reference, prices, membership, sessions = valid_upper_case()
+    exit_date = sessions[sessions.get_loc(reference.Signal_Date) + 16]
+    actual_entry_open = float(
+        prices.loc[prices.Date.eq(reference.Entry_Date), "Open"].iloc[0]
+    )
+    actual_exit_open = float(
+        prices.loc[prices.Date.eq(exit_date), "Open"].iloc[0]
+    )
+    outcome = pd.Series(
+        {
+            "Reference_ID": reference["Reference_ID"],
+            "Signal_ID": reference["Signal_ID"],
+            "Symbol": reference["Symbol"],
+            "Signal_Date": reference["Signal_Date"],
+            "Entry_Date": reference["Entry_Date"],
+            "Exit_Date": exit_date,
+            "Entry_Open": actual_entry_open,
+            "Exit_Price": actual_exit_open,
+            "Mirror_Gross_Return_15": actual_exit_open / actual_entry_open - 1.0,
+        }
+    )
+    return reference, outcome, prices, sessions
+
+
+def test_upper_outcome_audit_rejects_corrupted_mirror_return():
+    reference, outcome, prices, sessions = valid_upper_outcome_case()
+    outcome["Mirror_Gross_Return_15"] = float(outcome["Mirror_Gross_Return_15"]) + 0.01
+
+    rows = audit_upper_outcome(reference, outcome, prices, sessions)
+
+    assert "UPPER_OUTCOME_GROSS_RETURN" in _failed_checks(rows)

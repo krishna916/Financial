@@ -10,7 +10,10 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 from audit_rr1_integrity import (  # noqa: E402
     audit_cohort_lockout,
+    audit_lens_a_outcome,
     audit_lower_entry,
+    audit_practical_outcome,
+    _recompute_practical_outcome,
     audit_upper_outcome,
     audit_upper_reference,
 )
@@ -348,3 +351,71 @@ def test_lockout_audit_allows_new_signal_on_scheduled_t16():
     rows = audit_cohort_lockout(signals, accepted, cancellations, sessions, "LOWER")
 
     assert all(row["Passed"] for row in rows)
+
+
+def valid_lens_a_outcome_case():
+    entry, prices, membership, benchmark, sessions = valid_lower_case()
+    exit_date = pd.Timestamp(entry["Scheduled_Exit_Date"]).normalize()
+    entry_open = float(entry["Entry_Open"])
+    exit_open = float(prices.loc[prices.Date.eq(exit_date), "Open"].iloc[0])
+    benchmark_entry = float(benchmark.loc[benchmark.Date.eq(entry["Entry_Date"]), "Open"].iloc[0])
+    benchmark_exit = float(benchmark.loc[benchmark.Date.eq(exit_date), "Open"].iloc[0])
+    benchmark_return = benchmark_exit / benchmark_entry - 1.0
+    gross = exit_open / entry_open - 1.0
+    outcome = pd.Series(
+        {
+            "Entry_ID": entry["Entry_ID"],
+            "Symbol": entry["Symbol"],
+            "Signal_Date": entry["Signal_Date"],
+            "Entry_Date": entry["Entry_Date"],
+            "Exit_Date": exit_date,
+            "Entry_Open": entry_open,
+            "Exit_Price": exit_open,
+            "Gross_Return": gross,
+            "Base_Net_Return": gross - 0.004,
+            "Stress_Net_Return": gross - 0.006,
+            "Severe_Net_Return": gross - 0.008,
+            "Benchmark_Return": benchmark_return,
+            "Base_Excess_Return": gross - 0.004 - benchmark_return,
+        }
+    )
+    return entry, outcome, prices, benchmark, sessions
+
+
+def test_lens_a_audit_rejects_corrupted_benchmark_return():
+    entry, outcome, prices, benchmark, sessions = valid_lens_a_outcome_case()
+    outcome["Benchmark_Return"] = 0.05
+
+    rows = audit_lens_a_outcome(entry, outcome, prices, benchmark, sessions)
+
+    assert "LENS_A_BENCHMARK_RETURN" in _failed_checks(rows)
+
+
+def test_practical_audit_rejects_wrong_same_bar_exit_reason():
+    entry, prices, membership, benchmark, sessions = valid_lower_case()
+    entry_date = pd.Timestamp(entry["Entry_Date"]).normalize()
+    row_index = prices.index[prices.Date.eq(entry_date)][0]
+    prices.loc[row_index, "Open"] = float(entry["Entry_Open"])
+    prices.loc[row_index, "Low"] = float(entry["Structural_Stop"]) - 1.0
+    prices.loc[row_index, "High"] = float(entry["Target"]) + 1.0
+
+    expected = _recompute_practical_outcome(entry, prices, benchmark, sessions)
+    assert expected is not None
+    outcome = pd.Series(expected)
+    outcome["Exit_Reason"] = "MIDPOINT_TARGET"
+
+    rows = audit_practical_outcome(entry, outcome, prices, benchmark, sessions)
+
+    assert "PRACTICAL_EXIT_REASON" in _failed_checks(rows)
+
+
+def test_practical_audit_rejects_corrupted_base_net_r():
+    entry, prices, membership, benchmark, sessions = valid_lower_case()
+    expected = _recompute_practical_outcome(entry, prices, benchmark, sessions)
+    assert expected is not None
+    outcome = pd.Series(expected)
+    outcome["Base_Net_R"] = float(outcome["Base_Net_R"]) + 0.25
+
+    rows = audit_practical_outcome(entry, outcome, prices, benchmark, sessions)
+
+    assert "PRACTICAL_BASE_NET_R" in _failed_checks(rows)

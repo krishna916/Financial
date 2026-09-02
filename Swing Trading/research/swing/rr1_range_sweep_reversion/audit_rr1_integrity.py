@@ -8,11 +8,14 @@ import numpy as np
 import pandas as pd
 
 from constants import (
+    BASE_FRICTION,
     ER60_MAX,
     LIQUIDITY_FLOOR,
     MIN_INITIAL_RR,
+    SEVERE_FRICTION,
     SIGNAL_END,
     SIGNAL_START,
+    STRESS_FRICTION,
     STOP_ATR_BUFFER,
 )
 
@@ -488,6 +491,358 @@ def audit_cohort_lockout(
             lockout_until[symbol] = expected_exit or pd.Timestamp.max
 
     return rows
+
+
+def audit_lens_a_outcome(
+    entry: pd.Series,
+    outcome: pd.Series,
+    raw_prices: pd.DataFrame,
+    benchmark: pd.DataFrame,
+    sessions: pd.DatetimeIndex,
+) -> list[dict[str, Any]]:
+    """Recompute fixed-horizon stock and benchmark returns from raw Opens."""
+
+    entity = str(entry["Entry_ID"])
+    stock = _aligned(raw_prices, sessions)
+    benchmark_aligned = _aligned(benchmark, sessions)
+    index = pd.DatetimeIndex(stock.index)
+    signal_date = pd.Timestamp(entry["Signal_Date"]).normalize()
+    expected_entry = _session_after(signal_date, index, 1)
+    expected_exit = _session_after(signal_date, index, 16)
+
+    entry_bar = stock.loc[expected_entry] if expected_entry is not None and expected_entry in stock.index else None
+    exit_bar = stock.loc[expected_exit] if expected_exit is not None and expected_exit in stock.index else None
+    stock_bars_ok = (
+        entry_bar is not None
+        and exit_bar is not None
+        and entry_bar[["Open", "High", "Low", "Close"]].notna().all()
+        and exit_bar[["Open", "High", "Low", "Close"]].notna().all()
+    )
+    expected_entry_open = float(entry_bar["Open"]) if stock_bars_ok else np.nan
+    expected_exit_open = float(exit_bar["Open"]) if stock_bars_ok else np.nan
+    expected_gross = (
+        expected_exit_open / expected_entry_open - 1.0
+        if stock_bars_ok and expected_entry_open != 0.0
+        else np.nan
+    )
+
+    benchmark_bars_ok = (
+        expected_entry is not None
+        and expected_exit is not None
+        and expected_entry in benchmark_aligned.index
+        and expected_exit in benchmark_aligned.index
+        and benchmark_aligned.loc[expected_entry, "Open"] == benchmark_aligned.loc[expected_entry, "Open"]
+        and benchmark_aligned.loc[expected_exit, "Open"] == benchmark_aligned.loc[expected_exit, "Open"]
+    )
+    benchmark_entry_open = (
+        float(benchmark_aligned.loc[expected_entry, "Open"])
+        if benchmark_bars_ok
+        else np.nan
+    )
+    benchmark_exit_open = (
+        float(benchmark_aligned.loc[expected_exit, "Open"])
+        if benchmark_bars_ok
+        else np.nan
+    )
+    expected_benchmark = (
+        benchmark_exit_open / benchmark_entry_open - 1.0
+        if benchmark_bars_ok and benchmark_entry_open != 0.0
+        else np.nan
+    )
+    expected_base_net = expected_gross - BASE_FRICTION
+    expected_stress_net = expected_gross - STRESS_FRICTION
+    expected_severe_net = expected_gross - SEVERE_FRICTION
+    expected_base_excess = expected_base_net - expected_benchmark
+
+    checks = [
+        _record(
+            entity,
+            "LENS_A_ENTRY_DATE",
+            expected_entry is not None
+            and pd.Timestamp(outcome["Entry_Date"]).normalize() == expected_entry,
+            _date_text(outcome.get("Entry_Date")),
+            _date_text(expected_entry),
+        ),
+        _record(
+            entity,
+            "LENS_A_EXIT_DATE",
+            expected_exit is not None
+            and pd.Timestamp(outcome["Exit_Date"]).normalize() == expected_exit,
+            _date_text(outcome.get("Exit_Date")),
+            _date_text(expected_exit),
+        ),
+        _record(
+            entity,
+            "LENS_A_ENTRY_OPEN",
+            stock_bars_ok and _same_number(outcome.get("Entry_Open"), expected_entry_open),
+            outcome.get("Entry_Open"),
+            expected_entry_open,
+        ),
+        _record(
+            entity,
+            "LENS_A_EXIT_OPEN",
+            stock_bars_ok and _same_number(outcome.get("Exit_Price"), expected_exit_open),
+            outcome.get("Exit_Price"),
+            expected_exit_open,
+        ),
+        _record(
+            entity,
+            "LENS_A_GROSS_RETURN",
+            stock_bars_ok and _same_number(outcome.get("Gross_Return"), expected_gross),
+            outcome.get("Gross_Return"),
+            expected_gross,
+        ),
+        _record(
+            entity,
+            "LENS_A_BASE_NET_RETURN",
+            stock_bars_ok and _same_number(outcome.get("Base_Net_Return"), expected_base_net),
+            outcome.get("Base_Net_Return"),
+            expected_base_net,
+        ),
+        _record(
+            entity,
+            "LENS_A_STRESS_NET_RETURN",
+            stock_bars_ok and _same_number(outcome.get("Stress_Net_Return"), expected_stress_net),
+            outcome.get("Stress_Net_Return"),
+            expected_stress_net,
+        ),
+        _record(
+            entity,
+            "LENS_A_SEVERE_NET_RETURN",
+            stock_bars_ok and _same_number(outcome.get("Severe_Net_Return"), expected_severe_net),
+            outcome.get("Severe_Net_Return"),
+            expected_severe_net,
+        ),
+        _record(
+            entity,
+            "LENS_A_BENCHMARK_RETURN",
+            benchmark_bars_ok and _same_number(outcome.get("Benchmark_Return"), expected_benchmark),
+            outcome.get("Benchmark_Return"),
+            expected_benchmark,
+        ),
+        _record(
+            entity,
+            "LENS_A_BASE_EXCESS_RETURN",
+            stock_bars_ok and benchmark_bars_ok
+            and _same_number(outcome.get("Base_Excess_Return"), expected_base_excess),
+            outcome.get("Base_Excess_Return"),
+            expected_base_excess,
+        ),
+    ]
+    return checks
+
+
+def _recompute_practical_outcome(
+    entry: pd.Series,
+    raw_prices: pd.DataFrame,
+    benchmark: pd.DataFrame,
+    sessions: pd.DatetimeIndex,
+) -> dict[str, object] | None:
+    """Replay practical execution without calling production simulation code."""
+
+    stock = _aligned(raw_prices, sessions)
+    benchmark_aligned = _aligned(benchmark, sessions)
+    index = pd.DatetimeIndex(stock.index)
+    entry_date = pd.Timestamp(entry["Entry_Date"]).normalize()
+    scheduled_value = entry.get("Scheduled_Exit_Date")
+    if pd.isna(scheduled_value):
+        return None
+    scheduled_exit = pd.Timestamp(scheduled_value).normalize()
+    if entry_date not in index or scheduled_exit not in index:
+        return None
+    entry_position = int(index.get_loc(entry_date))
+    exit_position = int(index.get_loc(scheduled_exit))
+    if exit_position <= entry_position:
+        return None
+
+    entry_bar = stock.loc[entry_date]
+    if not entry_bar[["Open", "High", "Low", "Close"]].notna().all():
+        return None
+    entry_open = float(entry_bar["Open"])
+    stop = float(entry["Structural_Stop"])
+    target = float(entry["Target"])
+    initial_risk = float(entry["Initial_Risk"])
+    if not all(np.isfinite(value) for value in [entry_open, stop, target, initial_risk]) or initial_risk == 0.0:
+        return None
+
+    exit_date: pd.Timestamp | None = None
+    exit_price = np.nan
+    exit_reason: str | None = None
+    ambiguity = False
+    for position in range(entry_position, exit_position):
+        date = pd.Timestamp(index[position])
+        bar = stock.loc[date]
+        if not bar[["Open", "High", "Low", "Close"]].notna().all():
+            return None
+        open_price = float(bar["Open"])
+        high = float(bar["High"])
+        low = float(bar["Low"])
+
+        if open_price <= stop:
+            exit_date = date
+            exit_price = open_price
+            exit_reason = "GAP_BELOW_STRUCTURAL_STOP" if date != entry_date else "STRUCTURAL_STOP"
+            ambiguity = False
+            break
+
+        if open_price >= target:
+            exit_date = date
+            exit_price = open_price
+            exit_reason = "GAP_ABOVE_TARGET" if date != entry_date else "TARGET"
+            ambiguity = False
+            break
+
+        stop_touched = low <= stop
+        target_touched = high >= target
+        if stop_touched:
+            exit_date = date
+            exit_price = stop
+            exit_reason = "STRUCTURAL_STOP"
+            ambiguity = bool(target_touched)
+            break
+
+        if target_touched:
+            exit_date = date
+            exit_price = target
+            exit_reason = "MIDPOINT_TARGET"
+            ambiguity = False
+            break
+    else:
+        scheduled_bar = stock.loc[scheduled_exit]
+        if not scheduled_bar[["Open", "High", "Low", "Close"]].notna().all():
+            return None
+        exit_date = scheduled_exit
+        exit_price = float(scheduled_bar["Open"])
+        exit_reason = "TIME_EXIT"
+        ambiguity = False
+
+    if exit_date is None or exit_reason is None or not np.isfinite(exit_price):
+        return None
+    benchmark_entry_bar = benchmark_aligned.loc[entry_date] if entry_date in benchmark_aligned.index else None
+    benchmark_exit_bar = benchmark_aligned.loc[exit_date] if exit_date in benchmark_aligned.index else None
+    if benchmark_entry_bar is None or benchmark_exit_bar is None:
+        return None
+    benchmark_entry_open = benchmark_entry_bar["Open"]
+    benchmark_exit_open = benchmark_exit_bar["Open"]
+    if pd.isna(benchmark_entry_open) or pd.isna(benchmark_exit_open):
+        return None
+    benchmark_entry_open = float(benchmark_entry_open)
+    benchmark_exit_open = float(benchmark_exit_open)
+    if not np.isfinite(benchmark_entry_open) or not np.isfinite(benchmark_exit_open) or benchmark_entry_open == 0.0:
+        return None
+
+    gross_return = exit_price / entry_open - 1.0
+    base_net_return = gross_return - BASE_FRICTION
+    stress_net_return = gross_return - STRESS_FRICTION
+    severe_net_return = gross_return - SEVERE_FRICTION
+    gross_r = (exit_price - entry_open) / initial_risk
+    base_net_r = gross_r - BASE_FRICTION * entry_open / initial_risk
+    stress_net_r = gross_r - STRESS_FRICTION * entry_open / initial_risk
+    severe_net_r = gross_r - SEVERE_FRICTION * entry_open / initial_risk
+    benchmark_return = benchmark_exit_open / benchmark_entry_open - 1.0
+
+    return {
+        "Entry_ID": entry["Entry_ID"],
+        "Symbol": entry["Symbol"],
+        "Signal_Date": pd.Timestamp(entry["Signal_Date"]),
+        "Entry_Date": entry_date,
+        "Exit_Date": exit_date,
+        "Entry_Open": entry_open,
+        "Exit_Price": exit_price,
+        "Exit_Reason": exit_reason,
+        "Initial_Risk": initial_risk,
+        "Target": target,
+        "Structural_Stop": stop,
+        "Gross_Return": gross_return,
+        "Base_Net_Return": base_net_return,
+        "Stress_Net_Return": stress_net_return,
+        "Severe_Net_Return": severe_net_return,
+        "Gross_R": gross_r,
+        "Base_Net_R": base_net_r,
+        "Stress_Net_R": stress_net_r,
+        "Severe_Net_R": severe_net_r,
+        "Benchmark_Return": benchmark_return,
+        "Base_Practical_Excess_Return": base_net_return - benchmark_return,
+        "Stress_Practical_Excess_Return": stress_net_return - benchmark_return,
+        "Severe_Practical_Excess_Return": severe_net_return - benchmark_return,
+        "Same_Bar_Stop_Target_Ambiguity": bool(ambiguity),
+    }
+
+
+def audit_practical_outcome(
+    entry: pd.Series,
+    outcome: pd.Series,
+    raw_prices: pd.DataFrame,
+    benchmark: pd.DataFrame,
+    sessions: pd.DatetimeIndex,
+) -> list[dict[str, Any]]:
+    """Compare persisted practical execution fields with an independent replay."""
+
+    entity = str(entry["Entry_ID"])
+    expected = _recompute_practical_outcome(entry, raw_prices, benchmark, sessions)
+    if expected is None:
+        return [_record(entity, "PRACTICAL_OUTCOME_RECOMPUTE", False, "unavailable", "complete raw replay")]
+
+    date_fields = ["Entry_Date", "Exit_Date"]
+    numeric_fields = [
+        "Entry_Open",
+        "Exit_Price",
+        "Gross_Return",
+        "Base_Net_Return",
+        "Stress_Net_Return",
+        "Severe_Net_Return",
+        "Gross_R",
+        "Base_Net_R",
+        "Stress_Net_R",
+        "Severe_Net_R",
+        "Benchmark_Return",
+        "Base_Practical_Excess_Return",
+        "Stress_Practical_Excess_Return",
+        "Severe_Practical_Excess_Return",
+    ]
+    checks: list[dict[str, Any]] = []
+    for field in date_fields:
+        checks.append(
+            _record(
+                entity,
+                f"PRACTICAL_{field.upper()}",
+                pd.Timestamp(outcome.get(field)).normalize() == pd.Timestamp(expected[field]).normalize(),
+                _date_text(outcome.get(field)),
+                _date_text(expected[field]),
+            )
+        )
+    checks.extend(
+        [
+            _record(entity, "PRACTICAL_ENTRY_OPEN", _same_number(outcome.get("Entry_Open"), expected["Entry_Open"]), outcome.get("Entry_Open"), expected["Entry_Open"]),
+            _record(entity, "PRACTICAL_EXIT_PRICE", _same_number(outcome.get("Exit_Price"), expected["Exit_Price"]), outcome.get("Exit_Price"), expected["Exit_Price"]),
+            _record(entity, "PRACTICAL_EXIT_REASON", outcome.get("Exit_Reason") == expected["Exit_Reason"], outcome.get("Exit_Reason"), expected["Exit_Reason"]),
+        ]
+    )
+    for field in numeric_fields[2:]:
+        checks.append(
+            _record(
+                entity,
+                f"PRACTICAL_{field.upper()}",
+                _same_number(outcome.get(field), expected[field]),
+                outcome.get(field),
+                expected[field],
+            )
+        )
+    observed_ambiguity = outcome.get("Same_Bar_Stop_Target_Ambiguity")
+    ambiguity_passed = (
+        isinstance(observed_ambiguity, (bool, np.bool_))
+        and bool(observed_ambiguity) == bool(expected["Same_Bar_Stop_Target_Ambiguity"])
+    )
+    checks.append(
+        _record(
+            entity,
+            "PRACTICAL_SAME_BAR_AMBIGUITY",
+            ambiguity_passed,
+            observed_ambiguity,
+            expected["Same_Bar_Stop_Target_Ambiguity"],
+        )
+    )
+    return checks
 
 
 def accounting_invariants(

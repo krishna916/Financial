@@ -116,6 +116,14 @@ def test_synthetic_rr1_run_preserves_accounting_and_incomplete_pairs(tmp_path):
     incomplete = diagnostics.loc[diagnostics["Primary_Complete"] == False, "Entry_ID"]  # noqa: E712
     assert incomplete.astype(str).str.contains("DDD").any()
     assert audit["Passed"].all()
+    checks = set(audit["Check"].astype(str))
+    assert "LOWER_LOCKOUT_REPLAY" in checks
+    assert "UPPER_LOCKOUT_REPLAY" in checks
+    assert "LENS_A_GROSS_RETURN" in checks
+    assert "PRACTICAL_EXIT_REASON" in checks
+    assert "PRACTICAL_BENCHMARK_RETURN" in checks
+    assert "UPPER_ENTRY_OPEN_RECOMPUTE" in checks
+    assert "UPPER_OUTCOME_GROSS_RETURN" in checks
     candidate_count = int(
         validation_summary.loc[
             validation_summary["Metric"] == "Range_Qualified_Sessions", "Value"

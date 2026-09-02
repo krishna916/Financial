@@ -906,6 +906,87 @@ def run_integrity_audit(
         rows.extend(audit_lower_entry(entry, raw_prices[str(entry["Symbol"])], membership, benchmark, sessions))
     for _, reference in upper_refs.iterrows():
         rows.extend(audit_upper_reference(reference, raw_prices[str(reference["Symbol"])], membership, sessions))
+    rows.extend(
+        audit_cohort_lockout(
+            lower_signals,
+            lower_entries,
+            lower_cancellations,
+            sessions,
+            "LOWER",
+        )
+    )
+    rows.extend(
+        audit_cohort_lockout(
+            upper_signals,
+            upper_refs,
+            upper_cancellations,
+            sessions,
+            "UPPER",
+        )
+    )
+
+    entry_by_id = {
+        str(row.Entry_ID): pd.Series(row._asdict())
+        for row in lower_entries.itertuples(index=False)
+    }
+    lens_a_by_id = {
+        str(row.Entry_ID): pd.Series(row._asdict())
+        for row in lens_a.itertuples(index=False)
+    }
+    practical_by_id = {
+        str(row.Entry_ID): pd.Series(row._asdict())
+        for row in practical.itertuples(index=False)
+    }
+    for entry_id in sorted(set(lens_a_by_id) | set(practical_by_id)):
+        entry = entry_by_id.get(entry_id)
+        lens_row = lens_a_by_id.get(entry_id)
+        practical_row = practical_by_id.get(entry_id)
+        if entry is None or lens_row is None or practical_row is None:
+            rows.append(
+                _record(
+                    entry_id,
+                    "COMPLETED_LOWER_OUTCOME_EVIDENCE",
+                    False,
+                    {
+                        "entry": entry is not None,
+                        "lens_a": lens_row is not None,
+                        "practical": practical_row is not None,
+                    },
+                    "entry + Lens A + practical rows all present",
+                )
+            )
+            continue
+        symbol_prices = raw_prices[str(entry["Symbol"])]
+        rows.extend(audit_lens_a_outcome(entry, lens_row, symbol_prices, benchmark, sessions))
+        rows.extend(audit_practical_outcome(entry, practical_row, symbol_prices, benchmark, sessions))
+
+    reference_by_id = {
+        str(row.Reference_ID): pd.Series(row._asdict())
+        for row in upper_refs.itertuples(index=False)
+    }
+    for row in upper_outcomes.itertuples(index=False):
+        outcome = pd.Series(row._asdict())
+        reference_id = str(outcome["Reference_ID"])
+        reference = reference_by_id.get(reference_id)
+        if reference is None:
+            rows.append(
+                _record(
+                    reference_id,
+                    "COMPLETED_UPPER_OUTCOME_EVIDENCE",
+                    False,
+                    "missing reference",
+                    "accepted upper reference exists",
+                )
+            )
+            continue
+        rows.extend(
+            audit_upper_outcome(
+                reference,
+                outcome,
+                raw_prices[str(reference["Symbol"])],
+                sessions,
+            )
+        )
     for name, passed in accounting_invariants(
         lower_signals, lower_entries, lower_cancellations, lens_a, practical,
         upper_signals, upper_refs, upper_cancellations, upper_outcomes, diagnostics,
